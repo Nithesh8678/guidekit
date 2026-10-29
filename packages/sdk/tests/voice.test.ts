@@ -23,14 +23,14 @@ class Recognition {
 }
 class Utterance { onstart: (() => void) | null = null; onend: (() => void) | null = null; onerror: (() => void) | null = null; lang = ''; rate = 1; voice: SpeechSynthesisVoice | null = null; constructor(readonly text: string) {} }
 const speechVoice = (voiceURI: string, name: string, lang = 'en-IN', isDefault = false) => ({ voiceURI, name, lang, default: isDefault, localService: true } as SpeechSynthesisVoice);
-function environment(options: { supported?: boolean; secure?: boolean; gesture?: boolean; voices?: SpeechSynthesisVoice[]; storage?: Map<string, string>; storageBlocked?: boolean } = {}) {
+function environment(options: { supported?: boolean; secure?: boolean; gesture?: boolean; voices?: SpeechSynthesisVoice[]; storage?: Map<string, string>; storageBlocked?: boolean; language?: string } = {}) {
   Recognition.instances = []; Recognition.throwOnStart = false;
   const statuses: string[] = []; const submissions: string[] = []; const attributes = new Map<string, string>(); const spoken: Utterance[] = []; let speechCancelled = 0;
   const mic = { disabled: false, title: '', setAttribute: (name: string, value: string) => attributes.set(name, value) };
   const speaking: boolean[] = [], listeners = new Set<() => void>(), storage = options.storage ?? new Map<string, string>(); let voices = options.voices ?? [speechVoice('samantha-enhanced', 'Samantha (Enhanced)')], settings!: VoiceSettingsState, handlers!: VoiceSettingsHandlers;
   const view = { mic, speaker: { disabled: false, title: '', setAttribute: (name: string, value: string) => attributes.set(`speaker:${name}`, value) }, input: { value: '', readOnly: false }, status: (text: string) => statuses.push(text), voiceProvider() {}, voiceRecording() {}, voiceSpeaking(value: boolean) { speaking.push(value); }, voiceSettings(state: VoiceSettingsState, events: VoiceSettingsHandlers) { settings = state; handlers = events; }, busy() {} } as unknown as View;
   const descriptors = new Map<string, PropertyDescriptor | undefined>();
-  for (const [key, value] of Object.entries({ window: { isSecureContext: options.secure ?? true, ...(options.supported === false ? {} : { webkitSpeechRecognition: Recognition }), localStorage: { getItem(key: string) { if (options.storageBlocked) throw new Error('Storage blocked'); return storage.get(key) ?? null; }, setItem(key: string, value: string) { if (options.storageBlocked) throw new Error('Storage blocked'); storage.set(key, value); } }, speechSynthesis: { getVoices: () => voices, addEventListener: (_name: string, callback: () => void) => listeners.add(callback), removeEventListener: (_name: string, callback: () => void) => listeners.delete(callback), speak: (utterance: Utterance) => spoken.push(utterance), cancel: () => { speechCancelled++; } } }, SpeechSynthesisUtterance: Utterance, navigator: { userActivation: { isActive: options.gesture ?? true }, language: 'en-US' }, document: { documentElement: { lang: 'en-IN' } } })) {
+  for (const [key, value] of Object.entries({ window: { isSecureContext: options.secure ?? true, ...(options.supported === false ? {} : { webkitSpeechRecognition: Recognition }), localStorage: { getItem(key: string) { if (options.storageBlocked) throw new Error('Storage blocked'); return storage.get(key) ?? null; }, setItem(key: string, value: string) { if (options.storageBlocked) throw new Error('Storage blocked'); storage.set(key, value); } }, speechSynthesis: { getVoices: () => voices, addEventListener: (_name: string, callback: () => void) => listeners.add(callback), removeEventListener: (_name: string, callback: () => void) => listeners.delete(callback), speak: (utterance: Utterance) => spoken.push(utterance), cancel: () => { speechCancelled++; } } }, SpeechSynthesisUtterance: Utterance, navigator: { userActivation: { isActive: options.gesture ?? true }, language: 'en-US' }, document: { documentElement: { lang: options.language ?? 'en-IN' } } })) {
     descriptors.set(key, Object.getOwnPropertyDescriptor(globalThis, key)); Object.defineProperty(globalThis, key, { value, configurable: true });
   }
   return { view, statuses, submissions, attributes, spoken, speaking, storage, settings: () => settings, handlers: () => handlers, listenerCount: () => listeners.size, voices(next: SpeechSynthesisVoice[]) { voices = next; for (const listener of [...listeners]) listener(); }, speechCancelled: () => speechCancelled, submit: (message: string) => submissions.push(message), restore: () => { for (const [key, descriptor] of descriptors) { if (descriptor) Object.defineProperty(globalThis, key, descriptor); else Reflect.deleteProperty(globalThis, key); } } };
@@ -146,6 +146,26 @@ test('automatic output prefers a matching-language enhanced voice over a default
     voice.toggleOutput(); assert.equal(voice.speak('A normal guide answer.'), true); assert.equal(state.spoken[0]!.voice?.voiceURI, 'enhanced'); assert.equal(state.spoken[0]!.lang, 'en-US'); assert.equal(state.spoken[0]!.rate, 0.98);
     voice.start(false); assert.equal(Recognition.instances[0]!.lang, 'en-IN'); assert.equal(state.storage.size, 0);
   } finally { voice.destroy(); state.restore(); }
+});
+
+test('generic English output favors Samantha over regional default Rishi while explicit regions and visitor choices win', () => {
+  const voices = [speechVoice('rishi', 'Rishi', 'en-IN', true), speechVoice('samantha', 'Samantha', 'en-US'), speechVoice('daniel', 'Daniel', 'en-GB')];
+  for (const [language, expected] of [['en', 'samantha'], ['en-IN', 'rishi']] as const) {
+    const state = environment({ voices, language }); const voice = new Voice(state.view, {}, state.submit);
+    try {
+      voice.toggleOutput(); voice.speak('Regional output preference'); assert.equal(state.spoken[0]!.voice?.voiceURI, expected);
+      state.handlers().choose('daniel'); voice.speak('Explicit visitor preference'); assert.equal(state.spoken[1]!.voice?.voiceURI, 'daniel');
+      voice.start(false); assert.equal(Recognition.instances[0]!.lang, language);
+    } finally { voice.destroy(); state.restore(); }
+  }
+  const state = environment({ voices, language: 'en', storage: new Map([[voicePreferenceKey, JSON.stringify({ voiceURI: '', language: 'en', rate: 0.95 })]]) });
+  const voice = new Voice(state.view, { output: { language: 'en-IN' } }, state.submit);
+  try { voice.toggleOutput(); voice.speak('Explicit host region'); assert.equal(state.spoken[0]!.voice?.voiceURI, 'rishi'); }
+  finally { voice.destroy(); state.restore(); }
+  const restored = environment({ voices, language: 'en', storage: new Map([[voicePreferenceKey, JSON.stringify({ voiceURI: '', language: 'en', rate: 0.95 })]]) });
+  const automatic = new Voice(restored.view, {}, restored.submit);
+  try { automatic.toggleOutput(); automatic.speak('Older rate-only preference'); assert.equal(restored.spoken[0]!.voice?.voiceURI, 'samantha'); }
+  finally { automatic.destroy(); restored.restore(); }
 });
 
 test('empty voice lists use text until a late voiceschanged event supplies a usable voice', () => {

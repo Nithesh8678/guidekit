@@ -35,11 +35,16 @@ export class Voice {
   private readonly voicesChanged = () => { if (!this.destroyed) this.refreshVoices(); };
   private readonly Constructor = (window as SpeechWindow).SpeechRecognition ?? (window as SpeechWindow).webkitSpeechRecognition;
   constructor(private readonly view: View, private readonly options: VoiceOptions, private readonly submit: (message: string) => void) {
-    this.defaultLanguage = languageTag(options.output?.language) ?? languageTag(document.documentElement.lang) ?? languageTag(navigator.language) ?? 'en-US';
+    const language = languageTag(options.output?.language) ?? languageTag(document.documentElement.lang) ?? languageTag(navigator.language) ?? 'en-US';
+    // A bare English page does not request the system's regional default voice.
+    // Prefer US English; explicit regions and a visitor's chosen voice still win.
+    this.defaultLanguage = language === 'en' ? 'en-US' : language;
     this.preference = { voiceURI: voiceId(options.output?.voiceURI) ? options.output!.voiceURI! : '', language: this.defaultLanguage, rate: speechRate(options.output?.rate) ? options.output!.rate! : 0.98 };
     if (options.output?.remember !== false) {
       try { const raw = window.localStorage.getItem(voicePreferenceKey); if (raw && raw.length <= 1024) this.preference = readVoicePreference(JSON.parse(raw)) ?? this.preference; } catch { /* Optional origin-local preferences can be unavailable. */ }
     }
+    if (!this.preference.voiceURI) this.preference.language = this.defaultLanguage;
+    else if (this.preference.language === 'en') this.preference.language = 'en-US';
     const unavailable = options.provider === 'disabled' ? 'Voice input is disabled for this assistant.' : !window.isSecureContext ? 'Voice input needs HTTPS or localhost. You can type instead.' : !this.Constructor ? 'Speech recognition is unavailable in this browser. Try Chrome or Edge with microphone access, or type your question.' : '';
     if (unavailable) { view.mic.disabled = true; view.mic.title = unavailable; view.mic.setAttribute('aria-label', unavailable); }
     else this.resetMic();
