@@ -21,7 +21,9 @@
     "audit:secrets": "node scripts/check-secrets.mjs",
     "backup": "node --import tsx scripts/backup.ts",
     "restore": "node --import tsx scripts/restore.ts",
-    "retention": "node --env-file-if-exists=.env --import tsx scripts/retention.ts"
+    "retention": "node --env-file-if-exists=.env --import tsx scripts/retention.ts",
+    "test:dashboard": "playwright test --config apps/dashboard/playwright.config.ts",
+    "test:dashboard:integration": "playwright test --config apps/dashboard/playwright.integration.config.ts"
   },
   "dependencies": {
     "@node-rs/argon2": "2.0.2",

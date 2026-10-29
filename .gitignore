@@ -11,3 +11,5 @@ playwright-report/
 *.log
 *.sqlite*
 .worktrees/
+.backups/
+*.tgz

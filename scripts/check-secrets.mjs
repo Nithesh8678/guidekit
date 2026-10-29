@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 const names = execFileSync('git', ['ls-files', '-z'], { encoding: 'utf8' }).split('\0').filter(Boolean);
-const forbidden = /(^|\/)(\.data|node_modules|artifacts|test-results|playwright-report)(\/|$)|(^|\/)\.env(\.|$)(?!example$)|\.(sqlite|db)(-|$)|auth\.json$/;
+const forbidden = /(^|\/)(\.data|\.backups|account-outbox|node_modules|artifacts|test-results|playwright-report)(\/|$)|(^|\/)\.env(\.|$)(?!example$)|\.(sqlite|db)(-|$)|auth\.json$|(^|\/)\.service\.lock$|\.restore\.lock$|\.secret$/;
 const secret = /(?:sk-[a-zA-Z0-9_-]{24,}|gh[pousr]_[a-zA-Z0-9]{30,}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----)/;
 let bad = 0;
 for (const name of names) {
