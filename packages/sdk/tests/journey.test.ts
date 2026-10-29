@@ -41,6 +41,17 @@ test('pause and pending host confirmation prevent speculative replanning or dupl
     state.journey.setPaused(false); state.scene(page(['next'])); context.mock.timers.tick(750); await settled(); assert.equal(state.requests.length, 1);
   } finally { state.journey.cancel(); context.mock.timers.reset(); }
 });
+test('host confirmation suspends an already queued continuation and rejects an obsolete in-flight response', async context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] }); let request!: JourneyRequest, signal!: AbortSignal, release!: (plan: JourneyPlan) => void; let rendered = 0;
+  const journey = new JourneyCoordinator('Save the record', { replan: (input, abort) => { request = input; signal = abort; return new Promise(resolve => { release = resolve; }); }, onPending() {}, onPlan: () => { rendered++; }, onError: assert.fail }, { id: 'journey_submit' });
+  try {
+    journey.adopt(plan(page(), journey.initial())); journey.observe(page(['loading']), '/save'); journey.setAwaitingHost(true);
+    context.mock.timers.tick(5000); assert.equal(request, undefined);
+    journey.setAwaitingHost(false); context.mock.timers.tick(750); assert.equal(signal.aborted, false);
+    journey.setAwaitingHost(true); assert.equal(signal.aborted, true); release(plan(page(['loading']), request)); await settled(); assert.equal(rendered, 0);
+    assert.equal(journey.segmentFinished({ reason: 'completed', verified: true }), false); assert.equal(journey.active, false);
+  } finally { journey.cancel(); context.mock.timers.reset(); }
+});
 test('cancel and superseding generations discard delayed inference responses', async context => {
   context.mock.timers.enable({ apis: ['setTimeout'] }); let release!: (plan: JourneyPlan) => void; let request!: JourneyRequest; let signal!: AbortSignal; let applied = 0;
   const journey = new JourneyCoordinator('Open settings', { replan: (input, abort) => { request = input; signal = abort; return new Promise(resolve => { release = resolve; }); }, onPending() {}, onPlan: () => { applied++; }, onError: assert.fail }, { id: 'journey_cancel' });

@@ -114,7 +114,12 @@ export class JourneyCoordinator {
     this.schedule('segment_completed'); return this.running;
   }
   resume(): void { if (this.running) this.schedule('user_resume'); }
-  setAwaitingHost(waiting: boolean): void { this.awaitingHost = waiting; }
+  setAwaitingHost(waiting: boolean): void {
+    if (!this.running || this.awaitingHost === waiting) return;
+    this.awaitingHost = waiting;
+    if (waiting) { this.pendingReason ??= this.activeReason; if (this.timer) clearTimeout(this.timer); this.timer = null; this.abort(); }
+    else if (this.pendingReason && !this.paused) this.schedule(this.pendingReason);
+  }
   setPaused(paused: boolean): void {
     if (!this.running) return;
     if (this.paused === paused) return;
@@ -128,14 +133,14 @@ export class JourneyCoordinator {
   private schedule(reason: JourneyReason): void {
     if (!this.running) return;
     this.pendingReason = reason;
-    if (this.paused) return;
+    if (this.paused || this.awaitingHost) return;
     if (this.timer) clearTimeout(this.timer);
     this.abort();
     this.timer = setTimeout(() => { this.timer = null; void this.replan(); }, 750);
   }
   private abort(): void { ++this.epoch; this.inFlight?.abort(); this.inFlight = null; }
   private async replan(): Promise<void> {
-    if (!this.running || this.paused || !this.pendingReason) return;
+    if (!this.running || this.paused || this.awaitingHost || !this.pendingReason) return;
     const reason = this.pendingReason; this.pendingReason = null;
     this.activeReason = reason;
     const key = `${reason}:${this.scene ? fingerprint(this.scene) : ''}:${this.sceneRoute}:${this.completed.length}`;
@@ -146,7 +151,7 @@ export class JourneyCoordinator {
     this.callbacks.onPending();
     try {
       const plan = await this.callbacks.replan(this.request(reason), controller.signal);
-      if (!this.running || this.paused || controller.signal.aborted || epoch !== this.epoch) return;
+      if (!this.running || this.paused || this.awaitingHost || controller.signal.aborted || epoch !== this.epoch) return;
       this.adopt(plan); this.requested.add(key); this.callbacks.onPlan(plan);
     } catch (error) {
       if (this.running && !controller.signal.aborted && epoch === this.epoch) this.fail(error instanceof Error ? error.message.slice(0, 500) : 'The next part of this task could not be planned.');

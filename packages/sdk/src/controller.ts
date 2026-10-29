@@ -198,13 +198,16 @@ export class Assistant implements GuideKitInstance {
     const { run, page, resolve } = plan;
     const container = this.view.message('assistant', run.answer, run.citations); this.view.knowledgeEvidence(container, run.knowledge, run.citations);
     const current = () => journey !== null && this.journey === journey && journey.active;
+    let submitting = false;
     const progress: NonNullable<GuideHooks['progress']> = (index, step, evidence) => { if (!current()) return; const target = page.targets.find(target => target.id === step.targetId); if (target) { journey!.record(index, { targetId: target.id, label: target.label, role: target.role, evidence }); this.sceneObserver?.refresh(); } };
     const hooks: GuideHooks | undefined = journey ? {
       progress,
       state: state => {
         if (!current()) return;
-        journey!.setPaused(state.paused); journey!.setAwaitingHost(state.confirmationPending && !journey!.canContinue);
-        if (state.confirmationPending && journey!.canContinue) { progress(state.index, state.step, 'observed'); journey!.expectTransition(); }
+        if (!state.confirmationPending) submitting = false;
+        else if (state.target && 'form' in state.target && (state.target as HTMLButtonElement).form && ['submit', 'image'].includes((state.target as HTMLButtonElement).type)) submitting = true;
+        journey!.setPaused(state.paused); journey!.setAwaitingHost(state.confirmationPending && (submitting || !journey!.canContinue));
+        if (state.confirmationPending && journey!.canContinue && !submitting) { progress(state.index, state.step, 'observed'); journey!.expectTransition(); }
         if (!state.paused) this.sceneObserver?.refresh();
       },
       finish: result => { if (!current()) return false; const handled = journey!.segmentFinished(result); if (handled) this.view.journeyTransition(() => { void this.cancel(); }); return handled; }
@@ -233,11 +236,15 @@ export class Assistant implements GuideKitInstance {
     this.view.offerJourneyResume(previous.goal, () => { void this.resumeJourney(previous); }, () => this.forgetJourney());
   }
   private async resumeJourney(memory: JourneyMemory): Promise<void> {
-    await this.cancel(false); if (this.destroyed) return;
+    const intent = ++this.intent;
+    await this.cancel(false, true); if (this.destroyed || intent !== this.intent) return;
+    const controller = new AbortController(); this.active = controller;
     try {
-      const page = await this.getPageContext(); if (this.destroyed) return;
+      const page = await this.collectPageContext(new ContextCollector(), controller.signal);
+      if (this.destroyed || intent !== this.intent || controller.signal.aborted) return;
       const journey = this.createJourney(memory.goal, memory, page); journey.seed(page, routeKey()); this.watchJourney(journey); this.view.journeyTransition(() => { void this.cancel(); }); journey.resume();
-    } catch (error) { if (!this.destroyed) { this.view.clearGuide(true); this.view.message('error', messageOf(error)); } }
+    } catch (error) { if (!this.destroyed && intent === this.intent && !controller.signal.aborted) { this.view.clearGuide(true); this.view.message('error', messageOf(error)); } }
+    finally { if (this.active === controller) this.active = null; }
   }
   private propose(run: RunResult, container: HTMLElement, session: Session): void {
     const action = run.action!; const registered = this.actions.get(action.name);
