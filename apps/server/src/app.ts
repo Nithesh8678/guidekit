@@ -306,7 +306,7 @@ export function createApp(options: AppOptions) {
     const ok = database && runtime.available && runtime.authenticated && graph;
     res.status(ok ? 200 : 503).json({ ok, checks: { database, runtime: runtime.available && runtime.authenticated, graph }, provider: options.provider.id ?? 'codex' });
   });
-  app.use('/sdk', (_req, res, next) => { res.set('Cross-Origin-Resource-Policy', 'cross-origin'); res.set('Access-Control-Allow-Origin', '*'); next(); }, express.static(resolve(root, 'dist/sdk'), { dotfiles: 'deny', index: false }));
+  app.use('/sdk', (req, res, next) => { res.set('Cross-Origin-Resource-Policy', 'cross-origin'); res.set('Access-Control-Allow-Origin', '*'); res.set('Cache-Control', /^\/releases\/[a-f0-9]{24}\/(guidekit\.(js|mjs)|manifest\.json)$/.test(req.path) ? 'public, max-age=31536000, immutable' : 'no-cache'); next(); }, express.static(resolve(root, 'dist/sdk'), { dotfiles: 'deny', index: false, cacheControl: false }));
   app.use(express.static(resolve(root, 'dist/dashboard'), { dotfiles: 'deny', index: 'index.html' }));
   app.use((req, res) => { if (req.path.startsWith('/api/')) res.status(404).json({ error: 'Endpoint not found.' }); else res.status(404).send('GuideKit is not built yet. Run npm run build, then npm start.'); });
   app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
