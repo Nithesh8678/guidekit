@@ -19,6 +19,15 @@ export interface VoiceOptions {
   hotkeyStartsListening?: boolean;
   /** Defaults to true for shortcut/API voice; microphone dictation defaults to review. */
   autoSubmit?: boolean;
+  /** Browser TTS preferences. These do not change speech recognition or enable the microphone. */
+  output?: {
+    voiceURI?: string;
+    language?: string;
+    /** Between 0.8 and 1.2; defaults to a relaxed 0.98. */
+    rate?: number;
+    /** Store only voice URI/language/rate on this origin. Defaults to true. */
+    remember?: boolean;
+  };
 }
 export interface MountOptions {
   agentId: string;
