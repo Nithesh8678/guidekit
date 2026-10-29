@@ -6,7 +6,7 @@ Start the saved production build with `npm start` from the project folder. The d
 
 1. Open the dashboard. Use your existing account, or create your own workspace. Create a CRM agent with the CRM starting capabilities.
 2. In Knowledge choose **Use CRM example**, then **Add document**. Check Setup contains the CRM origin `http://127.0.0.1:4411` and the actions `create_contact` and `update_contact_status`. Save and **Publish agent**.
-3. In Install, check TigerGraph's actual connection status. If configured and connected, click **Sync published version to TigerGraph** and wait for confirmed vertex and relationship counts. Repeat after every new publication. If disconnected, it is not a live sponsor integration yet. Configured but unsynced/offline graph requests fail visibly.
+3. Publishing prepares TigerGraph before activating the candidate. Wait for the ready/active confirmation, then check Install → Setup diagnostics and Publication versions. A failed candidate leaves the previous version active; use Retry preparation after fixing connectivity. Inspect a version to see its immutable source snapshot, or activate an earlier ready version to roll back.
 4. Copy the installation snippet. Open http://127.0.0.1:4411/?install=manual . Initially there must be no assistant launcher and the page says **SDK not loaded**.
 5. Paste the snippet and click **Install SDK**. Wait for **Connected**, the correct agent name, published version and permitted action count. The actual SDK and session API are used; a failed connection must show an error.
 
@@ -25,6 +25,18 @@ If voice is unsupported, the microphone is disabled with a reason and typed chat
 
 ## Show TigerGraph's contribution
 
-Add two short documents to a test agent: **Invoice routing** with `Invoice questions use the billing workflow.`, and **Statement exports** with `Billing statement exports are available to workspace owners.` Publish, sync that version, then open a fresh website session and ask **What should I know about an invoice?** The graph can connect both sources through `billing`, including the second document that never says `invoice`. Expand **TigerGraph relationships** in the answer to see document → concept → related document evidence. Relationship paths explain retrieval; source excerpts support the answer's facts.
+Add two short documents to a test agent: **Invoice routing** with `Invoice questions use the billing workflow.`, and **Statement exports** with `Billing statement exports are available to workspace owners.` Publish and wait for that version to become ready, then open a fresh website session and ask **What should I know about an invoice?** The graph can connect both sources through `billing`, including the second document that never says `invoice`. Expand **TigerGraph relationships** in the answer to see document → concept → related document evidence. Relationship paths explain retrieval; source excerpts support the answer's facts.
 
 The same SDK works on the support website with a separately configured support agent and its own knowledge, origins and `create_ticket` action. Test it after the CRM flow; the core platform is independent of either host.
+
+## Platform and recovery checks
+
+- Edit a knowledge document, save it, and inspect an earlier version in Install. Its source text must stay frozen. Use Knowledge → Test published knowledge to preview matching sources without a model call; temporary expected-document cases measure retrieval only.
+- Publish a new version, activate an earlier ready version and inspect new versus already-pinned website sessions. Unpublish stops new sessions; existing sessions retain their version. Do this on a separate test agent, since it intentionally changes availability.
+- Open Account & team for profile, password, session revocation, invitations, roles, workspace switching and audit. Local account links arrive in the private operator outbox under the selected data directory, not in an external mailbox. Never share its contents. Use separate synthetic accounts for role/recovery experiments.
+- Install supplies a content-hash script URL, integrity and anonymous crossorigin. Copy the complete snippet into the installation lab. An altered integrity value must fail to load. Keep a prior release path for host rollback.
+- Activity shows real request outcomes plus workspace request capacity and aggregate per-agent durations. Development speech/model fixtures are explicitly separate from live checks.
+- Follow [operations.md](operations.md) for online backup, private archive verification, guarded offline restore and history retention. Test restore into a new disposable directory; never experiment on your only live copy.
+- Cutroom's separately committed `feat/guidekit-integration` branch has an opt-in connection in Provider and privacy settings. Follow that checkout's `docs/guidekit-integration.md`; its temporary demo on port 5373 uses a separate workspace and does not open your existing media.
+
+Automated checks: `npm run check`, `npm run test:e2e`, `npm run test:dashboard`, and `npm run test:dashboard:integration`. Run browser suites sequentially because some share fixture ports. The optional `npm run test:live` uses the local subscription; `npm run test:graph` checks the configured real graph with synthetic scopes. Physical speech quality, real input methods and packaged-device behavior remain separate human/device checks.
