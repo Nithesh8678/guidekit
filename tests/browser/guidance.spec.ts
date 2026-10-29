@@ -9,6 +9,10 @@ const nameField = (page: Page) => page.locator('[data-guidekit-id="contact-name"
 const companyField = (page: Page) => page.locator('[data-guidekit-id="contact-company"]');
 const annotation = (page: Page) => page.locator('[data-guidekit-root] [data-gk-annotation]');
 const shape = (page: Page) => page.locator('[data-guidekit-root] [data-gk-shape]');
+const cursor = (page: Page) => page.locator('[data-guidekit-root] [data-gk-cursor]');
+async function noTargetMark(page: Page) {
+  await expect(shape(page)).toHaveCount(0); await expect(annotation(page)).toHaveCount(1);
+}
 
 const test = base.extend<{ browserErrors: string[] }>({
   browserErrors: [async ({ page }, use) => {
@@ -284,13 +288,17 @@ test('retained SVG follows scroll, resize and an ancestor transform without bloc
   const ordered = [...intervals].sort((a, b) => a - b), percentile = (p: number) => ordered[Math.min(ordered.length - 1, Math.floor(ordered.length * p))]!;
   expect(intervals.length).toBeGreaterThan(20);
   console.log(JSON.stringify({ fixture: 'synthetic-provider / Chromium / normal motion', rafSampleCount: intervals.length, rafP50Ms: Number(percentile(0.5).toFixed(2)), rafP95Ms: Number(percentile(0.95).toFixed(2)), maxSettledAlignmentErrorCssPx: Number(Math.max(...alignment).toFixed(3)), syntheticAskRoundTripMs: Number(response.request().timing().responseEnd.toFixed(2)) }));
-  await guide(page).getByRole('button', { name: 'Stop visual guidance', exact: true }).click(); await expect(annotation(page)).toHaveCount(0);
-  await page.waitForTimeout(1_600); await expect(annotation(page)).toHaveCount(0); await expect(chat(page)).toBeVisible();
+  await guide(page).getByRole('button', { name: 'Stop visual guidance', exact: true }).click(); await noTargetMark(page);
+  await page.waitForTimeout(1_600); await noTargetMark(page); await expect(chat(page)).toBeVisible();
   await root.dispose(); await retained.dispose();
 });
 
 test('reduced motion draws settled marks immediately and cancellation leaves no ghost annotation', async ({ page }) => {
-  await page.emulateMedia({ reducedMotion: 'reduce' }); await openFixture(page); await askForGuide(page);
+  await page.emulateMedia({ reducedMotion: 'reduce' }); await openFixture(page);
+  await expect(cursor(page)).toHaveAttribute('data-gk-cursor-location', 'docked'); await expect.poll(() => dockError(page)).toBeLessThan(1);
+  const retained = await annotation(page).elementHandle(); if (!retained) throw new Error('The docked SVG was not mounted.');
+  await askForGuide(page); await expect(cursor(page)).toHaveAttribute('data-gk-cursor-location', 'target');
+  expect(await annotation(page).evaluate((node, original) => node === original, retained)).toBe(true);
   await expect(shape(page)).toBeVisible(); await expect.poll(() => annotationError(page)).toBeLessThan(1.2);
   const offsets = await shape(page).locator('path[stroke-dashoffset]').evaluateAll(paths => paths.map(path => path.getAttribute('stroke-dashoffset')));
   expect(offsets.length).toBeGreaterThan(0); expect(offsets.every(offset => Number(offset) === 0)).toBe(true);
@@ -302,8 +310,9 @@ test('reduced motion draws settled marks immediately and cancellation leaves no 
   expect(after!.x - before!.x).toBeCloseTo(-40, 1);
   await expect.poll(() => annotationError(page)).toBeLessThan(1.2);
   await nameField(page).click(); await expect(nameField(page)).toBeFocused();
-  await page.keyboard.press('Escape'); await expect(annotation(page)).toHaveCount(0); await expect(chat(page)).toBeVisible();
-  await page.waitForTimeout(2_700); await expect(annotation(page)).toHaveCount(0); await expect(guide(page)).toHaveCount(0);
+  await page.keyboard.press('Escape'); await noTargetMark(page); await expect(chat(page)).toBeVisible();
+  await expect(cursor(page)).toHaveAttribute('data-gk-cursor-location', 'docked'); await expect.poll(() => dockError(page)).toBeLessThan(1);
+  await page.waitForTimeout(2_700); await noTargetMark(page); await expect(guide(page)).toHaveCount(0); await retained.dispose();
 });
 
 for (const mutation of ['duplicate ID', 'changed label'] as const) test(`grounding rejects a ${mutation} instead of keeping a stale annotation`, async ({ page }) => {
@@ -314,7 +323,7 @@ for (const mutation of ['duplicate ID', 'changed label'] as const) test(`groundi
   }, mutation);
   await expect(shape(page)).toBeHidden(); await expect(guide(page)).toHaveCount(0); await expect(chat(page)).toBeVisible();
   await expect(page.getByText('That control changed or is no longer visible. Ask again to refresh the guide.', { exact: true })).toBeVisible();
-  await expect(annotation(page)).toHaveCount(0);
+  await noTargetMark(page);
 });
 
 test('a delayed answer cannot annotate controls after same-origin path navigation', async ({ page }) => {
@@ -328,7 +337,7 @@ test('a delayed answer cannot annotate controls after same-origin path navigatio
     await page.evaluate(() => history.pushState({}, '', '/changed-scene'));
     release();
     await expect(page.getByText('The page changed while the assistant was thinking. Ask again for the current page.', { exact: true })).toBeVisible();
-    await expect(guide(page)).toHaveCount(0); await expect(annotation(page)).toHaveCount(0); await expect(chat(page)).toBeVisible();
+    await expect(guide(page)).toHaveCount(0); await noTargetMark(page); await expect(chat(page)).toBeVisible();
   } finally { release(); await page.unrouteAll({ behavior: 'wait' }); }
 });
 
@@ -351,23 +360,153 @@ test('speech beats release drawing on playback start, bound fallback, and ignore
   await page.getByRole('button', { name: 'Read answers aloud using your browser', exact: true }).click();
   await askForGuide(page);
   await expect.poll(() => page.evaluate(() => (window as unknown as BeatWindow).__guidekitBeatDouble.texts.length)).toBe(1);
-  await page.waitForTimeout(500); await expect(annotation(page)).toBeHidden();
+  await page.waitForTimeout(500); await expect(shape(page)).toBeHidden();
   await page.evaluate(() => (window as unknown as BeatWindow).__guidekitBeatDouble.fire(0, 'start'));
   await expect(shape(page)).toBeVisible(); await expect(shape(page)).toHaveAttribute('data-gk-mark', /contact-name/);
   await guide(page).getByRole('button', { name: 'Next', exact: true }).click(); await step(page, 2);
   await expect.poll(() => page.evaluate(() => (window as unknown as BeatWindow).__guidekitBeatDouble.texts.length)).toBe(2);
   await page.evaluate(() => { const beats = (window as unknown as BeatWindow).__guidekitBeatDouble; beats.fire(0, 'start'); beats.fire(0, 'end'); });
-  await page.waitForTimeout(200); await expect(annotation(page)).toBeHidden();
+  await page.waitForTimeout(200); await expect(shape(page)).toBeHidden();
   await page.evaluate(() => (window as unknown as BeatWindow).__guidekitBeatDouble.fire(1, 'start'));
   await expect(shape(page)).toBeVisible(); await expect(shape(page)).toHaveAttribute('data-gk-mark', /contact-company/);
   await guide(page).getByRole('button', { name: 'Next', exact: true }).click(); await step(page, 3);
-  await expect(annotation(page)).toBeHidden();
-  await expect(annotation(page)).toBeVisible({ timeout: 4_000 });
+  await expect(shape(page)).toBeHidden();
+  await expect(shape(page)).toBeVisible({ timeout: 4_000 });
   await expect(shape(page)).toHaveAttribute('data-gk-mark', /contact-status/);
   await guide(page).getByRole('button', { name: 'Next', exact: true }).click(); await step(page, 4);
   await expect.poll(() => page.evaluate(() => (window as unknown as BeatWindow).__guidekitBeatDouble.texts.length)).toBe(4);
   await guide(page).getByRole('button', { name: 'Stop visual guidance', exact: true }).click();
   await page.evaluate(() => { const beats = (window as unknown as BeatWindow).__guidekitBeatDouble; beats.fire(3, 'start'); beats.fire(3, 'end'); beats.fire(2, 'error'); });
-  await page.waitForTimeout(2_700); await expect(annotation(page)).toHaveCount(0); await expect(guide(page)).toHaveCount(0); await expect(chat(page)).toBeVisible();
+  await page.waitForTimeout(2_700); await noTargetMark(page); await expect(guide(page)).toHaveCount(0); await expect(chat(page)).toBeVisible();
   expect(await page.evaluate(() => (window as unknown as BeatWindow).__guidekitBeatDouble.cancelled)).toBeGreaterThan(0);
+});
+
+interface CursorFrame { time: number; x: number; y: number; location: string; ink: boolean; }
+async function dockError(page: Page): Promise<number> {
+  return page.evaluate(() => {
+    const root = document.querySelector('[data-guidekit-root]')?.shadowRoot;
+    const badge = root?.querySelector('[data-gk-cursor-dock]'), cursor = root?.querySelector<SVGGraphicsElement>('[data-gk-cursor]');
+    const matrix = cursor?.getScreenCTM(); if (!badge || !matrix) return 999;
+    const center = badge.getBoundingClientRect(), point = new DOMPoint(0, 0).matrixTransform(matrix);
+    return Math.hypot(point.x - center.left - center.width / 2, point.y - center.top - center.height / 2);
+  });
+}
+async function visibleDock(page: Page) {
+  await expect(cursor(page)).toHaveAttribute('data-gk-cursor-location', 'docked'); await expect.poll(() => dockError(page)).toBeLessThan(1);
+  expect(await annotation(page).evaluate(svg => {
+    const cursor = svg.querySelector('[data-gk-cursor]'); if (!cursor) return false;
+    return getComputedStyle(svg).visibility === 'visible' && Number(getComputedStyle(svg).opacity) > 0.99 && Number(getComputedStyle(cursor).opacity) > 0.99 && [...cursor.querySelectorAll('[data-gk-cursor-surface]')].some(surface => Number(getComputedStyle(surface).opacity) > 0.5);
+  }), 'The dock cursor is painted at full opacity, not merely mounted').toBe(true);
+}
+async function cursorFrames(page: Page, durationMs: number): Promise<CursorFrame[]> {
+  return page.evaluate(duration => new Promise<CursorFrame[]>(resolve => {
+    const frames: CursorFrame[] = []; let started: number | undefined;
+    const frame = (time: number) => {
+      started ??= time;
+      const root = document.querySelector('[data-guidekit-root]')?.shadowRoot, cursor = root?.querySelector<SVGGraphicsElement>('[data-gk-cursor]');
+      const matrix = cursor?.getScreenCTM(), mark = root?.querySelector('[data-gk-shape]');
+      if (cursor && matrix) {
+        const point = new DOMPoint(0, 0).matrixTransform(matrix);
+        const ink = !!mark && getComputedStyle(mark).visibility !== 'hidden' && Number(getComputedStyle(mark).opacity) > 0 && [...mark.querySelectorAll('path[stroke-dashoffset]')].some(path => Number(path.getAttribute('stroke-dashoffset')) < 0.999);
+        frames.push({ time, x: point.x, y: point.y, location: cursor.getAttribute('data-gk-cursor-location') ?? '', ink });
+      }
+      if (time - started >= duration) resolve(frames); else requestAnimationFrame(frame);
+    };
+    requestAnimationFrame(frame);
+  }), durationMs);
+}
+async function holdAnswer(page: Page) {
+  let release!: () => void, fetched!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; }), ready = new Promise<void>(resolve => { fetched = resolve; });
+  const handler = async (route: import('@playwright/test').Route) => {
+    const response = await route.fetch(); fetched(); await held;
+    // Explicit cancellation may abort the intercepted fetch before its fixture
+    // response is released. The stale-response branch must remain harmless.
+    await route.fulfill({ response }).catch(() => {});
+  };
+  await page.route('**/api/embed/session/ask', handler);
+  return { ready, release, dispose: async () => { release(); await page.unroute('**/api/embed/session/ask', handler); } };
+}
+function continuousDeparture(frames: CursorFrame[]) {
+  const docked = frames.filter(frame => frame.location === 'docked'), flying = frames.filter(frame => frame.location === 'flight');
+  expect(docked.length).toBeGreaterThan(0); expect(flying.length).toBeGreaterThan(3);
+  const start = docked.at(-1)!, first = flying[0]!;
+  expect(Math.hypot(first.x - start.x, first.y - start.y), 'Flight starts from the rendered dock point').toBeLessThan(5);
+  expect(new Set(flying.map(frame => `${Math.round(frame.x)},${Math.round(frame.y)}`)).size, 'Flight has intermediate positions').toBeGreaterThan(3);
+  expect(frames.some(frame => frame.location === 'flight' && frame.ink), 'First target stroke waits for cursor arrival').toBe(false);
+  expect(frames.some(frame => frame.location === 'target' && frame.ink)).toBe(true);
+}
+async function cursorInsideName(page: Page) {
+  return page.evaluate(() => {
+    const target = document.querySelector('[data-guidekit-id="contact-name"]'), cursor = document.querySelector('[data-guidekit-root]')?.shadowRoot?.querySelector<SVGGraphicsElement>('[data-gk-cursor]');
+    const matrix = cursor?.getScreenCTM(); if (!target || !matrix) return false;
+    const bounds = target.getBoundingClientRect(), point = new DOMPoint(0, 0).matrixTransform(matrix);
+    return point.x >= bounds.left && point.x <= bounds.right && point.y >= bounds.top && point.y <= bounds.bottom;
+  });
+}
+
+test('the same visible cursor departs its chat dock continuously, waits to draw, returns, and resumes', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'no-preference' }); await openFixture(page);
+  await visibleDock(page);
+  await expect(cursor(page)).toBeVisible(); const retained = await annotation(page).elementHandle();
+  if (!retained) throw new Error('The chat cursor surface was not mounted.');
+  const held = await holdAnswer(page);
+  try {
+    const asking = askForGuide(page); await held.ready;
+    await expect(chat(page)).toBeVisible(); await expect.poll(() => dockError(page)).toBeLessThan(1);
+    expect(await annotation(page).evaluate((node, original) => node === original, retained)).toBe(true);
+    const recorded = cursorFrames(page, 2_300); await page.waitForTimeout(60); held.release(); await asking;
+    const departure = await recorded; continuousDeparture(departure);
+    await expect(cursor(page)).toHaveAttribute('data-gk-cursor-location', 'target'); expect(await cursorInsideName(page)).toBe(true);
+    expect(await annotation(page).evaluate((node, original) => node === original, retained)).toBe(true);
+    await guide(page).getByRole('button', { name: 'Open chat', exact: true }).click();
+    await expect(chat(page)).toBeVisible(); await visibleDock(page); await noTargetMark(page);
+    const resumed = cursorFrames(page, 2_300); await page.waitForTimeout(60);
+    await page.getByRole('button', { name: 'Resume guide', exact: true }).click(); continuousDeparture(await resumed);
+    expect(await cursorInsideName(page)).toBe(true); await expect(chat(page)).toBeHidden();
+    expect(await annotation(page).evaluate((node, original) => node === original, retained)).toBe(true);
+  } finally { await held.dispose(); await retained.dispose(); }
+});
+
+test('paused target mutations cannot interrupt the cursor returning to its chat dock', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'no-preference' }); await openFixture(page); await askForGuide(page);
+  await expect(cursor(page)).toHaveAttribute('data-gk-cursor-location', 'target');
+  await guide(page).getByRole('button', { name: 'Open chat', exact: true }).click();
+  await expect(cursor(page)).toHaveAttribute('data-gk-cursor-location', 'flight');
+  await nameField(page).evaluate(input => input.setAttribute('hidden', ''));
+  await page.waitForTimeout(100);
+  await nameField(page).evaluate(input => { const replacement = input.cloneNode(true) as HTMLElement; replacement.removeAttribute('hidden'); input.replaceWith(replacement); });
+  await visibleDock(page); await noTargetMark(page); await expect(chat(page)).toBeVisible();
+  await page.getByRole('button', { name: 'Resume guide', exact: true }).click();
+  await expect(cursor(page)).toHaveAttribute('data-gk-cursor-location', 'target'); expect(await cursorInsideName(page)).toBe(true);
+  await expect.poll(() => annotationError(page)).toBeLessThan(1.2);
+});
+
+test('cursor flight retargets through viewport resize and scroll without jumping to stale coordinates', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'no-preference' }); await page.setViewportSize({ width: 1280, height: 760 }); await openFixture(page);
+  await page.evaluate(() => { const spacer = document.createElement('div'); spacer.style.height = '900px'; document.body.append(spacer); });
+  const held = await holdAnswer(page);
+  try {
+    const asking = askForGuide(page); await held.ready;
+    const recorded = cursorFrames(page, 2_700); await page.waitForTimeout(60); held.release(); await asking;
+    await expect(cursor(page)).toHaveAttribute('data-gk-cursor-location', 'flight');
+    await page.setViewportSize({ width: 1180, height: 760 }); await page.evaluate(() => window.scrollBy(0, 60));
+    const frames = await recorded;
+    const jumps = frames.slice(1).map((frame, index) => Math.hypot(frame.x - frames[index]!.x, frame.y - frames[index]!.y));
+    expect(Math.max(...jumps), 'Retargeting starts from the displayed cursor pose').toBeLessThan(50);
+    await expect(cursor(page)).toHaveAttribute('data-gk-cursor-location', 'target'); expect(await cursorInsideName(page)).toBe(true);
+    await expect.poll(() => annotationError(page)).toBeLessThan(1.2);
+    expect(frames.some(frame => frame.location === 'flight' && frame.ink)).toBe(false);
+  } finally { await held.dispose(); }
+});
+
+test('cancelling an active cursor flight returns to the dock and destroy prevents late marks', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'no-preference' }); await openFixture(page); await askForGuide(page);
+  await expect(cursor(page)).toHaveAttribute('data-gk-cursor-location', 'flight'); await page.keyboard.press('Escape');
+  await expect(chat(page)).toBeVisible(); await expect(cursor(page)).toHaveAttribute('data-gk-cursor-location', 'docked');
+  await expect.poll(() => dockError(page)).toBeLessThan(1); await noTargetMark(page);
+  await page.waitForTimeout(1_600); await noTargetMark(page);
+  await askForGuide(page); await expect(cursor(page)).toHaveAttribute('data-gk-cursor-location', 'flight');
+  await page.evaluate(() => window.GuideKit.destroy()); await expect(page.locator('[data-guidekit-root]')).toHaveCount(0);
+  await page.waitForTimeout(2_700); await expect(page.locator('[data-guidekit-root]')).toHaveCount(0);
 });
