@@ -6,7 +6,7 @@
 - Shared script/ESM browser SDK: bounded page context, safe text/citations, hotkey, anchored step guidance, explicit action cards, host validation/verification, scoped receipts, cancellation and browser speech controls.
 - Local official Codex app-server integration using existing ChatGPT authentication, dynamic catalog-default selection, capability restrictions and schema-constrained responses. No API key or paid fallback.
 - Independent CRM and support websites using the same compiled SDK with different agent IDs, knowledge and registered actions.
-- Socket Firewall-protected dependency installation, pinned GitHub Actions, secret/advisory checks and Dependabot.
+- Locked dependency installation without lifecycle scripts, pinned GitHub Actions, secret/advisory checks and Dependabot.
 
 ## Verified on 2026-10-29
 
@@ -23,6 +23,7 @@
 
 - This is a working local core, not a public hosted SaaS deployment or a completed enterprise security certification.
 - Browser-native voice controls are implemented; microphone/speaker audio has not been physically tested. Wispr API access and TigerGraph workflow relationships remain optional; neither is falsely represented as connected.
+- viaSocket was assessed as a suitable optional external-action provider. No viaSocket account, credentials, connected apps, remote action or provider-specific security behavior has been tested. See docs/viasocket.md.
 - Cutroom integration is the next host checkpoint. It must use its existing revision/idempotency and permission-aware editor commands. The current real proof uses CRM and support hosts.
 - Website business operations require developer-registered adapters and host authorization. No arbitrary-site, iframe/canvas or native-app full automation claim.
 - Visual/motion refinement, commercial provider/hosting design, teams/SSO and billing follow core acceptance.

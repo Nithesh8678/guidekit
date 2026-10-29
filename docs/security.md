@@ -14,6 +14,8 @@ Rate limits, bounded parallel inference, deadlines and cancellation limit accide
 
 ## Dependency protection
 
-GitHub CI uses Socket Firewall Free around `npm ci --ignore-scripts`, pinned to an immutable action commit. This blocks confirmed-malicious package downloads using Socket's service without an API key. It complements npm advisory checks, lockfiles, dependency updates, source review and tests; it does not establish application security or absence of unknown malicious code.
+GitHub CI runs `npm ci --ignore-scripts`, advisory and tracked-secret checks, type/build checks, unit/HTTP/runtime regressions and Chromium acceptance tests. Lockfiles and immutable action commits constrain dependencies; Dependabot proposes updates. These checks do not establish the absence of unknown malicious code.
 
-Sources: https://docs.socket.dev/docs/socket-firewall-free and https://github.com/SocketDev/action . The GitHub App integration is optional and is not claimed installed. Project runtime does not depend on Socket availability; CI intentionally fails if its protected install cannot complete.
+## Optional external action provider
+
+viaSocket is assessed in docs/viasocket.md, not connected. Any integration must retain host-side authorization, trusted tenant/user mapping, explicit approval and outcome verification. Its project signing secret and runnable script_id are credentials; they must never reach the model, public SDK, browser logs or repository. The public agent ID/origin-bound session does not authorize a visitor to use a company's connected accounts.

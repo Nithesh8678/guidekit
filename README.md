@@ -85,7 +85,7 @@ npm run test:e2e
 
 Unit, HTTP contract and Chromium acceptance tests use explicitly isolated test providers; the production app never falls back to those providers. The browser suite uses disposable workspaces on ports 4510–4512 and requires the production assets from `npm run build`. Browser and live-model verification status is recorded in [docs/status.md](docs/status.md). Build success alone is not evidence of working voice, model access, a hosted deployment, or production readiness.
 
-CI installs locked dependencies through [Socket Firewall Free](https://docs.socket.dev/docs/socket-firewall-free), runs advisory/secret checks, and executes the core checks. Actions are pinned to immutable commits; Dependabot proposes updates. The optional Socket GitHub App has not been installed.
+CI installs locked dependencies without lifecycle scripts, runs advisory/secret checks, and executes the core and Chromium acceptance checks. Actions are pinned to immutable commits; Dependabot proposes updates.
 
 ## Scope and next integrations
 
@@ -94,5 +94,7 @@ Core: authenticated developer workspaces, company-scoped knowledge, publishing, 
 Cutroom is a separate demonstration host. Its integration must use its command/revision and permission boundary; no editor runtime data or media belongs in this repository. A dedicated adapter is a next integration checkpoint after the core proof.
 
 TigerGraph workflow relationships and Wispr's approved embedded voice API remain optional follow-on work. Billing, teams/SSO, native apps, arbitrary-site automation, and a hosted commercial inference service are outside this local core. The SDK cannot bypass a host's permissions or access cross-origin iframe/canvas semantics automatically.
+
+[viaSocket](https://viasocket.com/developers/docs) is a suitable optional provider for company-connected app actions. Its API can sit behind an approved GuideKit action and an authenticated host backend. It is not connected or live-tested in this release; see the [integration assessment](docs/viasocket.md).
 
 See [product](docs/product.md), [architecture](docs/architecture.md), [API contracts](docs/contracts.md), [security](docs/security.md), and [runtime details](packages/runtime/README.md). MIT licensed.
