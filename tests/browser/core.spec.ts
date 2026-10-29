@@ -102,13 +102,13 @@ test('dashboard publication, private context, strict CSP and visual guidance rec
   await expect(guidance).toBeVisible();
   const target = host.locator('[data-guidekit-id="contact-name"]');
   await expect.poll(async () => {
-    const a = await target.boundingBox(), b = await host.locator('[data-guidekit-root] .highlight').boundingBox();
-    return a && b ? Math.abs(b.y - Math.max(3, a.y - 5)) : 999;
+    const a = await target.boundingBox(), b = await host.locator('[data-guidekit-root] [data-gk-shape]').boundingBox();
+    return a && b ? Math.abs(b.y - (Math.max(3, a.y - 5) - 5)) : 999;
   }).toBeLessThan(2);
   await host.evaluate(() => window.scrollBy(0, -80));
   await expect.poll(async () => {
-    const a = await target.boundingBox(), b = await host.locator('[data-guidekit-root] .highlight').boundingBox();
-    return a && b ? Math.abs(b.y - Math.max(3, a.y - 5)) : 999;
+    const a = await target.boundingBox(), b = await host.locator('[data-guidekit-root] [data-gk-shape]').boundingBox();
+    return a && b ? Math.abs(b.y - (Math.max(3, a.y - 5) - 5)) : 999;
   }).toBeLessThan(2);
   await host.evaluate(() => document.querySelector('[data-guidekit-id="contact-name"]')?.remove());
   await expect(guidance).toHaveCount(0);

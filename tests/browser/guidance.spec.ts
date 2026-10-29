@@ -7,6 +7,8 @@ const guide = (page: Page) => page.getByRole('region', { name: 'Visual guidance'
 const chat = (page: Page) => page.getByRole('dialog', { name: 'Website assistant', includeHidden: true });
 const nameField = (page: Page) => page.locator('[data-guidekit-id="contact-name"]');
 const companyField = (page: Page) => page.locator('[data-guidekit-id="contact-company"]');
+const annotation = (page: Page) => page.locator('[data-guidekit-root] [data-gk-annotation]');
+const shape = (page: Page) => page.locator('[data-guidekit-root] [data-gk-shape]');
 
 const test = base.extend<{ browserErrors: string[] }>({
   browserErrors: [async ({ page }, use) => {
@@ -26,8 +28,9 @@ async function askForGuide(page: Page) {
   await page.getByRole('textbox', { name: 'Your question', exact: true }).fill('Show me how to create a contact');
   const response = page.waitForResponse(response => response.url().endsWith('/api/embed/session/ask'));
   await page.getByRole('button', { name: 'Send question', exact: true }).click();
-  expect((await response).status()).toBe(200);
+  const answered = await response; expect(answered.status()).toBe(200);
   await expect(guide(page)).toBeVisible(); await step(page, 1); await expect(chat(page)).toBeHidden();
+  return answered;
 }
 async function openFixture(page: Page) {
   // This suite uses the existing explicit synthetic provider, not subscription inference.
@@ -201,4 +204,144 @@ test('a verified host result received while chat is open completes safely when t
   await expect(guide(page)).toHaveCount(0); await expect(chat(page)).toBeVisible();
   await expect(page.getByRole('log')).toContainText('The website confirmed the result.');
   await page.waitForTimeout(quietWindow); await expect(guide(page)).toHaveCount(0);
+});
+
+async function annotationError(page: Page, targetId = 'contact-name'): Promise<number> {
+  return page.evaluate(id => {
+    const target = document.querySelector(`[data-guidekit-id="${id}"]`), mark = document.querySelector('[data-guidekit-root]')?.shadowRoot?.querySelector('[data-gk-shape]');
+    if (!target || !mark || getComputedStyle(mark).visibility === 'hidden') return 999;
+    const bounds = target.getBoundingClientRect(), actual = mark.getBoundingClientRect();
+    const view = window.visualViewport, x = view?.offsetLeft ?? 0, y = view?.offsetTop ?? 0, width = view?.width ?? document.documentElement.clientWidth, height = view?.height ?? window.innerHeight;
+    const clamp = (value: number, low: number, high: number) => Math.max(low, Math.min(Math.max(low, high), value));
+    // View supplies a 5px-expanded/clamped target; target corner geometry adds
+    // another 5px. Measure coordinate error separately from authored padding.
+    const left = clamp(bounds.left - 5, x + 3, x + width - 3), top = clamp(bounds.top - 5, y + 3, y + height - 3);
+    const right = clamp(bounds.right + 5, left, x + width - 3), bottom = clamp(bounds.bottom + 5, top, y + height - 3);
+    return Math.max(Math.abs(actual.left - (left - 5)), Math.abs(actual.top - (top - 5)), Math.abs(actual.right - (right + 5)), Math.abs(actual.bottom - (bottom + 5)));
+  }, targetId);
+}
+async function frameIntervals(page: Page, durationMs: number): Promise<number[]> {
+  return page.evaluate(duration => new Promise<number[]>(resolve => {
+    const intervals: number[] = []; let previous: number | undefined, started: number | undefined;
+    const frame = (now: number) => {
+      started ??= now; if (previous !== undefined) intervals.push(now - previous); previous = now;
+      if (now - started >= duration) resolve(intervals); else requestAnimationFrame(frame);
+    };
+    requestAnimationFrame(frame);
+  }), durationMs);
+}
+
+test('retained SVG follows scroll, resize and an ancestor transform without blocking host clicks', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'no-preference' }); await page.setViewportSize({ width: 1280, height: 760 });
+  await openFixture(page);
+  await page.evaluate(() => { const spacer = document.createElement('div'); spacer.style.height = '900px'; document.body.append(spacer); });
+  const firstFrames = frameIntervals(page, 1_500), response = await askForGuide(page); await response.finished();
+  await expect(shape(page)).toBeVisible(); await expect(page.locator('[data-gk-cursor]')).toHaveCount(1);
+  const root = await annotation(page).elementHandle(), retained = await shape(page).elementHandle();
+  if (!root || !retained) throw new Error('The retained annotation surface was not mounted.');
+  const cursor = page.locator('[data-gk-cursor]'), initialCursor = await cursor.getAttribute('transform');
+  await expect.poll(() => cursor.getAttribute('transform')).not.toBe(initialCursor);
+  const intervals = await firstFrames, alignment: number[] = [];
+  await expect.poll(() => annotationError(page)).toBeLessThan(1.2); alignment.push(await annotationError(page));
+  expect(await annotation(page).evaluate(node => getComputedStyle(node).pointerEvents)).toBe('none');
+  expect(await annotation(page).evaluate(node => [...node.querySelectorAll('*')].every(child => child.getAttribute('pointer-events') === 'none'))).toBe(true);
+  await nameField(page).click(); await expect(nameField(page)).toBeFocused(); await step(page, 1);
+  await page.evaluate(() => window.scrollTo(0, 80)); expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
+  await expect.poll(() => annotationError(page)).toBeLessThan(1.2); alignment.push(await annotationError(page));
+  await page.locator('#contact-form').evaluate(async form => {
+    form.style.transition = 'transform 600ms linear'; await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+    form.style.transform = 'translate(-80px, 24px)'; await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+  });
+  await expect.poll(() => page.locator('#contact-form').evaluate(form => form.getAnimations().every(animation => animation.playState !== 'running'))).toBe(true);
+  await expect.poll(() => annotationError(page)).toBeLessThan(1.2); alignment.push(await annotationError(page));
+  expect(await shape(page).evaluate((node, original) => node === original, retained)).toBe(true);
+  await page.setViewportSize({ width: 1100, height: 760 });
+  await expect.poll(() => annotationError(page)).toBeLessThan(1.2); alignment.push(await annotationError(page));
+  const secondFrames = frameIntervals(page, 1_500);
+  await guide(page).getByRole('button', { name: 'Next', exact: true }).click(); await step(page, 2);
+  intervals.push(...await secondFrames); await expect.poll(() => annotationError(page, 'contact-company')).toBeLessThan(1.2);
+  alignment.push(await annotationError(page, 'contact-company'));
+  expect(await annotation(page).evaluate((node, original) => node === original, root)).toBe(true);
+  const ordered = [...intervals].sort((a, b) => a - b), percentile = (p: number) => ordered[Math.min(ordered.length - 1, Math.floor(ordered.length * p))]!;
+  expect(intervals.length).toBeGreaterThan(20);
+  console.log(JSON.stringify({ fixture: 'synthetic-provider / Chromium / normal motion', rafSampleCount: intervals.length, rafP50Ms: Number(percentile(0.5).toFixed(2)), rafP95Ms: Number(percentile(0.95).toFixed(2)), maxSettledAlignmentErrorCssPx: Number(Math.max(...alignment).toFixed(3)), syntheticAskRoundTripMs: Number(response.request().timing().responseEnd.toFixed(2)) }));
+  await guide(page).getByRole('button', { name: 'Stop visual guidance', exact: true }).click(); await expect(annotation(page)).toHaveCount(0);
+  await page.waitForTimeout(1_600); await expect(annotation(page)).toHaveCount(0); await expect(chat(page)).toBeVisible();
+  await root.dispose(); await retained.dispose();
+});
+
+test('reduced motion draws settled marks immediately and cancellation leaves no ghost annotation', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' }); await openFixture(page); await askForGuide(page);
+  await expect(shape(page)).toBeVisible(); await expect.poll(() => annotationError(page)).toBeLessThan(1.2);
+  const offsets = await shape(page).locator('path[stroke-dashoffset]').evaluateAll(paths => paths.map(path => path.getAttribute('stroke-dashoffset')));
+  expect(offsets.length).toBeGreaterThan(0); expect(offsets.every(offset => Number(offset) === 0)).toBe(true);
+  await nameField(page).click(); await expect(nameField(page)).toBeFocused();
+  await page.keyboard.press('Escape'); await expect(annotation(page)).toHaveCount(0); await expect(chat(page)).toBeVisible();
+  await page.waitForTimeout(2_700); await expect(annotation(page)).toHaveCount(0); await expect(guide(page)).toHaveCount(0);
+});
+
+for (const mutation of ['duplicate ID', 'changed label'] as const) test(`grounding rejects a ${mutation} instead of keeping a stale annotation`, async ({ page }) => {
+  await openFixture(page); await askForGuide(page); await expect(shape(page)).toBeVisible();
+  await nameField(page).evaluate((input, kind) => {
+    if (kind === 'duplicate ID') input.parentElement!.append(input.cloneNode(true));
+    else input.setAttribute('aria-label', 'Delete an unrelated project');
+  }, mutation);
+  await expect(shape(page)).toBeHidden(); await expect(guide(page)).toHaveCount(0); await expect(chat(page)).toBeVisible();
+  await expect(page.getByText('That control changed or is no longer visible. Ask again to refresh the guide.', { exact: true })).toBeVisible();
+  await expect(annotation(page)).toHaveCount(0);
+});
+
+test('a delayed answer cannot annotate controls after same-origin path navigation', async ({ page }) => {
+  await openFixture(page);
+  let release!: () => void, fetched!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; }), ready = new Promise<void>(resolve => { fetched = resolve; });
+  await page.route('**/api/embed/session/ask', async route => { const response = await route.fetch(); fetched(); await held; await route.fulfill({ response }); });
+  try {
+    await page.getByRole('textbox', { name: 'Your question', exact: true }).fill('Show me how to create a contact');
+    await page.getByRole('button', { name: 'Send question', exact: true }).click(); await ready;
+    await page.evaluate(() => history.pushState({}, '', '/changed-scene'));
+    release();
+    await expect(page.getByText('The page changed while the assistant was thinking. Ask again for the current page.', { exact: true })).toBeVisible();
+    await expect(guide(page)).toHaveCount(0); await expect(annotation(page)).toHaveCount(0); await expect(chat(page)).toBeVisible();
+  } finally { release(); await page.unrouteAll({ behavior: 'wait' }); }
+});
+
+interface BeatDouble { texts: string[]; cancelled: number; fire(index: number, event: 'start' | 'end' | 'error'): void; }
+type BeatWindow = Window & { __guidekitBeatDouble: BeatDouble };
+async function installBeatDouble(page: Page) {
+  // Playback callbacks are explicit test doubles, never a real mic/TTS claim.
+  await page.addInitScript(() => {
+    const callbacks: Array<{ start: (() => void) | null; end: (() => void) | null; error: (() => void) | null }> = [];
+    const state: BeatDouble = { texts: [], cancelled: 0, fire: (index, event) => callbacks[index]?.[event]?.() };
+    class Utterance { lang = ''; rate = 1; onstart: (() => void) | null = null; onend: (() => void) | null = null; onerror: (() => void) | null = null; constructor(readonly text: string) {} }
+    Object.defineProperty(window, 'SpeechSynthesisUtterance', { configurable: true, value: Utterance });
+    Object.defineProperty(window, 'speechSynthesis', { configurable: true, value: { speak: (utterance: Utterance) => { state.texts.push(utterance.text); callbacks.push({ start: utterance.onstart, end: utterance.onend, error: utterance.onerror }); }, cancel: () => { state.cancelled++; } } });
+    (window as unknown as BeatWindow).__guidekitBeatDouble = state;
+  });
+}
+
+test('speech beats release drawing on playback start, bound fallback, and ignore cancelled callbacks', async ({ page }) => {
+  await installBeatDouble(page); await openFixture(page);
+  await page.getByRole('button', { name: 'Read answers aloud using your browser', exact: true }).click();
+  await askForGuide(page);
+  await expect.poll(() => page.evaluate(() => (window as unknown as BeatWindow).__guidekitBeatDouble.texts.length)).toBe(1);
+  await page.waitForTimeout(500); await expect(annotation(page)).toBeHidden();
+  await page.evaluate(() => (window as unknown as BeatWindow).__guidekitBeatDouble.fire(0, 'start'));
+  await expect(shape(page)).toBeVisible(); await expect(shape(page)).toHaveAttribute('data-gk-mark', /contact-name/);
+  await guide(page).getByRole('button', { name: 'Next', exact: true }).click(); await step(page, 2);
+  await expect.poll(() => page.evaluate(() => (window as unknown as BeatWindow).__guidekitBeatDouble.texts.length)).toBe(2);
+  await page.evaluate(() => { const beats = (window as unknown as BeatWindow).__guidekitBeatDouble; beats.fire(0, 'start'); beats.fire(0, 'end'); });
+  await page.waitForTimeout(200); await expect(annotation(page)).toBeHidden();
+  await page.evaluate(() => (window as unknown as BeatWindow).__guidekitBeatDouble.fire(1, 'start'));
+  await expect(shape(page)).toBeVisible(); await expect(shape(page)).toHaveAttribute('data-gk-mark', /contact-company/);
+  await guide(page).getByRole('button', { name: 'Next', exact: true }).click(); await step(page, 3);
+  await expect(annotation(page)).toBeHidden();
+  await expect(annotation(page)).toBeVisible({ timeout: 4_000 });
+  await expect(shape(page)).toHaveAttribute('data-gk-mark', /contact-status/);
+  await guide(page).getByRole('button', { name: 'Next', exact: true }).click(); await step(page, 4);
+  await expect.poll(() => page.evaluate(() => (window as unknown as BeatWindow).__guidekitBeatDouble.texts.length)).toBe(4);
+  await guide(page).getByRole('button', { name: 'Stop visual guidance', exact: true }).click();
+  await page.evaluate(() => { const beats = (window as unknown as BeatWindow).__guidekitBeatDouble; beats.fire(3, 'start'); beats.fire(3, 'end'); beats.fire(2, 'error'); });
+  await page.waitForTimeout(2_700); await expect(annotation(page)).toHaveCount(0); await expect(guide(page)).toHaveCount(0); await expect(chat(page)).toBeVisible();
+  expect(await page.evaluate(() => (window as unknown as BeatWindow).__guidekitBeatDouble.cancelled)).toBeGreaterThan(0);
 });
