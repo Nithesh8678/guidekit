@@ -1,5 +1,6 @@
 import type { View } from './view';
 import type { VoiceOptions } from './types';
+import type { SpeechEvents } from './beats';
 
 interface RecognitionResult { isFinal: boolean; [index: number]: { transcript: string }; }
 interface RecognitionEvent { resultIndex: number; results: { length: number; [index: number]: RecognitionResult }; }
@@ -121,19 +122,22 @@ export class Voice {
     this.setOutput(!this.enabled); if (!this.enabled) this.stopSpeaking();
     this.view.status(this.enabled ? 'Spoken answers enabled using your browser.' : 'Spoken answers disabled.');
   }
-  speak(text: string): void {
-    if (!this.enabled || this.destroyed || !('speechSynthesis' in window)) return;
+  speak(text: string, events?: SpeechEvents): boolean {
+    if (!this.enabled || this.destroyed || !('speechSynthesis' in window)) return false;
     this.stopSpeaking();
     try {
       const utterance = new SpeechSynthesisUtterance(text.slice(0, 1800)); utterance.lang = document.documentElement.lang || navigator.language || 'en-US'; utterance.rate = 1;
-      this.utterance = utterance; utterance.onend = () => { if (this.utterance === utterance) this.utterance = null; };
-      utterance.onerror = () => { if (this.utterance === utterance) { this.utterance = null; this.view.status('Your browser could not play the spoken answer. You can read it above.', true); } };
-      window.speechSynthesis.speak(utterance);
-    } catch { this.utterance = null; this.view.status('Spoken answers are unavailable. You can read the answer above.', true); }
+      this.utterance = utterance;
+      utterance.onstart = () => { if (this.utterance === utterance && !this.destroyed) { this.view.voiceSpeaking(true); events?.onStart(); } };
+      utterance.onend = () => { if (this.utterance === utterance) { this.utterance = null; this.view.voiceSpeaking(false); events?.onEnd(); } };
+      utterance.onerror = () => { if (this.utterance === utterance) { this.utterance = null; this.view.voiceSpeaking(false); events?.onError(); this.view.status('Your browser could not play the spoken answer. You can read it above.', true); } };
+      window.speechSynthesis.speak(utterance); return true;
+    } catch { this.utterance = null; events?.onError(); this.view.status('Spoken answers are unavailable. You can read the answer above.', true); return false; }
   }
   stopSpeaking(): void {
+    this.view.voiceSpeaking(false);
     const utterance = this.utterance; this.utterance = null;
-    if (utterance) { utterance.onend = null; utterance.onerror = null; if ('speechSynthesis' in window) window.speechSynthesis.cancel(); }
+    if (utterance) { utterance.onstart = null; utterance.onend = null; utterance.onerror = null; if ('speechSynthesis' in window) window.speechSynthesis.cancel(); }
   }
   stop(): void { this.stopInput(); this.stopSpeaking(); }
   destroy(): void { this.stop(); this.destroyed = true; }

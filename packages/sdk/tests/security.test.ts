@@ -37,6 +37,8 @@ test('malformed runtime output fails closed before any UI or action execution', 
   const plan = { runId: 'run_1', answer: '<img src=x onerror=alert(1)>', steps: [], action: null, citations: [], provider: 'codex', version: 1 };
   assert.equal(parseRun(plan).answer, plan.answer); // Valid text remains text; the view never inserts it as HTML.
   assert.throws(() => parseRun({ ...plan, steps: [{ targetId: 'button[onclick]', text: 'Click here' }] }));
+  assert.equal(parseRun({ ...plan, steps: [{ targetId: 'export', text: 'Click Export', annotation: 'arrow' }] }).steps[0]?.annotation, 'arrow');
+  assert.throws(() => parseRun({ ...plan, steps: [{ targetId: 'export', text: 'Click Export', annotation: 'eval(code)' }] }));
   assert.throws(() => parseRun({ ...plan, action: { name: 'run', receiptId: 'receipt_1', reason: 'Do it', arguments: {}, requiresConfirmation: false } }));
   assert.throws(() => parsePublicAgent({ id: 'agent_1', version: 1, name: 'Agent', companyName: 'Company', greeting: 'Hello', accentColor: 'red;position:fixed', allowedActions: [] }));
 });

@@ -1,6 +1,6 @@
 # GuideKit
 
-A visual AI assistant platform for websites. Configure an agent with company knowledge, publish a version, and install the same browser SDK on your website. Visitors can ask questions, follow live highlights, and approve explicitly registered actions.
+A visual AI assistant platform for websites. Configure an agent with company knowledge, publish a version, and install the same browser SDK on your website. Visitors can ask questions, follow a guide that advances with their progress, and approve explicitly registered actions. Chat tucks away during guidance and returns when the guide finishes.
 
 The core runs locally and uses the developer's signed-in ChatGPT subscription through official Codex app-server. No model API key, credential extraction, or paid fallback is used. Public source does not expose your personal runtime as a hosted service.
 
@@ -47,7 +47,7 @@ Publish an agent with your website's exact origin allowed, then copy its install
 
 This core supports local HTTP website testing. HTTPS websites require an HTTPS SDK/runtime endpoint and an appropriate deployment/identity design; do not expose a personal subscription bridge to the internet.
 
-The hotkey is **Cmd/Ctrl + Shift + K**. The SDK reads bounded accessible labels, excludes private controls, strips query/hash parameters, and never captures a whole-page screenshot. Add `data-guidekit-id="stable-control-id"` to important controls and `data-guidekit-private` to sensitive areas. Basic answers and guidance can use discovered controls. Reliable business operations require host-registered actions.
+The hotkey is **Cmd/Ctrl + Shift + K**. The SDK reads bounded accessible labels, excludes private controls, strips query/hash parameters, and never captures a whole-page screenshot. Add `data-guidekit-id="stable-control-id"` to important controls and `data-guidekit-private` to sensitive areas. Basic answers and guidance can use discovered controls. Local SVG strokes and cursor flights follow the visitor's progress, with narration released on actual browser speech start. See the [guidance and motion design](docs/guidance-motion.md). Reliable business operations require host-registered actions.
 
 For actions, use the [SDK API](packages/sdk/README.md) and the complete [CRM host example](apps/demo/host.js). The host owns its authorization, validates arguments, respects cancellation and idempotency, and verifies the business result. GuideKit requires confirmation and records the reported outcome. The ESM build is available at `/sdk/guidekit.mjs`.
 

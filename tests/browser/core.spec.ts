@@ -60,12 +60,14 @@ async function openHost(page: Page, kind: 'crm' | 'support', id: string) {
 }
 
 async function ask(page: Page, message: string) {
+  const activeGuide = page.getByRole('region', { name: 'Visual guidance' });
+  if (await activeGuide.isVisible()) await activeGuide.getByRole('button', { name: 'Open chat', exact: true }).click();
   const request = page.waitForRequest(request => request.url().endsWith('/api/embed/session/ask'));
   const response = page.waitForResponse(response => response.url().endsWith('/api/embed/session/ask'));
   await page.getByRole('textbox', { name: 'Your question', exact: true }).fill(message);
   await page.getByRole('button', { name: 'Send question', exact: true }).click();
   expect((await response).status()).toBe(200);
-  await expect(page.getByRole('button', { name: 'Send question', exact: true })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Send question', exact: true, includeHidden: true })).toBeEnabled();
   return (await request).postDataJSON() as { page: { targets: { id: string; label: string }[]; actions: { name: string; inputSchema: unknown }[] } };
 }
 
@@ -100,13 +102,13 @@ test('dashboard publication, private context, strict CSP and visual guidance rec
   await expect(guidance).toBeVisible();
   const target = host.locator('[data-guidekit-id="contact-name"]');
   await expect.poll(async () => {
-    const a = await target.boundingBox(), b = await host.locator('[data-guidekit-root] .highlight').boundingBox();
-    return a && b ? Math.abs(b.y - Math.max(3, a.y - 5)) : 999;
+    const a = await target.boundingBox(), b = await host.locator('[data-guidekit-root] [data-gk-shape]').boundingBox();
+    return a && b ? Math.abs(b.y - (Math.max(3, a.y - 5) - 5)) : 999;
   }).toBeLessThan(2);
   await host.evaluate(() => window.scrollBy(0, -80));
   await expect.poll(async () => {
-    const a = await target.boundingBox(), b = await host.locator('[data-guidekit-root] .highlight').boundingBox();
-    return a && b ? Math.abs(b.y - Math.max(3, a.y - 5)) : 999;
+    const a = await target.boundingBox(), b = await host.locator('[data-guidekit-root] [data-gk-shape]').boundingBox();
+    return a && b ? Math.abs(b.y - (Math.max(3, a.y - 5) - 5)) : 999;
   }).toBeLessThan(2);
   await host.evaluate(() => document.querySelector('[data-guidekit-id="contact-name"]')?.remove());
   await expect(guidance).toHaveCount(0);
@@ -115,6 +117,8 @@ test('dashboard publication, private context, strict CSP and visual guidance rec
   expect(fresh.page.targets.some(target => target.id === 'contact-name')).toBe(false);
   await expect(guidance).toBeVisible();
   await noHorizontalOverflow(host);
+  await guidance.getByRole('button', { name: 'Open chat', exact: true }).click();
+  await expect(host.getByRole('dialog', { name: 'Website assistant' })).toBeVisible();
   const panel = await host.getByRole('dialog', { name: 'Website assistant' }).boundingBox();
   expect(panel).not.toBeNull(); expect(panel!.x).toBeGreaterThanOrEqual(0); expect(panel!.x + panel!.width).toBeLessThanOrEqual(390);
 });

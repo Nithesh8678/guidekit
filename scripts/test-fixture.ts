@@ -37,7 +37,7 @@ const provider: InferenceProvider = {
       action = { name: 'create_ticket', argumentsJson: JSON.stringify({ subject: 'Missing invoice', description: 'Please help locate the missing invoice.', priority: 'Normal' }), reason: 'Save the requested synthetic support request after approval.' };
     }
     const steps = /how|show/i.test(question)
-      ? page.targets.filter(target => ['contact-name', 'contact-company', 'create-contact', 'ticket-subject', 'create-ticket'].includes(target.id)).map(target => ({ targetId: target.id, text: `Use ${target.label}.` }))
+      ? page.targets.filter(target => ['contact-name', 'contact-company', 'contact-status', 'create-contact', 'ticket-subject', 'create-ticket'].includes(target.id)).map(target => ({ targetId: target.id, text: `Use ${target.label}.` }))
       : [];
     return JSON.stringify({ answer: action ? 'Review this proposed action. Nothing has been changed yet.' : citations[0]?.excerpt ?? 'Use the visible controls on this website.', steps, action, citationIds: citations.map(citation => citation.documentId) });
   },
