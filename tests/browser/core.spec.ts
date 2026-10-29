@@ -46,7 +46,7 @@ async function publishAgent(page: Page, kind: 'crm' | 'support') {
   await page.getByRole('button', { name: 'Add document', exact: true }).click();
   await expect(page.getByRole('button', { name: kind === 'crm' ? /^CRM handbook/ : /^Support handbook/ })).toBeVisible();
   await page.getByRole('button', { name: 'Publish agent', exact: true }).click();
-  await expect(page.getByText('Published. Your websites can now start sessions with this version.', { exact: true })).toBeVisible();
+  await expect(page.getByText('Live v1', { exact: true })).toBeVisible();
   return agent.id;
 }
 
