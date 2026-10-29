@@ -1,0 +1,33 @@
+# Local single-owner runtime only. Never attach public ingress or a tunnel.
+# Host networking preserves the server's enforced 127.0.0.1 listeners.
+# Linux supports it directly. Docker Desktop requires its host-networking setting.
+services:
+  guidekit:
+    build:
+      context: .
+      args:
+        CODEX_VERSION: "0.151.0"
+    init: true
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      GUIDEKIT_DATA_DIR: /app/.data
+      CODEX_HOME: /home/node/.codex
+      # Optional TigerGraph variables can be set explicitly by the operator.
+      # Do not commit tokens, copy .env into the image, or mount your whole home.
+    volumes:
+      - guidekit-data:/app/.data
+      - guidekit-codex:/home/node/.codex
+      - guidekit-backups:/app/.backups
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4410/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    stop_grace_period: 30s
+volumes:
+  guidekit-data:
+  guidekit-codex:
+  guidekit-backups:
