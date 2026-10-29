@@ -206,6 +206,25 @@ test('a verified host result received while chat is open completes safely when t
   await page.waitForTimeout(quietWindow); await expect(guide(page)).toHaveCount(0);
 });
 
+test('a loading submit control can change meaning and disappear while its real host result is pending', async ({ page }) => {
+  await openFixture(page);
+  await nameField(page).fill('Async Verified Name'); await companyField(page).fill('Async Verified Company');
+  await askForGuide(page); await manuallyAdvanceToButton(page);
+  await page.locator('#contact-form').evaluate(form => form.addEventListener('submit', event => { event.preventDefault(); event.stopImmediatePropagation(); }, { capture: true, once: true }));
+  await page.locator('[data-guidekit-id="create-contact"]').click();
+  await page.locator('[data-guidekit-id="create-contact"]').evaluate(button => {
+    button.textContent = 'Saving…'; button.setAttribute('hidden', '');
+    // Model a host's asynchronous save with the actual demo form handler. That
+    // handler persists and verifies the contact before reporting completion.
+    setTimeout(() => (document.querySelector('#contact-form') as HTMLFormElement).requestSubmit(), 2_300);
+  });
+  await page.waitForTimeout(1_500); await expect(guide(page)).toBeVisible(); await expect(chat(page)).toBeHidden();
+  await expect(page.locator('#contacts-list tr')).toHaveCount(0);
+  await expect(page.locator('#contacts-list tr')).toHaveCount(1); await expect(page.locator('#form-result')).toContainText('created and verified');
+  await expect(guide(page)).toHaveCount(0); await expect(chat(page)).toBeVisible();
+  await expect(page.getByRole('log')).toContainText('The website confirmed the result.');
+});
+
 async function annotationError(page: Page, targetId = 'contact-name'): Promise<number> {
   return page.evaluate(id => {
     const target = document.querySelector(`[data-guidekit-id="${id}"]`), mark = document.querySelector('[data-guidekit-root]')?.shadowRoot?.querySelector('[data-gk-shape]');
