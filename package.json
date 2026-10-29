@@ -20,7 +20,8 @@
     "check": "npm run typecheck && npm test && npm run build",
     "audit:secrets": "node scripts/check-secrets.mjs",
     "backup": "node --import tsx scripts/backup.ts",
-    "restore": "node --import tsx scripts/restore.ts"
+    "restore": "node --import tsx scripts/restore.ts",
+    "retention": "node --env-file-if-exists=.env --import tsx scripts/retention.ts"
   },
   "dependencies": {
     "@node-rs/argon2": "2.0.2",

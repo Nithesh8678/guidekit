@@ -22,7 +22,7 @@ export class Repository {
     const secretPath = join(dir, 'session.secret');
     if (!existsSync(secretPath)) writeFileSync(secretPath, randomBytes(48).toString('hex'), { mode: 0o600 });
     this.sessionSecret = readFileSync(secretPath, 'utf8');
-    this.db = new DatabaseSync(join(dir, 'guidekit.sqlite'));
+    this.db = new DatabaseSync(join(dir, 'guidekit.sqlite'), { timeout: 5000 });
     chmodSync(join(dir, 'guidekit.sqlite'), 0o600);
     this.db.exec(`
       PRAGMA journal_mode=WAL;
@@ -94,6 +94,7 @@ export class Repository {
   }
   addDocument(tenantId: string, agentId: string, input: { title: string; content: string }): KnowledgeDocument {
     const docs = this.documents(tenantId, agentId);
+    if (docs.some(doc => doc.content.replaceAll('\r\n', '\n').trim() === input.content.replaceAll('\r\n', '\n').trim())) throw new AppError(409, 'This source text is already in the knowledge base. Update the existing document instead.');
     if (docs.length >= 40 || docs.reduce((n, d) => n + Buffer.byteLength(d.content), 0) + Buffer.byteLength(input.content) > 2_000_000) throw new AppError(413, 'This agent supports 40 documents and 2 MB of source text.');
     const doc = { ...input, id: newId('doc'), createdAt: now() };
     this.db.prepare('INSERT INTO documents VALUES (?,?,?,?,?)').run(doc.id, agentId, doc.title, doc.content, doc.createdAt);
@@ -109,6 +110,7 @@ export class Repository {
   updateDocument(tenantId: string, agentId: string, id: string, input: { title: string; content: string }): KnowledgeDocument {
     const documents = this.documents(tenantId, agentId), previous = documents.find(doc => doc.id === id);
     if (!previous) throw new AppError(404, 'Document not found.');
+    if (documents.some(doc => doc.id !== id && doc.content.replaceAll('\r\n', '\n').trim() === input.content.replaceAll('\r\n', '\n').trim())) throw new AppError(409, 'This source text already belongs to another document.');
     if (documents.filter(doc => doc.id !== id).reduce((size, doc) => size + Buffer.byteLength(doc.content), 0) + Buffer.byteLength(input.content) > 2_000_000) throw new AppError(413, 'This agent supports 2 MB of source text.');
     this.db.prepare('UPDATE documents SET title=?,content=? WHERE id=? AND agent_id=?').run(input.title, input.content, id, agentId);
     this.db.prepare('UPDATE agents SET updated_at=? WHERE id=?').run(now(), agentId);

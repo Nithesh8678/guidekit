@@ -10,6 +10,7 @@ import { compileInputSchema } from '../../../packages/contracts/src/schema.js';
 import { createTigerGraphProvider, TigerGraphError, type TigerGraphProvider } from '../../../packages/graph/src/index.js';
 import { Repository, SqliteSessionStore, AppError, digest, newId, now } from './database.js';
 import { Publications } from './publications.js';
+import { retrieveEvidence } from './knowledge.js';
 import { localAccountDelivery, registerAccounts, type AccountDelivery } from './accounts.js';
 import { agentConfigSchema, askSchema, actionResultSchema, modelPlanSchema, type JourneyRequest, type PageContext, type Citation, type RunResult, type RuntimeStatus, type Workspace, type ModelProviderId } from '../../../packages/contracts/src/index.js';
 
@@ -20,7 +21,7 @@ export interface InferenceProvider {
   infer(input: { prompt: string; schema: Record<string, unknown>; signal?: AbortSignal }): Promise<string>;
   close(): Promise<void>;
 }
-export interface AppOptions { dataDir: string; provider: InferenceProvider; adminOrigins: Set<string>; root?: string; testing?: boolean; graph?: TigerGraphProvider; endpointOrigin?: string; demoOrigins?: { crm: string; support: string }; delivery?: AccountDelivery; }
+export interface AppOptions { dataDir: string; provider: InferenceProvider; adminOrigins: Set<string>; root?: string; testing?: boolean; graph?: TigerGraphProvider; endpointOrigin?: string; demoOrigins?: { crm: string; support: string }; delivery?: AccountDelivery; limits?: { dailyRuns?: number; activeSessions?: number }; }
 const email = z.string().trim().toLowerCase().email().max(200);
 const credentials = z.object({ email, password: z.string().min(1).max(256) }).strict();
 const registration = credentials.extend({ password: z.string().min(12).max(256), name: z.string().trim().min(2).max(100), companyName: z.string().trim().min(2).max(100) });
@@ -42,6 +43,7 @@ export function createApp(options: AppOptions) {
   const publications = new Publications(repo, options.graph);
   const inFlight = new Map<string, Promise<RunResult>>();
   const controllers = new Set<AbortController>();
+  const dailyRunLimit = options.limits?.dailyRuns ?? 500, activeSessionLimit = options.limits?.activeSessions ?? 100;
   const sessionsBusy = new Set<string>();
   const prune = setInterval(() => {
     repo.db.prepare('DELETE FROM dashboard_sessions WHERE expires < ?').run(Date.now());
@@ -107,7 +109,8 @@ export function createApp(options: AppOptions) {
   app.use('/api/agents', (req, res, next) => {
     if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
     const actor = workspace(req);
-    if (actor.role === 'viewer') throw new AppError(403, 'Viewers cannot change agents or publish versions. Ask a workspace admin for editor access.');
+    if (actor.role === 'viewer' && !/^\/[^/]+\/knowledge-(preview|evaluate)$/.test(req.path)) throw new AppError(403, 'Viewers cannot change agents or publish versions. Ask a workspace admin for editor access.');
+    if (/^\/[^/]+\/knowledge-(preview|evaluate)$/.test(req.path)) return next();
     const path = req.path, method = req.method;
     res.once('finish', () => { if (res.statusCode < 400) repo.audit(actor.tenant.id, actor.user.id, `agent.${method.toLowerCase()}`, path.split('/').filter(Boolean).slice(0, 4).join('/') || 'new', { status: res.statusCode }); });
     next();
@@ -125,6 +128,30 @@ export function createApp(options: AppOptions) {
   app.post('/api/agents/:id/versions/:number/retry', async (req, res) => res.json(await publications.prepare(workspace(req).tenant.id, String(req.params.id), versionNumber(req.params.number))));
   app.post('/api/agents/:id/versions/:number/activate', (req, res) => { const tenantId = workspace(req).tenant.id, agentId = String(req.params.id); publications.activate(tenantId, agentId, versionNumber(req.params.number)); res.json({ activeVersion: repo.agent(tenantId, agentId).publishedVersion }); });
   app.post('/api/agents/:id/unpublish', (req, res) => { repo.unpublish(workspace(req).tenant.id, String(req.params.id)); res.json({ activeVersion: null }); });
+  const previewSchema = z.object({ question: z.string().trim().min(1).max(500), version: z.number().int().positive().optional() }).strict();
+  app.post('/api/agents/:id/knowledge-preview', async (req, res) => {
+    const actor = workspace(req), agentId = String(req.params.id), agent = repo.agent(actor.tenant.id, agentId), input = previewSchema.parse(req.body), number = input.version ?? agent.publishedVersion;
+    if (!number) throw new AppError(400, 'Publish company knowledge before testing retrieval.');
+    const evidence = await retrieveEvidence(repo, options.graph, actor.tenant.id, agentId, number, input.question);
+    res.json({ version: number, ...evidence, sufficient: evidence.citations.length > 0, message: evidence.citations.length ? 'Source matches found. Review them for factual support before relying on an answer.' : 'No source matches. Add relevant knowledge before expecting a company-specific answer.' });
+  });
+  app.post('/api/agents/:id/knowledge-evaluate', async (req, res) => {
+    const actor = workspace(req), agentId = String(req.params.id), agent = repo.agent(actor.tenant.id, agentId);
+    const input = z.object({ version: z.number().int().positive().optional(), cases: z.array(z.object({ question: z.string().trim().min(1).max(500), expectedDocumentIds: z.array(z.string().max(160)).min(1).max(8) }).strict()).min(1).max(10) }).strict().parse(req.body), number = input.version ?? agent.publishedVersion;
+    if (!number) throw new AppError(400, 'Publish knowledge before evaluating.');
+    const sourceIds = new Set(repo.version(actor.tenant.id, agentId, number).documents.map(doc => doc.id));
+    if (input.cases.some(item => item.expectedDocumentIds.some(id => !sourceIds.has(id)))) throw new AppError(400, 'Expected documents must belong to this immutable snapshot.');
+    const results = [];
+    for (const item of input.cases) { const evidence = await retrieveEvidence(repo, options.graph, actor.tenant.id, agentId, number, item.question), ids = [...new Set(evidence.citations.map(c => c.documentId))], expected = [...new Set(item.expectedDocumentIds)], hits = ids.filter(id => expected.includes(id)).length, rank = ids.findIndex(id => expected.includes(id)); results.push({ question: item.question, retrievedDocumentIds: ids, recall: hits / expected.length, precision: ids.length ? hits / ids.length : 0, reciprocalRank: rank < 0 ? 0 : 1 / (rank + 1) }); }
+    res.json({ version: number, cases: results, meanRecall: results.reduce((sum, item) => sum + item.recall, 0) / results.length, meanReciprocalRank: results.reduce((sum, item) => sum + item.reciprocalRank, 0) / results.length, scope: 'retrieval-only; does not grade generated answers' });
+  });
+  app.get('/api/agents/:id/metrics', (req, res) => {
+    const actor = workspace(req), agentId = String(req.params.id); repo.agent(actor.tenant.id, agentId);
+    const day = `${new Date().toISOString().slice(0, 10)}T00:00:00.000Z`;
+    const rows = repo.rows('SELECT status,COUNT(*) AS count,ROUND(AVG(duration_ms)) AS averageDurationMs FROM runs WHERE tenant_id=? AND agent_id=? AND created_at>=? GROUP BY status', actor.tenant.id, agentId, day);
+    const workspaceRuns = Number(repo.row('SELECT COUNT(*) AS count FROM runs WHERE tenant_id=? AND created_at>=?', actor.tenant.id, day)!.count);
+    res.json({ periodStart: day, statuses: rows, workspaceUsage: { runs: workspaceRuns, dailyLimit: dailyRunLimit, remaining: Math.max(0, dailyRunLimit - workspaceRuns) } });
+  });
   app.get('/api/agents/:id/diagnostics', async (req, res) => {
     const tenantId = workspace(req).tenant.id, agent = repo.agent(tenantId, String(req.params.id));
     const detail = repo.detail(tenantId, agent.id), version = detail.versions.find(version => version.number === agent.publishedVersion);
@@ -184,6 +211,7 @@ export function createApp(options: AppOptions) {
     const agentId = String(req.params.agentId), published = repo.published(agentId);
     if (published.graphSource === 'tigergraph' && !options.graph) throw new AppError(503, 'This publication requires TigerGraph. Restore the server configuration.');
     if (!published.config.allowedOrigins.includes(req.get('origin')!)) throw new AppError(403, 'This website is not in the published agent’s allowed origins.');
+    if (Number(repo.row('SELECT COUNT(*) AS count FROM embed_sessions WHERE tenant_id=? AND expires>?', published.tenantId, Date.now())!.count) >= activeSessionLimit) throw new AppError(429, 'This workspace reached its active assistant session capacity. Retry after existing sessions expire.');
     const token = randomBytes(32).toString('base64url'), expiresAt = Date.now() + 900_000;
     repo.db.prepare('INSERT INTO embed_sessions VALUES (?,?,?,?,?,?,?)').run(newId('ses'), digest(token), published.tenantId, agentId, published.version, req.get('origin')!, expiresAt);
     res.json({ token, expiresAt, agent: { id: agentId, version: published.version, name: published.config.name, companyName: published.config.companyName, greeting: published.config.greeting, accentColor: published.config.accentColor, allowedActions: published.config.allowedActions } });
@@ -194,37 +222,25 @@ export function createApp(options: AppOptions) {
     if (new URL(input.page.url).origin !== sessionRow.origin) throw new AppError(400, 'Page context does not match the session website.');
     if (JSON.stringify(input.page.context).length > 12000 || JSON.stringify(input.page.actions).length > 18000) throw new AppError(413, 'Page context or action schemas are too large.');
     const existing = repo.row('SELECT * FROM runs WHERE session_id=? AND request_id=?', String(sessionRow.id), input.requestId);
+    const requestHash = digest(JSON.stringify(input));
     if (existing) {
-      if (existing.question !== input.message) throw new AppError(409, 'A request ID cannot be reused for a different question.');
+      if (existing.question !== input.message || (existing.request_hash && existing.request_hash !== requestHash)) throw new AppError(409, 'A request ID cannot be reused for a different question or page context.');
       if (existing.response) return res.json(JSON.parse(String(existing.response)));
       throw new AppError(409, existing.status === 'running' ? 'This question is already running.' : 'This request ended. Submit a new question.');
     }
+    if (Number(repo.row('SELECT COUNT(*) AS count FROM runs WHERE tenant_id=? AND created_at>=?', String(sessionRow.tenant_id), `${new Date().toISOString().slice(0, 10)}T00:00:00.000Z`)!.count) >= dailyRunLimit) throw new AppError(429, 'This workspace reached its daily model request capacity. Retry after 00:00 UTC or ask the operator to review the limit.');
     if (sessionsBusy.has(String(sessionRow.id)) || inFlight.size >= 2) throw new AppError(429, 'The assistant is busy. Wait for the current question to finish.');
     const runId = newId('run'), controller = new AbortController();
     controllers.add(controller); sessionsBusy.add(String(sessionRow.id));
     const abort = () => { if (!res.writableEnded) controller.abort(); };
     res.on('close', abort);
     const timer = setTimeout(() => controller.abort(), 110_000);
-    repo.db.prepare('INSERT INTO runs (id,session_id,tenant_id,agent_id,request_id,question,status,created_at) VALUES (?,?,?,?,?,?,?,?)').run(runId, String(sessionRow.id), String(sessionRow.tenant_id), String(sessionRow.agent_id), input.requestId, input.message, 'running', now());
+    const started = performance.now();
+    repo.db.prepare('INSERT INTO runs (id,session_id,tenant_id,agent_id,request_id,question,status,created_at,request_hash) VALUES (?,?,?,?,?,?,?,?,?)').run(runId, String(sessionRow.id), String(sessionRow.tenant_id), String(sessionRow.agent_id), input.requestId, input.message, 'running', now(), requestHash);
     const work = async (): Promise<RunResult> => {
       const published = repo.published(String(sessionRow.agent_id), Number(sessionRow.version));
       if (published.graphSource === 'tigergraph' && !options.graph) throw new AppError(503, 'This publication requires TigerGraph. Restore the server configuration.');
-      let citations: Citation[], knowledge: NonNullable<RunResult['knowledge']>;
-      if (options.graph) {
-        let evidence;
-        try { evidence = await options.graph.retrieve({ tenantId: String(sessionRow.tenant_id), agentId: String(sessionRow.agent_id), version: Number(sessionRow.version), question: input.message, limit: 8 }); }
-        catch { throw new AppError(502, 'TigerGraph knowledge retrieval could not complete. Check the integration and sync this published version before retrying.'); }
-        const sources = new Map(published.documents.map(document => [document.id, document]));
-        if (evidence.source !== 'tigergraph' || evidence.citations.length > 8 || evidence.paths.length > 32 || evidence.citations.some(citation => {
-          const source = sources.get(citation.documentId);
-          return !source || source.title !== citation.title || citation.excerpt.length < 1 || citation.excerpt.length > 900 || !source.content.includes(citation.excerpt);
-        }) || evidence.paths.some(path => path.nodes.length !== 3 || !sources.has(path.nodes[0]!) || !sources.has(path.nodes[2]!) || path.nodes[1]!.length > 64 || path.relation.length > 250)) throw new AppError(502, 'TigerGraph returned evidence outside this published knowledge snapshot. No answer was generated.');
-        citations = evidence.citations;
-        knowledge = { source: 'tigergraph', paths: evidence.paths };
-      } else {
-        citations = repo.retrieve(String(sessionRow.tenant_id), String(sessionRow.agent_id), Number(sessionRow.version), input.message);
-        knowledge = { source: 'local', paths: [] };
-      }
+      const { citations, knowledge } = await retrieveEvidence(repo, options.graph, String(sessionRow.tenant_id), String(sessionRow.agent_id), Number(sessionRow.version), input.message);
       controller.signal.throwIfAborted();
       const actions = input.page.actions.filter(action => published.config.allowedActions.includes(action.name));
       for (const action of actions) {
@@ -262,11 +278,11 @@ export function createApp(options: AppOptions) {
     const promise = work(); inFlight.set(runId, promise);
     try { res.json(await promise); }
     catch (error) {
-      repo.db.prepare('UPDATE runs SET status=? WHERE id=?').run(controller.signal.aborted ? 'cancelled' : 'failed', runId);
+      repo.db.prepare('UPDATE runs SET status=?,error_code=? WHERE id=?').run(controller.signal.aborted ? 'cancelled' : 'failed', controller.signal.aborted ? 'cancelled_or_deadline' : error instanceof AppError ? `request_${error.status}` : 'provider_or_output', runId);
       if (controller.signal.aborted) throw new AppError(408, 'The request was stopped or took too long. You can try again.');
       if (error instanceof AppError) throw error;
-      throw new AppError(502, 'The local model could not complete this request. Check the runtime connection and try again.');
-    } finally { clearTimeout(timer); res.off('close', abort); controllers.delete(controller); sessionsBusy.delete(String(sessionRow.id)); inFlight.delete(runId); }
+      throw new AppError(502, 'The model could not complete this request. Check the runtime connection and try again.');
+    } finally { repo.db.prepare('UPDATE runs SET duration_ms=? WHERE id=?').run(Math.round(performance.now() - started), runId); clearTimeout(timer); res.off('close', abort); controllers.delete(controller); sessionsBusy.delete(String(sessionRow.id)); inFlight.delete(runId); }
   });
   app.post('/api/embed/session/action-result', (req, res) => {
     const sessionRow = embedSession(req, true), input = actionResultSchema.parse(req.body);
@@ -283,6 +299,13 @@ export function createApp(options: AppOptions) {
     res.json({ ok: true });
   });
   app.get('/health', (_req, res) => res.json({ ok: true, service: 'guidekit', mode: 'local' }));
+  app.get('/ready', async (_req, res) => {
+    let database = false; try { database = repo.row('SELECT 1 AS ok FROM schema_migrations LIMIT 1')?.ok === 1; } catch { /* Report only readiness, never database paths. */ }
+    const runtime = await options.provider.status().catch(() => ({ available: false, authenticated: false }));
+    const graph = options.graph ? await options.graph.status().then(status => status.connected).catch(() => false) : !repo.row("SELECT agent_id FROM publication_states WHERE graph_source='tigergraph' LIMIT 1");
+    const ok = database && runtime.available && runtime.authenticated && graph;
+    res.status(ok ? 200 : 503).json({ ok, checks: { database, runtime: runtime.available && runtime.authenticated, graph }, provider: options.provider.id ?? 'codex' });
+  });
   app.use('/sdk', (_req, res, next) => { res.set('Cross-Origin-Resource-Policy', 'cross-origin'); res.set('Access-Control-Allow-Origin', '*'); next(); }, express.static(resolve(root, 'dist/sdk'), { dotfiles: 'deny', index: false }));
   app.use(express.static(resolve(root, 'dist/dashboard'), { dotfiles: 'deny', index: 'index.html' }));
   app.use((req, res) => { if (req.path.startsWith('/api/')) res.status(404).json({ error: 'Endpoint not found.' }); else res.status(404).send('GuideKit is not built yet. Run npm run build, then npm start.'); });
