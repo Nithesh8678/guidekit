@@ -2,7 +2,7 @@
 
 A visual AI assistant platform for websites. Configure an agent with company knowledge, publish a version, and install the same browser SDK on your website. Visitors can ask questions, follow a guide that advances with their progress, and approve explicitly registered actions. Chat tucks away during guidance and returns when the guide finishes.
 
-The core runs locally and uses the developer's signed-in ChatGPT subscription through official Codex app-server. No model API key, credential extraction, or paid fallback is used. Public source does not expose your personal runtime as a hosted service.
+The default core runs locally and uses the developer's signed-in ChatGPT subscription through official Codex app-server, without a model API key or credential extraction. A [separate hosted-provider adapter](docs/hosted-provider.md) is prepared and disabled by default; it requires explicit selection and enablement, with no paid fallback. Public source does not expose your personal runtime as a hosted service.
 
 ## Run
 
@@ -19,7 +19,7 @@ Open http://127.0.0.1:4410 and create your own workspace. No owner account or pa
 
 1. Create an agent and choose CRM or support capabilities.
 2. Add your own `.txt`/`.md` knowledge or explicitly load an example document.
-3. Save and publish the agent.
+3. Save and publish the agent. Wait for knowledge/graph preparation to finish before the version becomes active.
 4. Open the CRM or support website from Install. Its URL carries only the public agent ID.
 5. Ask how to do something, or request a supported action. Review its details and approve it.
 
@@ -30,15 +30,17 @@ CRM: http://127.0.0.1:4411. Support: http://127.0.0.1:4412. These are separate b
 npm run dev
 ```
 
-Configuration is described in `.env.example`; pass overrides as environment variables. Default ports should stay unchanged for the bundled demo links. `GUIDEKIT_DATA_DIR` chooses a separate data directory; back up that entire directory while the app is stopped. Do not upload it to GitHub. The personal runtime deliberately binds only to loopback.
+Configuration is described in `.env.example`; pass overrides as environment variables. Default ports should stay unchanged for the bundled demo links. `GUIDEKIT_DATA_DIR` chooses a separate data directory. Use the consistent online backup and guarded offline restore commands in [operations](docs/operations.md); never upload databases, signing secrets or account-delivery files to GitHub. The personal runtime deliberately binds only to loopback.
 
 ## Install on a website
 
-Publish an agent with your website's exact origin allowed, then copy its installation snippet:
+Publish an agent with your website's exact origin allowed, then copy its complete installation snippet from Install. The generated snippet pins the SDK release and integrity; replace every placeholder in this illustration with that reviewed configuration:
 
 ```html
 <script
-  src="http://127.0.0.1:4410/sdk/guidekit.js"
+  src="http://127.0.0.1:4410/sdk/releases/RELEASE_HASH/guidekit.js"
+  integrity="SHA384_INTEGRITY_FROM_INSTALL"
+  crossorigin="anonymous"
   data-agent-id="YOUR_PUBLISHED_AGENT_ID"
   data-endpoint="http://127.0.0.1:4410"
   defer
@@ -49,25 +51,28 @@ This core supports local HTTP website testing. HTTPS websites require an HTTPS S
 
 The hotkey is **Cmd/Ctrl + Shift + K**. The SDK reads bounded accessible labels, excludes private controls, strips query/hash parameters, and never captures a whole-page screenshot. Add `data-guidekit-id="stable-control-id"` to important controls and `data-guidekit-private` to sensitive areas. Basic answers and guidance can use discovered controls. Local SVG strokes and cursor flights follow the visitor's progress, with narration released on actual browser speech start. See the [guidance and motion design](docs/guidance-motion.md). Reliable business operations require host-registered actions.
 
-For actions, use the [SDK API](packages/sdk/README.md) and the complete [CRM host example](apps/demo/host.js). The host owns its authorization, validates arguments, respects cancellation and idempotency, and verifies the business result. GuideKit requires confirmation and records the reported outcome. The ESM build is available at `/sdk/guidekit.mjs`.
+For actions, use the [SDK API](packages/sdk/README.md) and the complete [CRM host example](apps/demo/host.js). The host owns its authorization, validates arguments, respects cancellation and idempotency, and verifies the business result. GuideKit requires confirmation and records the reported outcome. The same release includes a pinned ESM build and a tested package candidate; see [SDK release and rollback](docs/sdk-release.md). The mutable `/sdk/guidekit.js` and `.mjs` aliases are for local development.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
   Dashboard[Company dashboard] --> API[Local API]
-  API --> Store[(Tenant-isolated SQLite + FTS)]
-  Store --> Version[Published knowledge + configuration]
+  API --> Store[(Tenant-scoped SQLite, roles and audit)]
+  Store --> Candidate[Immutable publication candidate]
+  Candidate --> Graph[(Prepared TigerGraph knowledge)]
+  Graph --> Version[Ready active version]
   Website[Website + shared SDK] -->|Scoped session + live page context| API
   Version --> API
-  API --> Codex[Restricted Codex app-server]
-  Codex --> Plan[Validated answer / guide / proposal]
+  API --> Runtime[Selected restricted model provider]
+  Runtime --> Plan[Validated answer / guide / proposal]
   Plan --> Website
+  Website -->|Bounded semantic continuation| API
   Website -->|Visitor confirmation| Host[Registered host operation]
   Host -->|Verified outcome| API
 ```
 
-Knowledge retrieval supplies context; it does not fine-tune a model. Published versions snapshot their documents/configuration and existing sessions stay pinned. Draft edits require republishing to affect new sessions.
+Knowledge retrieval supplies context; it does not fine-tune a model. Published versions snapshot their documents/configuration and existing sessions stay pinned. Failed preparation preserves the working active version. Retry, activation/rollback and unpublish are available in Install. Draft edits require republishing to affect new sessions.
 
 ## Verify
 
@@ -79,24 +84,26 @@ npm run audit:secrets
 npm audit --audit-level=high
 npx playwright install chromium
 npm run test:e2e
+npm run test:dashboard
+npm run test:dashboard:integration
 ```
 
 `npm run test:live` is a separate manual opt-in: it spends ChatGPT subscription usage on synthetic data, exercises the real HTTP/model/receipt path, verifies a disposable host record, and removes its temporary workspace. CI never runs this command. It does not replace browser acceptance testing.
 
 Unit, HTTP contract and Chromium acceptance tests use explicitly isolated test providers; the production app never falls back to those providers. The browser suite uses disposable workspaces on ports 4510–4512 and requires the production assets from `npm run build`. Browser and live-model verification status is recorded in [docs/status.md](docs/status.md). Build success alone is not evidence of working voice, model access, a hosted deployment, or production readiness.
 
-CI installs locked dependencies without lifecycle scripts, runs advisory/secret checks, and executes the core and Chromium acceptance checks. Actions are pinned to immutable commits; Dependabot proposes updates.
+CI installs locked dependencies without lifecycle scripts, runs advisory/secret checks, and executes the core, SDK and dashboard browser acceptance checks. Run the browser suites sequentially because some share fixture ports. Actions are pinned to immutable commits; Dependabot proposes updates.
 
 ## Scope and next integrations
 
-Core: authenticated developer workspaces, company-scoped knowledge, publishing, shared browser SDK, citations, live highlights, approved registered actions, persisted run outcomes, and browser-native dictation/read-aloud controls. Speech depends on browser support and microphone permission; no microphone audio verification is claimed unless recorded in status.
+Core: authenticated workspaces and team roles, local one-time account recovery, company-scoped knowledge and retrieval evaluation, prepared immutable publishing, shared browser SDK, adaptive visual guidance, approved registered actions, persisted outcomes, browser dictation/read-aloud, and recoverable local operations. Speech depends on browser support and microphone permission; human verification and its quality limits are recorded in status.
 
-Cutroom is a separate demonstration host. Its integration must use its command/revision and permission boundary; no editor runtime data or media belongs in this repository. A dedicated adapter is a next integration checkpoint after the core proof.
+Cutroom is a separate demonstration host. Its optional adapter is committed on its own local `feat/guidekit-integration` branch, with rename, track mute and selected-clip movement through its authenticated revision/idempotency-aware commands. These workflows are browser/HTTP tested; a real model rename and normal Undo were also verified. Existing projects and personal media were not opened. The separate branch remains unmerged and unpublished.
 
-TigerGraph document relationships are implemented through server-side sync and scoped retrieval; see [setup and verification](docs/tigergraph.md). Browser speech recognition and synthesis are the selected voice approach; no Wispr key is required. Billing, teams/SSO, native apps, arbitrary-site automation, and a hosted commercial inference service are outside this local core. The SDK cannot bypass a host's permissions or access cross-origin iframe/canvas semantics automatically.
+TigerGraph document relationships are implemented through server-side preparation and scoped retrieval; see [setup and verification](docs/tigergraph.md). Browser speech recognition and synthesis are the selected voice approach; no Wispr key is required. Public HTTPS hosting, live paid inference, external account email, npm/CDN publication and packaged-device acceptance remain separate gates. Billing, SSO, native capture and arbitrary-site automation are separately scoped phases. The SDK cannot bypass a host's permissions or access cross-origin iframe/canvas semantics automatically.
 
 [viaSocket](https://viasocket.com/developers/docs) is a suitable optional provider for company-connected app actions. Its API can sit behind an approved GuideKit action and an authenticated host backend. It is not connected or live-tested in this release; see the [integration assessment](docs/viasocket.md).
 
-See [product](docs/product.md), [architecture](docs/architecture.md), [API contracts](docs/contracts.md), [security](docs/security.md), and [runtime details](packages/runtime/README.md). MIT licensed.
+See the [delivery plan](docs/delivery-plan.md), [current evidence and boundaries](docs/status.md), [product](docs/product.md), [architecture](docs/architecture.md), [API contracts](docs/contracts.md), [security](docs/security.md), and [runtime details](packages/runtime/README.md). MIT licensed.
 
 For the manual SDK installation, hotkey voice, confirmed action and graph walkthrough, follow [the hands-on test guide](docs/testing-guide.md).

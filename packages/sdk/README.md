@@ -1,12 +1,15 @@
 # GuideKit browser SDK
 
-One framework-independent SDK loads a company's published agent. Build the IIFE entry `src/index.ts` with esbuild; the server serves it at `/sdk/guidekit.js`.
+One framework-independent SDK loads a company's published agent. `npm run build` produces immutable content-hash script/ESM releases with SHA-384 integrity, plus a typed package candidate. Copy the complete pinned snippet from dashboard Install; replace the placeholders in this illustration with that configuration:
 
 ```html
-<script defer src="http://127.0.0.1:4410/sdk/guidekit.js"
+<script defer src="http://127.0.0.1:4410/sdk/releases/RELEASE_HASH/guidekit.js"
+  integrity="SHA384_INTEGRITY_FROM_INSTALL" crossorigin="anonymous"
   data-agent-id="YOUR_AGENT_ID"
   data-endpoint="http://127.0.0.1:4410"></script>
 ```
+
+The mutable `/sdk/guidekit.js` and `.mjs` aliases remain available for local development. See [release and rollback](../../docs/sdk-release.md) for manifests, pinned URLs and package installation. Company knowledge versions and SDK releases are independent.
 
 The website origin must be allowed in the agent's published configuration. Use HTTPS in HTTPS hosts. The default hotkey is Command/Ctrl + Shift + K; `data-hotkey="alt+k"` overrides it. The assistant is modeless. Escape ends an active guide and restores chat; during voice input it cancels dictation without sending. Otherwise it closes chat.
 
@@ -43,7 +46,7 @@ document.addEventListener('guidekit:ready', () => {
 
 `mount({ agentId, endpoint, actions, getContext, hotkey })` supports manual installation and returns `{ ready, ask, getPageContext, registerAction, setContext, open, close, startVoice, stopVoice, reportStepResult, destroy }`. `ready` resolves after the first published session is established. Global `registerAction` works before or after mount. Mount and action functions are also ESM exports.
 
-Add stable `data-guidekit-id="create-task"` attributes and optional `data-guidekit-description` metadata to guide controls reliably. Duplicate explicit IDs are omitted. Without annotations the SDK discovers up to 80 labeled visible semantic controls. It never clicks them automatically. Same-ID replacements are recovered during a short grace period. A missing or newly private target stops the guide and offers Refresh guide with fresh bounded page context.
+Add stable `data-guidekit-id="create-task"` attributes and optional `data-guidekit-description` metadata to guide controls reliably. Duplicate explicit IDs are omitted. Without annotations the SDK discovers up to 80 labeled visible semantic controls. It never clicks them automatically. Same-ID replacements with matching public identity are recovered during a short grace period. Missing or changed targets cannot inherit stale instructions. An active adaptive journey may request a fresh bounded snapshot and validated continuation; an ended, disabled or exhausted journey returns to chat with recovery guidance and Refresh guide. Private controls stay excluded from every snapshot and resolver.
 
 For applications containing private filenames or other personal labels, use `mount({ agentId, endpoint, targetMode: 'explicit' })` or script `data-target-mode="explicit"`. This shares and resolves **only** unique host-authored `data-guidekit-id` controls, while retaining all existing visibility, sensitive-control and private-section exclusions. It also applies to adaptive snapshots and reload Resume. Keep authored labels/descriptions deliberately public. `auto` remains the default. Hosts requiring this privacy boundary should check `GuideKit.capabilities.explicitTargets === true` before mounting; old SDKs must not be allowed to silently ignore the option. ESM consumers can import the frozen `SDK_CAPABILITIES` object.
 
