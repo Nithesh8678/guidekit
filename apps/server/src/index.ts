@@ -6,16 +6,20 @@ import helmet from 'helmet';
 import { createApp } from './app.js';
 import { createCodexProvider } from '../../../packages/runtime/src/index.js';
 import { createTigerGraphProvider } from '../../../packages/graph/src/index.js';
+import { acquireProcessLock } from './process-lock.js';
 
 const port = Number(process.env.GUIDEKIT_PORT ?? 4410);
 const demoPort = Number(process.env.GUIDEKIT_DEMO_PORT ?? 4411);
 const secondPort = Number(process.env.GUIDEKIT_SECOND_DEMO_PORT ?? 4412);
+const dataDir = resolve(process.env.GUIDEKIT_DATA_DIR ?? '.data');
+const releaseLock = acquireProcessLock(dataDir);
+process.once('exit', releaseLock);
 const graphValues = [process.env.TIGERGRAPH_BASE_URL, process.env.TIGERGRAPH_GRAPH_NAME, process.env.TIGERGRAPH_TOKEN, process.env.TIGERGRAPH_SECRET, process.env.TIGERGRAPH_RESTPP_PREFIX];
 const graphConfigured = graphValues.some(value => value !== undefined);
 if (graphConfigured && (!process.env.TIGERGRAPH_BASE_URL || (!process.env.TIGERGRAPH_TOKEN && !process.env.TIGERGRAPH_SECRET))) throw new Error('TigerGraph configuration requires TIGERGRAPH_BASE_URL and either TIGERGRAPH_TOKEN or TIGERGRAPH_SECRET; TIGERGRAPH_GRAPH_NAME defaults to GuideKit.');
 const graph = graphConfigured ? createTigerGraphProvider({ baseUrl: process.env.TIGERGRAPH_BASE_URL!, graphName: process.env.TIGERGRAPH_GRAPH_NAME ?? 'GuideKit', token: process.env.TIGERGRAPH_TOKEN, secret: process.env.TIGERGRAPH_SECRET, restppPrefix: process.env.TIGERGRAPH_RESTPP_PREFIX ?? '/restpp' }) : undefined;
 const provider = createCodexProvider({ model: process.env.GUIDEKIT_MODEL, bin: process.env.GUIDEKIT_CODEX_BIN, cwd: resolve(process.env.GUIDEKIT_DATA_DIR ?? '.data', 'model-sandbox') });
-const core = createApp({ dataDir: resolve(process.env.GUIDEKIT_DATA_DIR ?? '.data'), provider, graph, adminOrigins: new Set([`http://127.0.0.1:${port}`, `http://localhost:${port}`, 'http://127.0.0.1:4413', 'http://localhost:4413']) });
+const core = createApp({ dataDir, provider, graph, endpointOrigin: `http://127.0.0.1:${port}`, demoOrigins: { crm: `http://127.0.0.1:${demoPort}`, support: `http://127.0.0.1:${secondPort}` }, adminOrigins: new Set([`http://127.0.0.1:${port}`, `http://localhost:${port}`, 'http://127.0.0.1:4413', 'http://localhost:4413']) });
 const servers: Server[] = [];
 async function listen(server: Server, serverPort: number) {
   await new Promise<void>((accept, reject) => { server.once('error', reject); server.listen(serverPort, '127.0.0.1', () => { server.off('error', reject); accept(); }); }); servers.push(server);
@@ -35,12 +39,13 @@ try {
   console.log(`GuideKit dashboard: http://127.0.0.1:${port}\nCRM demo: http://127.0.0.1:${demoPort}\nSupport demo: http://127.0.0.1:${secondPort}\nPersonal model runtime stays on loopback. No paid API fallback.`);
 } catch (error) {
   console.error(error instanceof Error ? error.message : 'Could not start GuideKit.');
-  for (const server of servers) server.close(); await core.close(); process.exitCode = 1;
+  for (const server of servers) server.close(); await core.close(); releaseLock(); process.exitCode = 1;
 }
 let closing = false;
 const shutdown = async () => {
   if (closing) return; closing = true;
   for (const server of servers) { server.close(); server.closeIdleConnections(); }
   await core.close();
+  releaseLock();
 };
 process.on('SIGINT', shutdown); process.on('SIGTERM', shutdown);

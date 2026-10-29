@@ -3,7 +3,8 @@ import { mkdirSync, chmodSync, existsSync, readFileSync, writeFileSync } from 'n
 import { join } from 'node:path';
 import { randomBytes, randomUUID, createHash } from 'node:crypto';
 import session, { type SessionData } from 'express-session';
-import type { Agent, AgentConfig, AgentDetail, KnowledgeDocument, Workspace, Citation } from '../../../packages/contracts/src/index.js';
+import type { Agent, AgentConfig, AgentDetail, AgentVersion, KnowledgeDocument, Workspace, Citation } from '../../../packages/contracts/src/index.js';
+import { migrate } from './migrations.js';
 
 export const now = () => new Date().toISOString();
 export const digest = (value: string) => createHash('sha256').update(value).digest('hex');
@@ -41,6 +42,7 @@ export class Repository {
       CREATE INDEX IF NOT EXISTS documents_agent ON documents(agent_id);
       INSERT OR IGNORE INTO schema_migrations VALUES (1, datetime('now'));
     `);
+    migrate(this.db);
   }
   transaction<T>(fn: () => T): T {
     this.db.exec('BEGIN IMMEDIATE');
@@ -74,7 +76,7 @@ export class Repository {
   createAgent(tenantId: string, config: AgentConfig): Agent {
     if (this.listAgents(tenantId).length >= 20) throw new AppError(409, 'This local workspace supports up to 20 agents.');
     const id = newId('agt'), timestamp = now();
-    this.db.prepare('INSERT INTO agents VALUES (?,?,?,NULL,?,?)').run(id, tenantId, JSON.stringify(config), timestamp, timestamp);
+    this.db.prepare('INSERT INTO agents (id,tenant_id,config,published_version,created_at,updated_at) VALUES (?,?,?,NULL,?,?)').run(id, tenantId, JSON.stringify(config), timestamp, timestamp);
     return this.agent(tenantId, id);
   }
   updateAgent(tenantId: string, id: string, config: AgentConfig): Agent {
@@ -100,26 +102,61 @@ export class Repository {
     if (!result.changes) throw new AppError(404, 'Document not found.');
     this.db.prepare('UPDATE agents SET updated_at=? WHERE id=?').run(now(), agentId);
   }
-  publish(tenantId: string, agentId: string) {
+  updateDocument(tenantId: string, agentId: string, id: string, input: { title: string; content: string }): KnowledgeDocument {
+    const documents = this.documents(tenantId, agentId), previous = documents.find(doc => doc.id === id);
+    if (!previous) throw new AppError(404, 'Document not found.');
+    if (documents.filter(doc => doc.id !== id).reduce((size, doc) => size + Buffer.byteLength(doc.content), 0) + Buffer.byteLength(input.content) > 2_000_000) throw new AppError(413, 'This agent supports 2 MB of source text.');
+    this.db.prepare('UPDATE documents SET title=?,content=? WHERE id=? AND agent_id=?').run(input.title, input.content, id, agentId);
+    this.db.prepare('UPDATE agents SET updated_at=? WHERE id=?').run(now(), agentId);
+    return { ...previous, ...input };
+  }
+  publish(tenantId: string, agentId: string, graphSource: 'local' | 'tigergraph' = 'local'): AgentVersion {
     const agent = this.agent(tenantId, agentId), documents = this.documents(tenantId, agentId);
     if (!documents.length) throw new AppError(400, 'Add company knowledge before publishing.');
     return this.transaction(() => {
-      const number = (agent.publishedVersion ?? 0) + 1, createdAt = now();
+      const number = Number(this.row('SELECT COALESCE(MAX(number),0)+1 AS number FROM versions WHERE agent_id=?', agentId)!.number), createdAt = now();
       const { id: _id, tenantId: _tenant, createdAt: _created, updatedAt: _updated, publishedVersion: _pub, ...config } = agent;
       this.db.prepare('INSERT INTO versions VALUES (?,?,?,?,?)').run(agentId, number, JSON.stringify(config), JSON.stringify(documents), createdAt);
-      this.db.prepare('UPDATE agents SET published_version=?, updated_at=? WHERE id=? AND tenant_id=?').run(number, createdAt, agentId, tenantId);
+      this.db.prepare('UPDATE agents SET updated_at=?,release_epoch=release_epoch+1 WHERE id=? AND tenant_id=?').run(createdAt, agentId, tenantId);
+      const epoch = Number(this.row('SELECT release_epoch FROM agents WHERE id=?', agentId)!.release_epoch);
+      this.db.prepare('INSERT INTO publication_states (agent_id,version,status,graph_source,error,completed_at,activation_epoch) VALUES (?,?,?,?,NULL,?,?)').run(agentId, number, graphSource === 'local' ? 'ready' : 'preparing', graphSource, graphSource === 'local' ? createdAt : null, epoch);
+      if (graphSource === 'local') this.db.prepare('UPDATE agents SET published_version=? WHERE id=?').run(number, agentId);
       const insert = this.db.prepare('INSERT INTO knowledge_fts (tenant_id,agent_id,version,document_id,title,content) VALUES (?,?,?,?,?,?)');
       for (const doc of documents) for (let offset = 0; offset < doc.content.length; offset += 700) insert.run(tenantId, agentId, number, doc.id, doc.title, doc.content.slice(offset, offset + 900));
-      return { number, createdAt, documentCount: documents.length };
+      return this.version(tenantId, agentId, number).version;
     });
   }
   detail(tenantId: string, id: string): AgentDetail {
-    return { agent: this.agent(tenantId, id), documents: this.documents(tenantId, id), versions: this.rows('SELECT number,created_at,documents FROM versions WHERE agent_id=? ORDER BY number DESC', id).map(row => ({ number: Number(row.number), createdAt: String(row.created_at), documentCount: JSON.parse(String(row.documents)).length })), sessions: this.rows('SELECT * FROM runs WHERE tenant_id=? AND agent_id=? ORDER BY created_at DESC LIMIT 50', tenantId, id).map(row => ({ id: String(row.id), question: String(row.question), answer: String(row.answer), status: String(row.status), createdAt: String(row.created_at), actionName: row.action_name === null ? null : String(row.action_name) })) };
+    return { agent: this.agent(tenantId, id), documents: this.documents(tenantId, id), versions: this.rows('SELECT v.*,p.status,p.graph_source,p.error,p.completed_at FROM versions v JOIN publication_states p ON p.agent_id=v.agent_id AND p.version=v.number WHERE v.agent_id=? ORDER BY number DESC', id).map(row => this.versionFrom(row)), sessions: this.rows('SELECT * FROM runs WHERE tenant_id=? AND agent_id=? ORDER BY created_at DESC LIMIT 50', tenantId, id).map(row => ({ id: String(row.id), question: String(row.question), answer: String(row.answer), status: String(row.status), createdAt: String(row.created_at), actionName: row.action_name === null ? null : String(row.action_name) })) };
   }
-  published(agentId: string, number?: number): { tenantId: string; config: AgentConfig; version: number; documents: KnowledgeDocument[] } {
+  private versionFrom(row: Row): AgentVersion {
+    return { number: Number(row.number), createdAt: String(row.created_at), documentCount: JSON.parse(String(row.documents)).length, status: row.status as AgentVersion['status'], graphSource: row.graph_source as AgentVersion['graphSource'], ...(row.error ? { error: String(row.error) } : {}), ...(row.completed_at ? { completedAt: String(row.completed_at) } : {}) };
+  }
+  version(tenantId: string, agentId: string, number: number): { version: AgentVersion; config: AgentConfig; documents: KnowledgeDocument[] } {
+    this.agent(tenantId, agentId);
+    const row = this.row('SELECT v.*,p.status,p.graph_source,p.error,p.completed_at FROM versions v JOIN publication_states p ON p.agent_id=v.agent_id AND p.version=v.number WHERE v.agent_id=? AND v.number=?', agentId, number);
+    if (!row) throw new AppError(404, 'Version not found.');
+    return { version: this.versionFrom(row), config: JSON.parse(String(row.config)), documents: JSON.parse(String(row.documents)) };
+  }
+  publicationState(agentId: string, number: number, status: AgentVersion['status'], error?: string, activate = false): void {
+    this.transaction(() => {
+      const state = this.row('SELECT activation_epoch FROM publication_states WHERE agent_id=? AND version=?', agentId, number);
+      if (!state) throw new AppError(404, 'Version not found.');
+      this.db.prepare('UPDATE publication_states SET status=?,error=?,completed_at=? WHERE agent_id=? AND version=?').run(status, error ?? null, status === 'ready' ? now() : null, agentId, number);
+      if (status === 'ready' && activate) this.db.prepare('UPDATE agents SET published_version=?,updated_at=? WHERE id=? AND release_epoch=?').run(number, now(), agentId, Number(state.activation_epoch));
+    });
+  }
+  activateVersion(tenantId: string, agentId: string, number: number): void {
+    if (this.version(tenantId, agentId, number).version.status !== 'ready') throw new AppError(409, 'This version is not ready. Retry preparation before activating it.');
+    this.db.prepare('UPDATE agents SET published_version=?,updated_at=?,release_epoch=release_epoch+1 WHERE id=? AND tenant_id=?').run(number, now(), agentId, tenantId);
+  }
+  unpublish(tenantId: string, agentId: string): void { this.agent(tenantId, agentId); this.db.prepare('UPDATE agents SET published_version=NULL,updated_at=?,release_epoch=release_epoch+1 WHERE id=? AND tenant_id=?').run(now(), agentId, tenantId); }
+  published(agentId: string, number?: number): { tenantId: string; config: AgentConfig; version: number; documents: KnowledgeDocument[]; graphSource: AgentVersion['graphSource'] } {
     const row = this.row('SELECT v.*, a.tenant_id FROM versions v JOIN agents a ON a.id=v.agent_id WHERE v.agent_id=? AND v.number=COALESCE(?,a.published_version)', agentId, number ?? null);
     if (!row) throw new AppError(404, 'This agent has no published version.');
-    return { tenantId: String(row.tenant_id), config: JSON.parse(String(row.config)), version: Number(row.number), documents: JSON.parse(String(row.documents)) };
+    if (number === undefined && this.row('SELECT status FROM publication_states WHERE agent_id=? AND version=?', agentId, Number(row.number))?.status !== 'ready') throw new AppError(503, 'This version is preparing its knowledge. Retry when publication is ready.');
+    const source = this.row('SELECT graph_source FROM publication_states WHERE agent_id=? AND version=?', agentId, Number(row.number));
+    return { tenantId: String(row.tenant_id), config: JSON.parse(String(row.config)), version: Number(row.number), documents: JSON.parse(String(row.documents)), graphSource: source!.graph_source as AgentVersion['graphSource'] };
   }
   retrieve(tenantId: string, agentId: string, version: number, question: string): Citation[] {
     const stop = new Set(['the', 'and', 'how', 'can', 'you', 'for', 'with', 'what', 'this', 'that', 'please', 'would', 'could', 'help', 'want', 'need', 'show', 'tell', 'about', 'does', 'are', 'your']);
