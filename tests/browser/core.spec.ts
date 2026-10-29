@@ -110,9 +110,12 @@ test('dashboard publication, private context, strict CSP and visual guidance rec
     const a = await target.boundingBox(), b = await host.locator('[data-guidekit-root] [data-gk-shape]').boundingBox();
     return a && b ? Math.abs(b.y - (Math.max(3, a.y - 5) - 5)) : 999;
   }).toBeLessThan(2);
+  const continuation = host.waitForResponse(response => response.url().endsWith('/api/embed/session/ask'));
   await host.evaluate(() => document.querySelector('[data-guidekit-id="contact-name"]')?.remove());
-  await expect(guidance).toHaveCount(0);
-  await expect(host.getByText('That control changed or is no longer visible. Ask again to refresh the guide.', { exact: true })).toBeVisible();
+  const replanned = await continuation; expect(replanned.status()).toBe(200);
+  expect(replanned.request().postDataJSON().page.targets.some((target: { id: string }) => target.id === 'contact-name')).toBe(false);
+  await expect(guidance).toBeVisible(); await expect(guidance).toContainText('Use Company.');
+  await expect(host.getByRole('dialog', { name: 'Website assistant', includeHidden: true })).toBeHidden();
   const fresh = await ask(host, 'Show me how to create a contact again');
   expect(fresh.page.targets.some(target => target.id === 'contact-name')).toBe(false);
   await expect(guidance).toBeVisible();

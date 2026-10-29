@@ -75,18 +75,27 @@ export function createApp(options: AppOptions) {
     if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) && (!origin || !options.adminOrigins.has(origin))) return next(new AppError(403, 'A same-origin dashboard request is required.'));
     next();
   });
-  const workspace = (req: Request): Workspace => {
+  const identity = (req: Request): string | null => {
     const epoch = req.session.userId ? repo.row('SELECT auth_epoch FROM users WHERE id=?', req.session.userId)?.auth_epoch : null;
-    const value = req.session.userId && epoch === (req.session.authEpoch ?? 0) ? repo.workspace(req.session.userId, req.session.tenantId) : null;
+    return req.session.userId && epoch === (req.session.authEpoch ?? 0) ? req.session.userId : null;
+  };
+  const workspace = (req: Request): Workspace => {
+    const userId = identity(req), value = userId ? repo.workspace(userId, req.session.tenantId) : null;
     if (!value) throw new AppError(401, 'Sign in to your workspace.');
     return value;
   };
-  const signedIn = async (req: Request, userId: string, tenantId?: string) => {
+  const signedIn = async (req: Request, userId: string, tenantId?: string, expectedEpoch = 0) => {
+    if (repo.row('SELECT auth_epoch FROM users WHERE id=?', userId)?.auth_epoch !== expectedEpoch) throw new AppError(401, 'Account access changed during sign-in. Sign in again.');
     await new Promise<void>((accept, reject) => req.session.regenerate(error => error ? reject(error) : accept()));
+    if (repo.row('SELECT auth_epoch FROM users WHERE id=?', userId)?.auth_epoch !== expectedEpoch) throw new AppError(401, 'Account access changed during sign-in. Sign in again.');
     req.session.userId = userId;
     req.session.tenantId = tenantId;
-    req.session.authEpoch = Number(repo.row('SELECT auth_epoch FROM users WHERE id=?', userId)!.auth_epoch);
+    req.session.authEpoch = expectedEpoch;
     await new Promise<void>((accept, reject) => req.session.save(error => error ? reject(error) : accept()));
+    if (repo.row('SELECT auth_epoch FROM users WHERE id=?', userId)?.auth_epoch !== expectedEpoch) {
+      await new Promise<void>((accept, reject) => req.session.destroy(error => error ? reject(error) : accept()));
+      throw new AppError(401, 'Account access changed during sign-in. Sign in again.');
+    }
   };
   const authLimit = rateLimit({ windowMs: 900_000, limit: options.testing ? 100 : 20, standardHeaders: 'draft-8', legacyHeaders: false, message: { error: 'Too many sign-in attempts. Try again in 15 minutes.' } });
   app.get('/api/auth/me', (req, res) => { try { res.json({ workspace: workspace(req) }); } catch { res.json({ workspace: null }); } });
@@ -97,15 +106,15 @@ export function createApp(options: AppOptions) {
     await signedIn(req, value.user.id); res.status(201).json({ workspace: value });
   });
   app.post('/api/auth/login', authLimit, async (req, res) => {
-    const input = credentials.parse(req.body), user = repo.row('SELECT id,password_hash FROM users WHERE email=?', input.email);
+    const input = credentials.parse(req.body), user = repo.row('SELECT id,password_hash,auth_epoch FROM users WHERE email=?', input.email);
     if (!user || !await verify(String(user.password_hash), input.password)) throw new AppError(401, 'Email or password is incorrect.');
-    await signedIn(req, String(user.id)); res.json({ workspace: repo.workspace(String(user.id)) });
+    await signedIn(req, String(user.id), undefined, Number(user.auth_epoch)); res.json({ workspace: repo.workspace(String(user.id)) });
   });
   app.post('/api/auth/logout', async (req, res) => {
     await new Promise<void>((accept, reject) => req.session.destroy(error => error ? reject(error) : accept()));
     res.clearCookie('gk.sid', { httpOnly: true, sameSite: 'strict', secure: false }).json({ ok: true });
   });
-  registerAccounts(app, repo, { workspace, signedIn, authLimit, origin: options.endpointOrigin, delivery: options.delivery ?? localAccountDelivery(options.dataDir) });
+  registerAccounts(app, repo, { workspace, identity, signedIn, authLimit, origin: options.endpointOrigin, delivery: options.delivery ?? localAccountDelivery(options.dataDir) });
   app.use('/api/agents', (req, res, next) => {
     if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
     const actor = workspace(req);

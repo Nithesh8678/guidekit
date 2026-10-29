@@ -21,10 +21,12 @@ export class Repository {
     mkdirSync(dir, { recursive: true, mode: 0o700 }); chmodSync(dir, 0o700);
     const secretPath = join(dir, 'session.secret');
     if (!existsSync(secretPath)) writeFileSync(secretPath, randomBytes(48).toString('hex'), { mode: 0o600 });
+    chmodSync(secretPath, 0o600);
     this.sessionSecret = readFileSync(secretPath, 'utf8');
+    if (this.sessionSecret.length < 32 || this.sessionSecret.length > 65536) throw new Error('The local session signing secret is invalid. Restore it from a verified backup.');
     this.db = new DatabaseSync(join(dir, 'guidekit.sqlite'), { timeout: 5000 });
     chmodSync(join(dir, 'guidekit.sqlite'), 0o600);
-    this.db.exec(`
+    try { this.db.exec(`
       PRAGMA journal_mode=WAL;
       PRAGMA foreign_keys=ON;
       CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
@@ -43,6 +45,7 @@ export class Repository {
       INSERT OR IGNORE INTO schema_migrations VALUES (1, datetime('now'));
     `);
     migrate(this.db);
+    } catch (error) { this.db.close(); throw error; }
   }
   transaction<T>(fn: () => T): T {
     this.db.exec('BEGIN IMMEDIATE');
