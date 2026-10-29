@@ -189,5 +189,11 @@ export class SqliteSessionStore extends session.Store {
   override destroy(id: string, callback?: (err?: unknown) => void) {
     try { this.repo.db.prepare('DELETE FROM dashboard_sessions WHERE id=?').run(id); callback?.(); } catch (e) { callback?.(e); }
   }
-  override touch(id: string, data: SessionData, callback?: (err?: unknown) => void) { this.set(id, data, callback); }
+  override touch(id: string, data: SessionData, callback?: (err?: unknown) => void) {
+    try {
+      // A delayed response must never resurrect a session deleted by logout.
+      this.repo.db.prepare('UPDATE dashboard_sessions SET expires=? WHERE id=?').run(data.cookie.expires ? new Date(data.cookie.expires).getTime() : Date.now() + 28_800_000, id);
+      callback?.();
+    } catch (error) { callback?.(error); }
+  }
 }
