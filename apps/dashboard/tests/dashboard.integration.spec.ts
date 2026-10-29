@@ -1,0 +1,47 @@
+import { test, expect } from '@playwright/test';
+
+test('real dashboard and local API preserve immutable releases, roll back safely, and stop only new sessions on unpublish', async ({ page }) => {
+  const browserErrors: string[] = []; page.on('pageerror', error => browserErrors.push(error.message)); page.on('dialog', dialog => dialog.accept());
+  await page.goto('/');
+  await page.getByLabel('Your name', { exact: true }).fill('Dashboard Integration Tester');
+  await page.getByLabel('Company name', { exact: true }).fill('Synthetic Release Workspace');
+  await page.getByLabel('Email address').fill(`dashboard-${crypto.randomUUID()}@example.test`);
+  await page.getByLabel('Password').fill('Synthetic-dashboard-password-42');
+  await page.getByRole('button', { name: 'Create workspace', exact: true }).click();
+  await page.getByRole('button', { name: 'Create your first agent', exact: true }).click();
+  const create = page.getByRole('dialog', { name: 'Create your agent', exact: true });
+  await create.getByLabel('Agent name', { exact: true }).fill('Release Integration Guide');
+  const created = page.waitForResponse(response => response.url().endsWith('/api/agents') && response.request().method() === 'POST');
+  await create.getByRole('button', { name: 'Create agent', exact: true }).click();
+  const { agent } = await (await created).json() as { agent: { id: string } };
+  await page.getByLabel('Allowed website origins').fill('http://127.0.0.1:4511');
+  await page.getByRole('tab', { name: /^Knowledge/ }).click();
+  await page.getByLabel('Document title', { exact: true }).fill('Release knowledge');
+  await page.getByLabel('Document text', { exact: true }).fill('Original published invoice policy: ORIGINAL-RELEASE-MARKER.');
+  await page.getByRole('button', { name: 'Add document', exact: true }).click();
+  await expect(page.getByRole('button', { name: /^Release knowledge/ })).toBeVisible();
+  await page.getByRole('button', { name: 'Publish agent', exact: true }).click(); await expect(page.getByText('Live v1', { exact: true })).toBeVisible();
+  const bootstrap = await page.request.post(`/api/embed/${agent.id}/session`, { headers: { Origin: 'http://127.0.0.1:4511' }, data: {} });
+  expect(bootstrap.status()).toBe(200); const pinned = await bootstrap.json() as { token: string; agent: { version: number } }; expect(pinned.agent.version).toBe(1);
+
+  await page.getByRole('button', { name: 'Edit Release knowledge', exact: true }).click();
+  await page.getByLabel('Document text', { exact: true }).fill('Updated published invoice policy: UPDATED-RELEASE-MARKER.');
+  await page.getByRole('tab', { name: 'Install', exact: true }).click();
+  await expect(page.locator('pre code')).toContainText('http://127.0.0.1:4510/sdk/guidekit.js');
+  await page.getByRole('button', { name: 'Inspect version 1', exact: true }).click();
+  const first = page.getByRole('dialog', { name: 'Version 1 snapshot', exact: true }); await first.getByText('Release knowledge', { exact: true }).click();
+  await expect(first).toContainText('ORIGINAL-RELEASE-MARKER'); await expect(first).not.toContainText('UPDATED-RELEASE-MARKER'); await first.getByRole('button', { name: 'Close snapshot', exact: true }).click();
+  await page.getByRole('tab', { name: /^Knowledge/ }).click(); await expect(page.getByLabel('Document text', { exact: true })).toHaveValue('Updated published invoice policy: UPDATED-RELEASE-MARKER.');
+  await page.getByRole('button', { name: 'Save document', exact: true }).click(); await expect(page.getByText('Document updated in the draft.', { exact: false })).toBeVisible();
+  await page.getByRole('button', { name: 'Publish agent', exact: true }).click(); await expect(page.getByText('Live v2', { exact: true })).toBeVisible();
+  await page.getByRole('tab', { name: 'Agent setup', exact: true }).click(); await page.getByLabel(/^Instructions/).fill('Unsaved configuration preserved through rollback and unpublish.');
+  await page.getByRole('tab', { name: 'Install', exact: true }).click(); await page.getByRole('button', { name: 'Activate version 1', exact: true }).click(); await expect(page.getByText('Live v1', { exact: true })).toBeVisible();
+  await page.getByRole('tab', { name: 'Agent setup', exact: true }).click(); await expect(page.getByLabel(/^Instructions/)).toHaveValue('Unsaved configuration preserved through rollback and unpublish.');
+  await page.getByRole('tab', { name: 'Install', exact: true }).click(); await page.getByRole('button', { name: 'Unpublish agent', exact: true }).click(); await expect(page.getByText('No active publication', { exact: true })).toBeVisible();
+  const stopped = await page.request.post(`/api/embed/${agent.id}/session`, { headers: { Origin: 'http://127.0.0.1:4511' }, data: {} }); expect(stopped.status()).toBe(404);
+  const answer = await page.request.post('/api/embed/session/ask', { headers: { Origin: 'http://127.0.0.1:4511', Authorization: `Bearer ${pinned.token}` }, data: { requestId: `pinned_${crypto.randomUUID()}`, message: 'What is the invoice policy?', page: { url: 'http://127.0.0.1:4511/', title: 'Synthetic integration host', targets: [], actions: [], context: {} } } });
+  expect(answer.status()).toBe(200); const result = await answer.json() as { version: number; answer: string }; expect(result.version).toBe(1); expect(result.answer).toContain('ORIGINAL-RELEASE-MARKER'); expect(result.answer).not.toContain('UPDATED-RELEASE-MARKER');
+  await page.setViewportSize({ width: 390, height: 844 }); expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.getByRole('tab', { name: 'Agent setup', exact: true }).click(); await expect(page.getByLabel(/^Instructions/)).toHaveValue('Unsaved configuration preserved through rollback and unpublish.');
+  expect(browserErrors).toEqual([]);
+});
