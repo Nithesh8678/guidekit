@@ -22,6 +22,7 @@ try {
     const demo = express(); demo.disable('x-powered-by');
     demo.use((req, res, next) => { if (!['127.0.0.1', 'localhost'].includes(req.hostname)) { res.sendStatus(403); return; } next(); });
     demo.use(helmet({ contentSecurityPolicy: { directives: { defaultSrc: ["'self'"], scriptSrc: ["'self'", `http://127.0.0.1:${port}`], connectSrc: ["'self'", `http://127.0.0.1:${port}`], styleSrc: ["'self'", "'unsafe-inline'"], upgradeInsecureRequests: null } } }));
+    demo.get('/guidekit-config.js', (_req, res) => res.type('application/javascript').send(`window.__GUIDEKIT_ENDPOINT__=${JSON.stringify(`http://127.0.0.1:${port}`)};`));
     demo.get('/', (_req, res) => res.sendFile(resolve(demoDir, `${demoKind}.html`)));
     demo.use(express.static(demoDir, { index: false, dotfiles: 'deny' }));
     await listen(createServer(demo), serverPort);

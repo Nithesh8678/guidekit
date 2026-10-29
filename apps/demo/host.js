@@ -1,6 +1,7 @@
 /* Two independent host websites using the same compiled, framework-free SDK. */
 (() => {
   const kind = document.body.dataset.demo;
+  const endpoint = window.__GUIDEKIT_ENDPOINT__ || 'http://127.0.0.1:4410';
   const storageKey = `guidekit-demo-${kind}-v1`;
   let records;
   try { records = JSON.parse(localStorage.getItem(storageKey) || '[]'); if (!Array.isArray(records)) records = []; } catch { records = []; }
@@ -59,7 +60,7 @@
   render();
   const agentId = new URL(location.href).searchParams.get('agentId');
   if (!agentId || !/^agt_[a-zA-Z0-9_-]{1,150}$/.test(agentId)) {
-    const state = document.querySelector('#install-state'); state.append(document.createTextNode('Publish an agent in GuideKit, then open this website from its installation page. ')); const link = text('a', 'Open GuideKit'); link.href = 'http://127.0.0.1:4410'; state.append(link); return;
+    const state = document.querySelector('#install-state'); state.append(document.createTextNode('Publish an agent in GuideKit, then open this website from its installation page. ')); const link = text('a', 'Open GuideKit'); link.href = endpoint; state.append(link); return;
   }
   const contactSchema = { type: 'object', additionalProperties: false, required: ['name', 'company', 'status'], properties: { name: { type: 'string', minLength: 1, maxLength: 100 }, company: { type: 'string', minLength: 1, maxLength: 100 }, status: { type: 'string', enum: ['New', 'Qualified', 'Customer'] } } };
   const actions = kind === 'crm' ? {
@@ -71,7 +72,7 @@
       return { success, message: success ? `${record.name} is now ${record.status}, verified in Contacts.` : 'The update could not be verified.' };
     } }
   } : { create_ticket: { description: 'Create a local support request; this does not send an email. Fields: subject, description, priority (Normal or High).', inputSchema: { type: 'object', additionalProperties: false, required: ['subject', 'description', 'priority'], properties: { subject: { type: 'string', minLength: 1, maxLength: 160 }, description: { type: 'string', minLength: 1, maxLength: 3000 }, priority: { type: 'string', enum: ['Normal', 'High'] } } }, requiresConfirmation: true, execute: async (args, ctx) => { if (ctx.signal.aborted) return { success: false, message: 'Action was stopped.' }; const outcome = createTicket(args, ctx.idempotencyKey); result(outcome.message); return outcome; } } };
-  const script = document.createElement('script'); script.src = 'http://127.0.0.1:4410/sdk/guidekit.js';
-  script.addEventListener('load', () => { const widget = window.GuideKit.mount({ agentId, endpoint: 'http://127.0.0.1:4410', actions }); render(); widget.ready?.catch(error => { document.querySelector('#install-state').textContent = error.message || 'Could not connect the agent. Check allowed origins and publishing.'; }); });
+  const script = document.createElement('script'); script.src = `${endpoint}/sdk/guidekit.js`;
+  script.addEventListener('load', () => { const widget = window.GuideKit.mount({ agentId, endpoint, actions }); render(); widget.ready?.catch(error => { document.querySelector('#install-state').textContent = error.message || 'Could not connect the agent. Check allowed origins and publishing.'; }); });
   script.addEventListener('error', () => { document.querySelector('#install-state').textContent = 'The GuideKit SDK could not load. Start the GuideKit server on port 4410.'; }); document.head.append(script);
 })();
