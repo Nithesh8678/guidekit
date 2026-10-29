@@ -154,3 +154,22 @@ test('monotonic frame time ignores a regressing clock and document visibility su
     state.doc.hidden = false; state.listeners.get('visibilitychange')?.(); assert.equal(cursor.getAttribute('transform'), previous); assert.equal(state.frames.size, 1);
   } finally { state.director.destroy(); }
 });
+
+test('cursor activity retains triangle, five weighted bars and spinner and pauses hidden CSS animation', () => {
+  const state = renderer();
+  try {
+    state.director.present(command(), { animate: false });
+    const cursor = state.all().find(node => node.attributes.has('data-gk-cursor'))!, surfaces = state.all().filter(node => node.attributes.has('data-gk-cursor-surface')), bars = state.all().filter(node => node.attributes.has('data-gk-wave-weight'));
+    assert.equal(surfaces.length, 3); assert.deepEqual(bars.map(node => node.getAttribute('data-gk-wave-weight')), ['0.4', '0.7', '1', '0.7', '0.4']);
+    state.director.setActivity('speaking'); assert.equal(cursor.getAttribute('data-gk-cursor-mode'), 'speaking'); assert.ok(bars.every(bar => bar.style.animationPlayState === 'running'));
+    state.director.setVisible(false); assert.ok(bars.every(bar => bar.style.animationPlayState === 'paused')); state.director.setVisible(true); assert.ok(bars.every(bar => bar.style.animationPlayState === 'running'));
+    state.director.setPaused(true); assert.ok(bars.every(bar => bar.style.animationPlayState === 'paused')); state.director.setPaused(false);
+    state.director.setActivity('waiting'); assert.ok(bars.every(bar => bar.style.animationPlayState === 'paused')); assert.equal(cursor.getAttribute('data-gk-cursor-mode'), 'waiting');
+    const spinner = state.all().find(node => node.tagName === 'circle')!; assert.equal(spinner.style.animationPlayState, 'running'); assert.match(spinner.style.animation!, /0.8s/);
+    state.director.setActivity('pointing'); assert.deepEqual(state.all().filter(node => node.attributes.has('data-gk-cursor-surface')), surfaces); assert.equal(spinner.style.animationPlayState, 'paused');
+    assert.throws(() => state.director.setActivity('recording' as 'pointing'));
+  } finally { state.director.destroy(); }
+  const reduced = renderer(true);
+  try { reduced.director.setActivity('speaking'); assert.ok(reduced.all().filter(node => node.attributes.has('data-gk-wave-weight')).every(bar => bar.style.animationPlayState === 'paused' && bar.style.animationName === 'none')); }
+  finally { reduced.director.destroy(); }
+});

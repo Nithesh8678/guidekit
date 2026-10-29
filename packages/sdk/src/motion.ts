@@ -2,6 +2,7 @@
 export interface MotionPoint { x: number; y: number; }
 export interface MotionBox { left: number; top: number; width: number; height: number; }
 export type AnnotationKind = 'target' | 'ring' | 'frame' | 'arrow' | 'underline' | 'number';
+export type CursorActivity = 'pointing' | 'speaking' | 'waiting';
 export interface AnnotationCommand { id: string; kind: AnnotationKind; box: MotionBox; label?: string; index?: number; }
 export interface PresentOptions { animate?: boolean; first?: boolean; pace?: number; onReady?: () => void; }
 export interface BoundsOptions { animate?: boolean; }
@@ -134,6 +135,11 @@ export class MotionDirector {
   private readonly cancelFrame: (handle: number) => void;
   private readonly cursor: SVGGElement;
   private readonly cursorGlow: SVGPathElement;
+  private readonly pointing: SVGGElement;
+  private readonly waveform: SVGGElement;
+  private readonly spinner: SVGGElement;
+  private readonly activityAnimations: SVGElement[] = [];
+  private activity: CursorActivity = 'pointing';
   private readonly media: MediaQueryList | null;
   private current: Mark | null = null;
   private erasing: Erasing | null = null;
@@ -165,9 +171,21 @@ export class MotionDirector {
     const definitions = this.svg('defs'), filter = this.svg('filter'), blur = this.svg('feGaussianBlur');
     this.filterId = `gk-motion-glow-${++instanceId}`; filter.setAttribute('id', this.filterId); filter.setAttribute('x', '-100%'); filter.setAttribute('y', '-100%'); filter.setAttribute('width', '300%'); filter.setAttribute('height', '300%'); blur.setAttribute('stdDeviation', String(MOTION.glowRadius)); filter.append(blur); definitions.append(filter);
     this.cursor = this.svg('g'); this.cursor.setAttribute('data-gk-cursor', ''); this.cursor.setAttribute('opacity', '0');
+    this.cursor.setAttribute('data-gk-cursor-mode', this.activity);
+    this.pointing = this.svg('g'); this.pointing.setAttribute('data-gk-cursor-surface', 'pointing');
+    this.waveform = this.svg('g'); this.waveform.setAttribute('data-gk-cursor-surface', 'speaking');
+    this.spinner = this.svg('g'); this.spinner.setAttribute('data-gk-cursor-surface', 'waiting');
+    const animationStyles = this.svg('style'); animationStyles.textContent = '@keyframes gk-motion-wave{from{transform:scaleY(.55)}to{transform:scaleY(1)}}@keyframes gk-motion-spin{to{transform:rotate(360deg)}}';
     const triangle = this.svg('path'); triangle.setAttribute('d', 'M0 -10 L8 10 L0 6 L-8 10 Z'); triangle.setAttribute('fill', 'currentColor'); triangle.setAttribute('stroke', 'white'); triangle.setAttribute('stroke-width', '1.2');
-    this.cursorGlow = triangle.cloneNode(false) as SVGPathElement; this.cursorGlow.setAttribute('stroke', 'none'); this.cursorGlow.setAttribute('opacity', String(MOTION.glowOpacity)); this.cursorGlow.style.filter = 'blur(8px)'; this.cursor.append(this.cursorGlow, triangle);
-    this.element.append(definitions, this.cursor); shadow.append(this.element);
+    this.cursorGlow = triangle.cloneNode(false) as SVGPathElement; this.cursorGlow.setAttribute('stroke', 'none'); this.cursorGlow.setAttribute('opacity', String(MOTION.glowOpacity)); this.cursorGlow.style.filter = 'blur(8px)'; this.pointing.append(this.cursorGlow, triangle);
+    for (const [index, weight] of [0.4, 0.7, 1, 0.7, 0.4].entries()) {
+      const bar = this.svg('rect'); bar.setAttribute('x', String(index * 5 - 11.5)); bar.setAttribute('y', String(-9 * weight)); bar.setAttribute('width', '3'); bar.setAttribute('height', String(18 * weight)); bar.setAttribute('rx', '1.5'); bar.setAttribute('fill', 'currentColor'); bar.setAttribute('data-gk-wave-weight', String(weight));
+      Object.assign(bar.style, { transformBox: 'fill-box', transformOrigin: 'center', animation: `gk-motion-wave 0.8s ${index * -0.09}s ease-in-out infinite alternate` }); this.waveform.append(bar); this.activityAnimations.push(bar);
+    }
+    const spinner = this.svg('circle'); spinner.setAttribute('cx', '0'); spinner.setAttribute('cy', '0'); spinner.setAttribute('r', '9'); spinner.setAttribute('fill', 'none'); spinner.setAttribute('stroke', 'currentColor'); spinner.setAttribute('stroke-width', '2.5'); spinner.setAttribute('stroke-linecap', 'round'); spinner.setAttribute('stroke-dasharray', '38 19');
+    Object.assign(spinner.style, { transformOrigin: '0px 0px', animation: 'gk-motion-spin 0.8s linear infinite' }); this.spinner.append(spinner); this.activityAnimations.push(spinner);
+    this.cursor.append(this.pointing, this.waveform, this.spinner);
+    this.element.append(definitions, animationStyles, this.cursor); shadow.append(this.element); this.syncActivity();
     this.media?.addEventListener('change', this.onReducedMotion); this.document.addEventListener('visibilitychange', this.onVisibility);
     if (this.document.hidden) this.suspend();
   }
@@ -213,6 +231,12 @@ export class MotionDirector {
   setVisible(value: boolean): void {
     if (this.destroyed || this.visible === value) return;
     this.visible = value; this.element.style.visibility = value ? 'visible' : 'hidden'; this.syncSuspension();
+  }
+  /** State changes only; actual speech start/end ownership stays with the host. */
+  setActivity(value: CursorActivity): void {
+    if (this.destroyed) return;
+    if (!['pointing', 'speaking', 'waiting'].includes(value)) throw new TypeError('Unknown cursor activity.');
+    this.activity = value; this.cursor.setAttribute('data-gk-cursor-mode', value); this.syncActivity();
   }
   setPaused(value: boolean): void { if (this.destroyed || this.paused === value) return; this.paused = value; this.element.style.opacity = value ? '0.5' : '1'; this.syncSuspension(); }
   erase(options: BoundsOptions = {}): void {
@@ -272,7 +296,7 @@ export class MotionDirector {
     }
     const pose = this.cursorPose;
     this.cursor.setAttribute('opacity', this.current ? '1' : this.erasing ? number(1 - clamp((now - this.erasing.startedAt) / MOTION.eraseMs, 0, 1)) : '0');
-    if (pose) { this.cursor.setAttribute('transform', `translate(${number(pose.x)} ${number(pose.y)}) rotate(${number(pose.rotation)}) scale(${number(pose.scale)})`); this.cursorGlow.style.filter = `blur(${number(pose.glowRadius)}px)`; }
+    if (pose) { this.cursor.setAttribute('transform', `translate(${number(pose.x)} ${number(pose.y)}) scale(${number(pose.scale)})`); this.pointing.setAttribute('transform', `rotate(${number(pose.rotation)})`); this.cursorGlow.style.filter = `blur(${number(pose.glowRadius)}px)`; }
     this.notifyReady();
   }
   private notifyReady(): void { const mark = this.current; if (!this.destroyed && this.canRun() && mark?.ready && mark.onReady) { const callback = mark.onReady; mark.onReady = undefined; callback(); } }
@@ -290,6 +314,7 @@ export class MotionDirector {
   private stopFrame(): void { if (this.frame !== null) this.cancelFrame(this.frame); this.frame = null; }
   private suspend(): void { if (this.suspendedAt !== null) return; const now = this.time(); this.render(now); this.suspendedAt = now; this.stopFrame(); }
   private syncSuspension(): void {
+    this.syncActivity();
     if (!this.canRun()) { this.suspend(); return; }
     if (this.suspendedAt !== null) {
       const frozen = this.suspendedAt; this.suspendedAt = null; const elapsed = this.time() - frozen;
@@ -300,10 +325,22 @@ export class MotionDirector {
     }
     this.render(this.time()); this.schedule();
   }
+  private syncActivity(): void {
+    const running = this.canRun() && !this.reduced;
+    for (const [mode, group, duration] of [['pointing', this.pointing, 250], ['speaking', this.waveform, 150], ['waiting', this.spinner, 150]] as const) {
+      group.style.transition = running ? `opacity ${duration}ms ease` : 'none'; group.setAttribute('opacity', mode === this.activity ? '1' : '0');
+    }
+    this.activityAnimations.forEach((shape, index) => {
+      const mode = index < 5 ? 'speaking' : 'waiting'; shape.style.animationPlayState = running && this.activity === mode ? 'running' : 'paused';
+      // A reduced-motion state keeps a readable, static waveform/spinner.
+      shape.style.animationName = this.reduced ? 'none' : index < 5 ? 'gk-motion-wave' : 'gk-motion-spin';
+    });
+  }
   private onVisibility = (): void => { if (!this.destroyed) this.syncSuspension(); };
   private onReducedMotion = (): void => {
     if (this.destroyed || !this.media) return;
     this.reduced = this.media.matches;
+    this.syncActivity();
     if (this.reduced) {
       const now = this.time(); this.flight = null;
       if (this.current) { this.current.move = null; this.current.box = { ...this.current.command.box }; this.current.releaseAt = now; this.current.durationMs = 0; this.cursorPose = { ...anchor(this.current.box), rotation: 0, scale: 1, glowRadius: 8, progress: 1 }; }
