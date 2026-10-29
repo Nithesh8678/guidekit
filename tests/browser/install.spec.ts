@@ -95,6 +95,19 @@ test('manual installation loads the real SDK once, preserves host actions, and s
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 
+test('a pinned SDK release loads with its reviewed integrity and rejects altered bytes', async ({ page, request }) => {
+  const id = await publishedAgent(request), manifestResponse = await request.get(`${endpoint}/sdk/manifest.json`);
+  expect(manifestResponse.status()).toBe(200); const manifest = await manifestResponse.json();
+  const value = `<script src="${endpoint}${manifest.script.path}" integrity="${manifest.script.integrity}" crossorigin="anonymous" data-agent-id="${id}" data-endpoint="${endpoint}" defer></script>`;
+  await page.goto(`${website}/?install=manual`); await install(page, value);
+  await expect(page.locator('#manual-install-status')).toHaveAttribute('data-state', 'ready');
+  await expect(page.locator('[data-guidekit-root]')).toHaveCount(1);
+  const response = await request.get(`${endpoint}${manifest.script.path}`); expect(response.headers()['cache-control']).toContain('immutable');
+  await page.getByRole('button', { name: 'Remove assistant', exact: true }).click();
+  await install(page, value.replace(manifest.script.integrity, `sha384-${'A'.repeat(64)}`));
+  await expect(page.locator('#manual-install-status')).toHaveAttribute('data-state', 'error'); await expect(page.locator('[data-guidekit-root]')).toHaveCount(0);
+});
+
 test('an origin rejected by the published agent never reports a successful installation', async ({ page, request }) => {
   const id = await publishedAgent(request, 'http://127.0.0.1:4512');
   await page.goto(`${website}/?install=manual`);
