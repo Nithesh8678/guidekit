@@ -105,9 +105,11 @@ test('bounds updates preserve reveal progress and same-ID geometry without reent
   const state = renderer(); let ready = 0;
   try {
     state.director.present(command('frame'), { first: true, onReady: () => ready++ }); state.tick(700);
-    const shape = state.active()[0]!, ink = shape.all().filter(node => node.tagName === 'path')[0]!, progress = ink.getAttribute('stroke-dashoffset');
-    state.director.updateBounds({ ...box, width: 260 }); assert.equal(state.active()[0], shape); assert.equal(state.director.ready, false); assert.equal(ink.getAttribute('stroke-dashoffset'), progress);
-    state.tick(1000); assert.equal(state.director.ready, true); assert.equal(ready, 1); assert.equal(state.director.diagnostics.penDurationMs, 550);
+    const shape = state.active()[0]!;
+    const revealedFraction = (input: AnnotationCommand) => { const geometry = annotationGeometry(input), paths = shape.all().filter(node => node.tagName === 'path').slice(0, geometry.paths.length); return paths.reduce((sum, path, index) => sum + (1 - Number(path.getAttribute('stroke-dashoffset'))) * geometry.paths[index]!.length, 0) / geometry.length; };
+    const progress = revealedFraction(command('frame'));
+    state.director.updateBounds({ ...box, width: 260 }); assert.equal(state.active()[0], shape); assert.equal(state.director.ready, false); close(revealedFraction({ ...command('frame'), box: { ...box, width: 260 } }), progress, 0.001);
+    state.tick(1200); assert.equal(state.director.ready, true); assert.equal(ready, 1); assert.equal(state.director.diagnostics.penDurationMs, 550);
   } finally { state.director.destroy(); }
 });
 
@@ -172,4 +174,74 @@ test('cursor activity retains triangle, five weighted bars and spinner and pause
   const reduced = renderer(true);
   try { reduced.director.setActivity('speaking'); assert.ok(reduced.all().filter(node => node.attributes.has('data-gk-wave-weight')).every(bar => bar.style.animationPlayState === 'paused' && bar.style.animationName === 'none')); }
   finally { reduced.director.destroy(); }
+});
+
+test('cursor docks visibly without annotations and its exact displayed origin starts the first target flight', () => {
+  const state = renderer(); let docked = 0, ready = 0;
+  try {
+    const dock = { x: 720, y: 580 }; state.director.dock(dock, { onReady: () => docked++ });
+    const cursor = state.all().find(node => node.attributes.has('data-gk-cursor'))!, identity = cursor;
+    assert.equal(cursor.getAttribute('opacity'), '1'); assert.equal(cursor.getAttribute('data-gk-cursor-location'), 'docked'); assert.equal(state.director.location, 'docked'); assert.equal(docked, 1); assert.equal(state.director.ready, true); assert.equal(state.active().length, 0); assert.equal(state.frames.size, 0);
+    const original = cursor.getAttribute('transform'); state.director.present(command('ring'), { first: true, onReady: () => ready++ });
+    assert.equal(cursor.getAttribute('transform'), original); assert.equal(state.director.location, 'flight'); assert.equal(state.all().find(node => node.attributes.has('data-gk-cursor')), identity);
+    close(state.director.diagnostics.cursor!.x, dock.x); close(state.director.diagnostics.cursor!.y, dock.y);
+    const arrival = state.director.diagnostics.flightDurationMs; assert.ok(state.director.diagnostics.releaseDelayMs >= arrival && state.director.diagnostics.releaseDelayMs >= 450);
+    state.tick(arrival - 1); assert.ok(state.active()[0]!.all().filter(node => node.tagName === 'path').every(path => path.getAttribute('stroke-dashoffset') === '1')); assert.equal(state.active()[0]!.getAttribute('opacity'), '0'); assert.equal(ready, 0);
+    state.tick(arrival); assert.equal(state.director.location, 'target'); close(state.director.diagnostics.cursor!.x, box.left + 8); close(state.director.diagnostics.cursor!.y, box.top + 12);
+    state.tick(arrival + 10); assert.ok(state.active()[0]!.all().some(path => path.tagName === 'path' && path.getAttribute('stroke-dashoffset') !== '1')); assert.equal(state.active()[0]!.getAttribute('opacity'), '1');
+    state.tick(arrival + 1500); assert.equal(ready, 1);
+  } finally { state.director.destroy(); }
+});
+
+test('same bounds preserve a flight, while moving bounds retarget from the sampled presentation without teleporting', () => {
+  const state = renderer();
+  try {
+    state.director.dock({ x: 900, y: 600 }); state.director.present(command(), { first: true }); state.tick(250);
+    const cursor = state.all().find(node => node.attributes.has('data-gk-cursor'))!, before = cursor.getAttribute('transform'), pose = state.director.diagnostics.cursor!, flightDuration = state.director.diagnostics.flightDurationMs;
+    state.director.updateBounds(box); assert.equal(cursor.getAttribute('transform'), before); assert.equal(state.director.diagnostics.flightDurationMs, flightDuration);
+    const next = { ...box, left: 440, top: 230 }; state.director.updateBounds(next);
+    assert.equal(cursor.getAttribute('transform'), before); close(state.director.diagnostics.cursor!.x, pose.x); close(state.director.diagnostics.cursor!.y, pose.y); assert.equal(state.director.location, 'flight');
+    state.tick(251); assert.notEqual(cursor.getAttribute('transform'), before); assert.notEqual(state.director.diagnostics.cursor!.x, next.left + 8);
+    state.tick(3000); close(state.director.diagnostics.cursor!.x, next.left + 8); close(state.director.diagnostics.cursor!.y, next.top + 12); assert.equal(state.director.location, 'target');
+  } finally { state.director.destroy(); }
+});
+
+test('return flight docks from its current pose, removes marks and invalidates obsolete readiness', () => {
+  const state = renderer(); let stale = 0, docked = 0;
+  try {
+    state.director.dock({ x: 800, y: 500 }); state.director.present(command('frame'), { onReady: () => stale++ }); state.tick(300);
+    const cursor = state.all().find(node => node.attributes.has('data-gk-cursor'))!, before = cursor.getAttribute('transform'), previousCallbacks = [...state.frames.values()];
+    state.director.dock({ x: 780, y: 560 }, { animate: true, onReady: () => docked++ }); assert.equal(cursor.getAttribute('transform'), before); assert.equal(state.active().length, 0); assert.equal(state.director.diagnostics.annotations, 0); assert.equal(state.director.location, 'flight');
+    for (const callback of previousCallbacks) callback(5000); assert.equal(cursor.getAttribute('transform'), before); assert.equal(docked, 0); assert.equal(state.frames.size, 1);
+    state.director.dock({ x: 780, y: 560 }); assert.equal(cursor.getAttribute('transform'), before); state.tick(2000);
+    assert.equal(state.director.location, 'docked'); assert.equal(docked, 1); assert.equal(stale, 0); close(state.director.diagnostics.cursor!.x, 780); close(state.director.diagnostics.cursor!.y, 560); assert.equal(state.frames.size, 0);
+    state.director.dock({ x: 780, y: 560 }); assert.equal(docked, 1); assert.equal(state.frames.size, 0);
+  } finally { state.director.destroy(); }
+});
+
+test('clearing annotations can preserve the sampled cursor for the next flight while erase and destroy cancel callbacks', () => {
+  const state = renderer(); let stale = 0;
+  state.director.dock({ x: 800, y: 550 }); state.director.present(command(), { onReady: () => stale++ }); state.tick(200);
+  const cursor = state.all().find(node => node.attributes.has('data-gk-cursor'))!, before = cursor.getAttribute('transform');
+  state.director.erase({ animate: false, preserveCursor: true }); assert.equal(state.active().length, 0); assert.equal(cursor.getAttribute('opacity'), '1'); assert.equal(cursor.getAttribute('transform'), before); assert.equal(state.frames.size, 0);
+  state.director.present(command('ring', 'second')); assert.equal(cursor.getAttribute('transform'), before); assert.equal(state.director.location, 'flight');
+  state.director.dock({ x: 700, y: 500 }, { animate: true, onReady: () => stale++ }); state.director.erase({ animate: false }); state.tick(10000); assert.equal(stale, 0); assert.equal(cursor.getAttribute('opacity'), '0');
+  state.director.dock({ x: 20, y: 30 }); state.director.dock({ x: 900, y: 700 }, { animate: true, onReady: () => stale++ }); const pending = [...state.frames.values()]; state.director.destroy(); for (const callback of pending) callback(20000);
+  assert.equal(stale, 0); assert.equal(state.frames.size, 0); assert.equal(state.shadow.children.length, 0);
+});
+
+test('docked and outbound poses freeze hidden/paused, and reduced motion stays static without a flight', () => {
+  const state = renderer(); let docked = 0;
+  try {
+    state.director.dock({ x: 40, y: 50 }); state.director.dock({ x: 800, y: 600 }, { animate: true, onReady: () => docked++ }); state.tick(200);
+    const cursor = state.all().find(node => node.attributes.has('data-gk-cursor'))!, before = cursor.getAttribute('transform');
+    state.director.setPaused(true); state.tick(5000); assert.equal(cursor.getAttribute('transform'), before); assert.equal(state.frames.size, 0); assert.equal(docked, 0);
+    state.director.setVisible(false); state.director.setPaused(false); state.tick(10000); assert.equal(docked, 0); state.director.setVisible(true); assert.equal(cursor.getAttribute('transform'), before); state.tick(12000); assert.equal(docked, 1); assert.equal(state.director.location, 'docked');
+    assert.throws(() => state.director.dock({ x: NaN, y: 0 }));
+  } finally { state.director.destroy(); }
+  const reduced = renderer(true);
+  try {
+    reduced.director.dock({ x: 10, y: 20 }, { animate: true }); assert.equal(reduced.director.location, 'docked'); reduced.director.present(command(), { first: true }); assert.equal(reduced.director.location, 'target'); assert.equal(reduced.director.ready, true); assert.equal(reduced.frames.size, 0);
+    reduced.director.dock({ x: 30, y: 40 }, { animate: true }); close(reduced.director.diagnostics.cursor!.x, 30); close(reduced.director.diagnostics.cursor!.y, 40); assert.equal(reduced.frames.size, 0);
+  } finally { reduced.director.destroy(); }
 });

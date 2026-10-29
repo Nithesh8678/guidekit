@@ -3,9 +3,12 @@ export interface MotionPoint { x: number; y: number; }
 export interface MotionBox { left: number; top: number; width: number; height: number; }
 export type AnnotationKind = 'target' | 'ring' | 'frame' | 'arrow' | 'underline' | 'number';
 export type CursorActivity = 'pointing' | 'speaking' | 'waiting';
+export type CursorLocation = 'docked' | 'flight' | 'target';
 export interface AnnotationCommand { id: string; kind: AnnotationKind; box: MotionBox; label?: string; index?: number; }
 export interface PresentOptions { animate?: boolean; first?: boolean; pace?: number; onReady?: () => void; }
 export interface BoundsOptions { animate?: boolean; }
+export interface DockOptions extends BoundsOptions { onReady?: () => void; }
+export interface EraseOptions extends BoundsOptions { preserveCursor?: boolean; }
 export interface MotionOptions {
   reducedMotion?: boolean;
   /** Injectable monotonic clock/frame scheduler for deterministic tests. */
@@ -118,7 +121,7 @@ export function annotationGeometry(input: AnnotationCommand): AnnotationGeometry
 interface BoxMove { from: MotionBox; to: MotionBox; startedAt: number; durationMs: number; }
 interface Mark {
   command: AnnotationCommand; geometry: AnnotationGeometry; group: SVGGElement; ink: SVGPathElement[]; glow: SVGPathElement[]; text: SVGTextElement;
-  box: MotionBox; move: BoxMove | null; releaseAt: number; durationMs: number; revealed: number; ready: boolean; onReady?: () => void;
+  box: MotionBox; move: BoxMove | null; releaseAt: number; durationMs: number; revealed: number; ready: boolean; waitForArrival: boolean; onReady?: () => void;
 }
 interface Erasing { mark: Mark; startedAt: number; }
 const sameBox = (first: MotionBox, second: MotionBox) => first.left === second.left && first.top === second.top && first.width === second.width && first.height === second.height;
@@ -145,11 +148,16 @@ export class MotionDirector {
   private erasing: Erasing | null = null;
   private flight: CursorFlight | null = null;
   private cursorPose: CursorPose | null = null;
+  private cursorRetained = false;
+  private cursorLocation: CursorLocation = 'docked';
+  private dockTarget: MotionPoint | null = null;
+  private dockReady: (() => void) | undefined;
   private visible = true;
   private paused = false;
   private reduced: boolean;
   private destroyed = false;
   private frame: number | null = null;
+  private frameEpoch = 0;
   private suspendedAt: number | null = null;
   private lastNow = -Infinity;
   private generation = 0;
@@ -172,6 +180,7 @@ export class MotionDirector {
     this.filterId = `gk-motion-glow-${++instanceId}`; filter.setAttribute('id', this.filterId); filter.setAttribute('x', '-100%'); filter.setAttribute('y', '-100%'); filter.setAttribute('width', '300%'); filter.setAttribute('height', '300%'); blur.setAttribute('stdDeviation', String(MOTION.glowRadius)); filter.append(blur); definitions.append(filter);
     this.cursor = this.svg('g'); this.cursor.setAttribute('data-gk-cursor', ''); this.cursor.setAttribute('opacity', '0');
     this.cursor.setAttribute('data-gk-cursor-mode', this.activity);
+    this.cursor.setAttribute('data-gk-cursor-location', this.cursorLocation);
     this.pointing = this.svg('g'); this.pointing.setAttribute('data-gk-cursor-surface', 'pointing');
     this.waveform = this.svg('g'); this.waveform.setAttribute('data-gk-cursor-surface', 'speaking');
     this.spinner = this.svg('g'); this.spinner.setAttribute('data-gk-cursor-surface', 'waiting');
@@ -189,9 +198,27 @@ export class MotionDirector {
     this.media?.addEventListener('change', this.onReducedMotion); this.document.addEventListener('visibilitychange', this.onVisibility);
     if (this.document.hidden) this.suspend();
   }
-  get ready(): boolean { return this.current?.ready ?? false; }
-  get diagnostics(): Readonly<{ generation: number; ready: boolean; framePending: boolean; annotations: number; paths: number; frames: number; maxFrameDeltaMs: number; penDurationMs: number; flightDurationMs: number; releaseDelayMs: number }> {
-    return { generation: this.generation, ready: this.ready, framePending: this.frame !== null, annotations: Number(!!this.current) + Number(!!this.erasing), paths: (this.current?.geometry.paths.length ?? 0) + (this.erasing?.mark.geometry.paths.length ?? 0), frames: this.frames, maxFrameDeltaMs: this.maxFrameDeltaMs, ...this.timings };
+  get ready(): boolean { return this.current?.ready ?? Boolean(this.dockTarget && this.cursorPose && !this.flight); }
+  get location(): CursorLocation { return this.cursorLocation; }
+  get diagnostics(): Readonly<{ generation: number; ready: boolean; location: CursorLocation; cursor: Readonly<CursorPose> | null; framePending: boolean; annotations: number; paths: number; frames: number; maxFrameDeltaMs: number; penDurationMs: number; flightDurationMs: number; releaseDelayMs: number }> {
+    return { generation: this.generation, ready: this.ready, location: this.location, cursor: this.cursorPose ? { ...this.cursorPose } : null, framePending: this.frame !== null, annotations: Number(!!this.current) + Number(!!this.erasing), paths: (this.current?.geometry.paths.length ?? 0) + (this.erasing?.mark.geometry.paths.length ?? 0), frames: this.frames, maxFrameDeltaMs: this.maxFrameDeltaMs, ...this.timings };
+  }
+  /** The supplied viewport point is the retained cursor group's center/origin. */
+  dock(input: MotionPoint, options: DockOptions = {}): void {
+    if (this.destroyed) return;
+    const destination = point(input), now = this.time(); this.sample(now);
+    if (this.dockTarget?.x === destination.x && this.dockTarget.y === destination.y && !this.current && !this.erasing) {
+      this.dockReady = options.onReady ?? this.dockReady; this.notifyReady(); return;
+    }
+    const returning = Boolean(this.flight && this.dockTarget), animate = !this.reduced && Boolean(this.cursorPose) && (options.animate === true || returning);
+    this.stopFrame(); ++this.generation; this.current?.group.remove(); this.erasing?.mark.group.remove(); this.current = null; this.erasing = null;
+    this.dockTarget = destination; this.dockReady = options.onReady; this.cursorRetained = true;
+    const start = this.cursorPose;
+    this.flight = animate && start ? { ...createFlight(start, destination, now), fromRotation: start.rotation, fromScale: start.scale } : null;
+    if (!this.flight) this.cursorPose = { ...destination, rotation: 0, scale: 1, glowRadius: 8, progress: 1 };
+    this.locate(this.flight ? 'flight' : 'docked');
+    this.timings = { penDurationMs: 0, flightDurationMs: this.flight?.durationMs ?? 0, releaseDelayMs: 0 };
+    this.render(now); this.schedule();
   }
   present(input: AnnotationCommand, options: PresentOptions = {}): void {
     if (this.destroyed) return;
@@ -204,13 +231,17 @@ export class MotionDirector {
       this.updateBounds(command.box, { animate }); this.notifyReady(); return;
     }
     this.sample(now); ++this.generation;
+    const fromDock = this.dockTarget !== null;
+    this.dockTarget = null; this.dockReady = undefined; this.cursorRetained = true;
     this.current?.group.removeAttribute('data-gk-shape');
     this.erasing?.mark.group.remove(); this.erasing = this.current && animate ? { mark: this.current, startedAt: now } : null;
     if (this.current && !animate) this.current.group.remove();
-    const end = anchor(command.box), start = this.cursorPose ?? { x: Math.max(20, end.x - 80), y: Math.max(20, end.y - 60) }, distance = Math.hypot(end.x - start.x, end.y - start.y), delay = animate ? releaseDelayMs(distance, options.first ?? !this.current) : 0;
+    const end = anchor(command.box), start = this.cursorPose ?? { x: Math.max(20, end.x - 80), y: Math.max(20, end.y - 60) }, distance = Math.hypot(end.x - start.x, end.y - start.y), first = fromDock || (options.first ?? !this.current);
     this.flight = animate ? { ...createFlight(start, end, now), ...(this.cursorPose ? { fromRotation: this.cursorPose.rotation, fromScale: this.cursorPose.scale } : {}) } : null;
+    const delay = animate ? Math.max(releaseDelayMs(distance, first), first ? this.flight?.durationMs ?? 0 : 0) : 0;
     if (!animate) this.cursorPose = { ...end, rotation: 0, scale: 1, glowRadius: 8, progress: 1 };
     this.current = this.createMark(command, geometry, now + delay, animate ? duration : 0, options.onReady);
+    this.current.waitForArrival = first; this.locate(this.flight ? 'flight' : 'target');
     this.timings = { penDurationMs: animate ? duration : 0, flightDurationMs: this.flight?.durationMs ?? 0, releaseDelayMs: delay };
     this.lastFrameAt = null; this.frames = 0; this.maxFrameDeltaMs = 0;
     this.render(now); this.schedule();
@@ -220,12 +251,14 @@ export class MotionDirector {
     const box = validateBox(input), mark = this.current; if (!mark || sameBox(mark.command.box, box) && !mark.move) return;
     if (sameBox(mark.command.box, box)) return;
     const now = this.time(); this.sample(now);
-    const from = { ...mark.box }, animate = options.animate === true && !this.reduced;
+    const from = { ...mark.box }, animate = options.animate === true && !this.reduced, flying = Boolean(this.flight) && !this.reduced;
     mark.command = { ...mark.command, box }; mark.geometry = annotationGeometry(mark.command); this.patchPaths(mark); this.patchLabel(mark, mark.geometry);
     mark.move = animate ? { from, to: box, startedAt: now, durationMs: MOTION.moveMs } : null; mark.box = animate ? from : box;
     const end = anchor(box);
-    this.flight = animate ? this.flight ? retargetFlight(this.flight, end, now) : { ...createFlight(this.cursorPose ?? anchor(from), end, now), ...(this.cursorPose ? { fromRotation: this.cursorPose.rotation, fromScale: this.cursorPose.scale } : {}) } : null;
-    if (!animate) this.cursorPose = { ...end, rotation: this.cursorPose?.rotation ?? 0, scale: 1, glowRadius: 8, progress: 1 };
+    this.flight = animate || flying ? this.flight ? retargetFlight(this.flight, end, now) : { ...createFlight(this.cursorPose ?? anchor(from), end, now), ...(this.cursorPose ? { fromRotation: this.cursorPose.rotation, fromScale: this.cursorPose.scale } : {}) } : null;
+    if (this.flight && mark.waitForArrival && mark.revealed === 0) mark.releaseAt = Math.max(mark.releaseAt, now + this.flight.durationMs);
+    if (!this.flight) this.cursorPose = { ...end, rotation: this.cursorPose?.rotation ?? 0, scale: 1, glowRadius: 8, progress: 1 };
+    this.locate(this.flight ? 'flight' : 'target');
     this.render(now); this.schedule();
   }
   setVisible(value: boolean): void {
@@ -239,23 +272,24 @@ export class MotionDirector {
     this.activity = value; this.cursor.setAttribute('data-gk-cursor-mode', value); this.syncActivity();
   }
   setPaused(value: boolean): void { if (this.destroyed || this.paused === value) return; this.paused = value; this.element.style.opacity = value ? '0.5' : '1'; this.syncSuspension(); }
-  erase(options: BoundsOptions = {}): void {
+  erase(options: EraseOptions = {}): void {
     if (this.destroyed) return;
     const now = this.time(); this.sample(now); ++this.generation; this.erasing?.mark.group.remove();
     this.current?.group.removeAttribute('data-gk-shape');
     if (this.current && options.animate !== false && !this.reduced) { this.current.onReady = undefined; this.erasing = { mark: this.current, startedAt: now }; }
     else { this.current?.group.remove(); this.erasing = null; }
-    this.current = null; this.flight = null; this.render(now); this.schedule();
+    this.current = null; this.flight = null; this.dockTarget = null; this.dockReady = undefined; this.cursorRetained = options.preserveCursor === true;
+    this.locate('target'); this.render(now); this.stopFrame(); this.schedule();
   }
   destroy(): void {
     if (this.destroyed) return;
-    this.destroyed = true; ++this.generation; this.stopFrame(); this.current = null; this.erasing = null; this.flight = null; this.cursorPose = null;
+    this.destroyed = true; ++this.generation; this.stopFrame(); this.current = null; this.erasing = null; this.flight = null; this.cursorPose = null; this.dockTarget = null; this.dockReady = undefined; this.cursorRetained = false;
     this.media?.removeEventListener('change', this.onReducedMotion); this.document.removeEventListener('visibilitychange', this.onVisibility); this.element.remove();
   }
   private svg<K extends keyof SVGElementTagNameMap>(name: K): SVGElementTagNameMap[K] { const node = this.document.createElementNS(svgNamespace, name); node.setAttribute('pointer-events', 'none'); return node; }
   private createMark(command: AnnotationCommand, geometry: AnnotationGeometry, releaseAt: number, durationMs: number, onReady?: () => void): Mark {
     const group = this.svg('g'), glowing = this.svg('g'), ink = this.svg('g'), text = this.svg('text'); group.setAttribute('data-gk-mark', command.id); group.setAttribute('data-gk-shape', command.kind); group.setAttribute('data-kind', command.kind); glowing.setAttribute('filter', `url(#${this.filterId})`); glowing.setAttribute('opacity', String(MOTION.glowOpacity));
-    const mark: Mark = { command, geometry, group, ink: [], glow: [], text, box: { ...command.box }, move: null, releaseAt, durationMs, revealed: 0, ready: false, onReady };
+    const mark: Mark = { command, geometry, group, ink: [], glow: [], text, box: { ...command.box }, move: null, releaseAt, durationMs, revealed: 0, ready: false, waitForArrival: false, onReady };
     for (const path of geometry.paths) {
       const stroke = this.svg('path'); stroke.setAttribute('d', path.d); stroke.setAttribute('fill', 'none'); stroke.setAttribute('stroke', 'currentColor'); stroke.setAttribute('stroke-width', String(MOTION.strokeWidth)); stroke.setAttribute('vector-effect', 'non-scaling-stroke'); stroke.setAttribute('stroke-linecap', 'round'); stroke.setAttribute('stroke-linejoin', 'round'); stroke.setAttribute('pathLength', '1'); stroke.setAttribute('stroke-dasharray', '1'); stroke.setAttribute('stroke-dashoffset', '1');
       const glow = stroke.cloneNode(false) as SVGPathElement; mark.ink.push(stroke); mark.glow.push(glow); glowing.append(glow); ink.append(stroke);
@@ -268,11 +302,14 @@ export class MotionDirector {
     const label = geometry.label; mark.text.textContent = label?.text ?? ''; mark.text.setAttribute('x', String(label?.x ?? 0)); mark.text.setAttribute('y', String(label?.y ?? 0)); mark.text.setAttribute('text-anchor', mark.command.kind === 'number' ? 'middle' : 'start'); mark.text.setAttribute('dominant-baseline', mark.command.kind === 'number' ? 'central' : 'auto');
   }
   private time(): number { const measured = finite(this.clock(), 'clock'); this.lastNow = Math.max(this.lastNow, measured); return this.suspendedAt ?? this.lastNow; }
+  private locate(location: CursorLocation): void { this.cursorLocation = location; this.cursor.setAttribute('data-gk-cursor-location', location); }
   private sample(now: number): void {
-    if (this.flight) { this.cursorPose = sampleFlight(this.flight, now); if (this.cursorPose.progress >= 1) this.flight = null; }
+    if (this.flight) { this.cursorPose = sampleFlight(this.flight, now); if (this.cursorPose.progress >= 1) { this.flight = null; this.locate(this.dockTarget ? 'docked' : 'target'); } }
     if (this.current?.move) { this.current.box = boxAt(this.current.move, now); if (now >= this.current.move.startedAt + this.current.move.durationMs) this.current.move = null; }
   }
   private applyMark(mark: Mark, reveal: number, eraseElapsed?: number): void {
+    // Hide zero-length round caps as well as the stroke while the cursor flies.
+    mark.group.setAttribute('opacity', reveal > 0 ? '1' : '0');
     const target = mark.command.box; mark.group.setAttribute('transform', `translate(${number(mark.box.left)} ${number(mark.box.top)}) scale(${number(mark.box.width / target.width)} ${number(mark.box.height / target.height)})`);
     let accumulated = 0;
     mark.geometry.paths.forEach((path, index) => {
@@ -295,23 +332,30 @@ export class MotionDirector {
       if (elapsed >= MOTION.eraseMs + (mark.geometry.paths.length - 1) * 18) { mark.group.remove(); this.erasing = null; }
     }
     const pose = this.cursorPose;
-    this.cursor.setAttribute('opacity', this.current ? '1' : this.erasing ? number(1 - clamp((now - this.erasing.startedAt) / MOTION.eraseMs, 0, 1)) : '0');
+    this.cursor.setAttribute('opacity', this.cursorRetained && pose ? '1' : this.erasing ? number(1 - clamp((now - this.erasing.startedAt) / MOTION.eraseMs, 0, 1)) : '0');
     if (pose) { this.cursor.setAttribute('transform', `translate(${number(pose.x)} ${number(pose.y)}) scale(${number(pose.scale)})`); this.pointing.setAttribute('transform', `rotate(${number(pose.rotation)})`); this.cursorGlow.style.filter = `blur(${number(pose.glowRadius)}px)`; }
     this.notifyReady();
   }
-  private notifyReady(): void { const mark = this.current; if (!this.destroyed && this.canRun() && mark?.ready && mark.onReady) { const callback = mark.onReady; mark.onReady = undefined; callback(); } }
+  private notifyReady(): void {
+    if (this.destroyed || !this.canRun()) return;
+    const mark = this.current;
+    if (mark?.ready && mark.onReady) { const callback = mark.onReady; mark.onReady = undefined; callback(); }
+    else if (this.dockTarget && !this.flight && this.dockReady) { const callback = this.dockReady; this.dockReady = undefined; callback(); }
+  }
   private canRun(): boolean { return this.visible && !this.paused && !this.document.hidden; }
   private hasWork(): boolean { return !!(this.flight || this.current?.move || this.current && !this.current.ready || this.erasing); }
   private schedule(): void {
     if (this.destroyed || !this.canRun() || this.frame !== null) return;
     if (!this.hasWork()) { this.stopFrame(); return; }
+    const epoch = this.frameEpoch;
     this.frame = this.requestFrame(() => {
+      if (epoch !== this.frameEpoch) return;
       this.frame = null; if (this.destroyed || !this.canRun()) return;
       const now = this.time(); if (this.lastFrameAt !== null) this.maxFrameDeltaMs = Math.max(this.maxFrameDeltaMs, Math.min(10_000, now - this.lastFrameAt)); this.lastFrameAt = now; this.frames = Math.min(1_000_000, this.frames + 1);
       this.render(now); this.schedule();
     });
   }
-  private stopFrame(): void { if (this.frame !== null) this.cancelFrame(this.frame); this.frame = null; }
+  private stopFrame(): void { ++this.frameEpoch; if (this.frame !== null) this.cancelFrame(this.frame); this.frame = null; }
   private suspend(): void { if (this.suspendedAt !== null) return; const now = this.time(); this.render(now); this.suspendedAt = now; this.stopFrame(); }
   private syncSuspension(): void {
     this.syncActivity();
@@ -344,6 +388,8 @@ export class MotionDirector {
     if (this.reduced) {
       const now = this.time(); this.flight = null;
       if (this.current) { this.current.move = null; this.current.box = { ...this.current.command.box }; this.current.releaseAt = now; this.current.durationMs = 0; this.cursorPose = { ...anchor(this.current.box), rotation: 0, scale: 1, glowRadius: 8, progress: 1 }; }
+      else if (this.dockTarget) this.cursorPose = { ...this.dockTarget, rotation: 0, scale: 1, glowRadius: 8, progress: 1 };
+      this.locate(this.dockTarget ? 'docked' : 'target');
       this.erasing?.mark.group.remove(); this.erasing = null; this.stopFrame(); this.render(now);
     } else this.schedule();
   };
