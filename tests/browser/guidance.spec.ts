@@ -294,6 +294,13 @@ test('reduced motion draws settled marks immediately and cancellation leaves no 
   await expect(shape(page)).toBeVisible(); await expect.poll(() => annotationError(page)).toBeLessThan(1.2);
   const offsets = await shape(page).locator('path[stroke-dashoffset]').evaluateAll(paths => paths.map(path => path.getAttribute('stroke-dashoffset')));
   expect(offsets.length).toBeGreaterThan(0); expect(offsets.every(offset => Number(offset) === 0)).toBe(true);
+  const before = await nameField(page).boundingBox();
+  // A host WAAPI transform emits no DOM mutation/transitionrun event. Reduced
+  // assistant motion must still follow the actual host's moving geometry.
+  await page.locator('#contact-form').evaluate(async form => { await form.animate([{ transform: 'none' }, { transform: 'translate(-40px, 16px)' }], { duration: 600, fill: 'forwards' }).finished; });
+  const after = await nameField(page).boundingBox(); expect(before).not.toBeNull(); expect(after).not.toBeNull();
+  expect(after!.x - before!.x).toBeCloseTo(-40, 1);
+  await expect.poll(() => annotationError(page)).toBeLessThan(1.2);
   await nameField(page).click(); await expect(nameField(page)).toBeFocused();
   await page.keyboard.press('Escape'); await expect(annotation(page)).toHaveCount(0); await expect(chat(page)).toBeVisible();
   await page.waitForTimeout(2_700); await expect(annotation(page)).toHaveCount(0); await expect(guide(page)).toHaveCount(0);
