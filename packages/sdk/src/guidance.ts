@@ -19,6 +19,7 @@ interface HostResult { success: boolean; message?: string; }
 interface Observation { target: HTMLElement; kind: 'text' | 'textarea' | 'choice'; ready: boolean; timer: ReturnType<typeof setTimeout> | null; }
 const quietMs = 1200;
 const recoveryMs = 1200;
+const confirmationMs = 30000;
 const events = ['input', 'change', 'focusin', 'focusout', 'compositionstart', 'compositionend', 'click', 'submit'] as const;
 
 function input(target: HTMLElement): target is HTMLInputElement { return target.tagName === 'INPUT'; }
@@ -41,7 +42,10 @@ function validForm(form: HTMLFormElement): boolean {
   // Inspect validity without dispatching the native invalid events from checkValidity().
   return Array.from(form.elements).every(element => !('willValidate' in element) || !(element as HTMLInputElement).willValidate || ((element as HTMLInputElement).validity.valid && element.getAttribute('aria-invalid') !== 'true'));
 }
-function guideControl(target: EventTarget | null): boolean { return target instanceof HTMLElement && Boolean(target.closest('[data-guidekit-root]')); }
+function guideControl(target: EventTarget | null): boolean {
+  const element = target instanceof HTMLElement ? target : target && 'parentElement' in target && target.parentElement instanceof HTMLElement ? target.parentElement : null;
+  return Boolean(element?.closest('[data-guidekit-root]'));
+}
 function pageControl(target: EventTarget | null): target is HTMLElement { return target instanceof HTMLElement && !guideControl(target) && isSafeTarget(target) && enabled(target) && (input(target) || textarea(target) || choice(target) || clickable(target)); }
 
 /** Local, bounded observation of the known controls in a guide. Never reads values into callbacks. */
@@ -61,6 +65,7 @@ export class GuidanceSession {
   private observer: MutationObserver | null = null;
   private stepTimer: ReturnType<typeof setTimeout> | null = null;
   private recoveryTimer: ReturnType<typeof setTimeout> | null = null;
+  private confirmationTimer: ReturnType<typeof setTimeout> | null = null;
   private epoch = 0;
   private waitingForResult = false;
   private failure = '';
@@ -81,7 +86,7 @@ export class GuidanceSession {
     this.observer = new MutationObserver(records => {
       if (records.some(record => !guideControl(record.target))) this.refresh();
     });
-    this.observer.observe(this.document.documentElement, { subtree: true, childList: true, attributes: true, attributeFilter: ['disabled', 'readonly', 'aria-invalid', 'aria-disabled', 'aria-hidden', 'inert', 'hidden', 'style', 'class', 'data-guidekit-private', 'data-guidekit-id'] });
+    this.observer.observe(this.document.documentElement, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['disabled', 'readonly', 'aria-invalid', 'aria-disabled', 'aria-hidden', 'inert', 'hidden', 'style', 'class', 'data-guidekit-private', 'data-guidekit-id', 'aria-label', 'aria-labelledby', 'role', 'title', 'placeholder', 'name', 'id', 'autocomplete', 'type'] });
     this.refresh();
   }
 
@@ -103,6 +108,7 @@ export class GuidanceSession {
     if (!this.running) return;
     this.paused = value; this.cancelStepTimer();
     if (value && this.recoveryTimer) { clearTimeout(this.recoveryTimer); this.recoveryTimer = null; }
+    if (value) this.clearConfirmationTimer();
     if (!value && this.automatic) this.applyDeferredResult();
     this.refresh();
     if (!value && this.automatic) this.resumeObservation();
@@ -112,13 +118,14 @@ export class GuidanceSession {
     if (!this.running) return;
     const index = this.steps[this.index]?.targetId === targetId ? this.index : this.steps.at(-1)?.targetId === targetId ? this.steps.length - 1 : -1;
     if (index < 0 || (index !== this.index && index !== this.steps.length - 1)) return;
+    this.clearConfirmationTimer();
     if (this.paused || !this.automatic) { this.deferredResult = { id: targetId, atIndex: this.index, result: { ...result } }; return; }
     this.cancelStepTimer(); this.submitted = null; this.clicked = null;
     if (!result.success) {
       if (index !== this.index) return;
       this.waitingForResult = false;
       this.failure = result.message?.trim().slice(0, 240) || 'The website could not complete that action. Try again.';
-      this.emit(); return;
+      this.refresh(); return;
     }
     if (index === this.steps.length - 1) { this.finish({ reason: 'completed', verified: true, message: 'The website confirmed the result.' }); return; }
     this.complete();
@@ -137,7 +144,7 @@ export class GuidanceSession {
     const target = this.safeTarget(this.index);
     if (target !== this.target) { this.cancelStepTimer(); this.target = target; }
     if (this.observations.get(this.index)?.target !== target) this.forgetObservation(this.index);
-    if (target) {
+    if (target || this.waitingForResult) {
       if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
       this.recoveryTimer = null;
     } else if (!this.recoveryTimer && !this.paused) {
@@ -148,6 +155,7 @@ export class GuidanceSession {
         else this.finish({ reason: 'missing', verified: false, message: 'This control is no longer available. Ask for an updated guide.' });
       }, recoveryMs);
     }
+    if (this.waitingForResult) this.awaitConfirmation();
     this.emit();
   }
   stop(reason: 'stopped' | 'missing' = 'stopped'): void { if (this.running) this.finish({ reason, verified: false }); }
@@ -159,6 +167,7 @@ export class GuidanceSession {
   }
   private move(index: number, consume = true): void {
     this.cancelStepTimer();
+    this.clearConfirmationTimer();
     if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
     this.recoveryTimer = null; this.index = index; this.target = null; this.waitingForResult = false; this.failure = ''; this.submitted = null; this.clicked = null; this.lastState = null;
     this.refresh();
@@ -175,6 +184,15 @@ export class GuidanceSession {
     else this.move(next);
   }
   private applyDeferredResult(): void { const pending = this.deferredResult; this.deferredResult = null; if (pending && pending.atIndex === this.index) this.reportResult(pending.id, pending.result); }
+  private clearConfirmationTimer(): void { if (this.confirmationTimer) clearTimeout(this.confirmationTimer); this.confirmationTimer = null; }
+  private awaitConfirmation(): void {
+    if (!this.running || this.paused || !this.waitingForResult || this.confirmationTimer || this.deferredResult) return;
+    this.confirmationTimer = setTimeout(() => {
+      this.confirmationTimer = null;
+      if (!this.running || this.paused || !this.waitingForResult) return;
+      this.finish({ reason: 'completed', verified: false, message: 'The website has not confirmed the result. Check the website before trying again.' });
+    }, confirmationMs);
+  }
   private forgetObservation(index: number): void { const previous = this.observations.get(index); if (previous?.timer) clearTimeout(previous.timer); this.observations.delete(index); }
   private remember(index: number, target: HTMLElement, kind: Observation['kind'], ready: boolean): void {
     this.forgetObservation(index);
@@ -229,7 +247,7 @@ export class GuidanceSession {
     }
     if (this.waitingForResult) hint = 'Waiting for the website to confirm the result…';
     if (this.failure) hint = this.failure;
-    if (!target) hint = 'This control changed. Waiting for the page…';
+    if (!target && !this.waitingForResult) hint = 'This control changed. Waiting for the page…';
     if (!this.automatic) hint = 'Automatic progress is off. Follow this step, then choose Next.';
     if (this.paused) hint = 'Guidance is paused. Resume when you’re ready.';
     const state: GuidanceState = { index: this.index, total: this.steps.length, completed: this.completed.size, step: { ...this.steps[this.index]! }, target, hint, automatic: this.automatic, paused: this.paused, waiting: this.waitingForResult || !target };
@@ -255,7 +273,7 @@ export class GuidanceSession {
       return;
     }
     if (event.type === 'input') {
-      if (index === this.index) { this.cancelStepTimer(); this.failure = ''; this.waitingForResult = false; }
+      if (index === this.index) { this.cancelStepTimer(); this.clearConfirmationTimer(); this.failure = ''; this.waitingForResult = false; }
       this.completed.delete(index); this.edited.set(index, target); this.deferredResult = null; this.submitted = null;
       if ((event as InputEvent).isComposing) this.composing.add(target);
       if (textarea(target)) this.remember(index, target, 'textarea', false);
@@ -291,7 +309,7 @@ export class GuidanceSession {
       this.failure = ''; this.cancelStepTimer();
       const form = formFor(target);
       if (form && !validForm(form)) { this.failure = 'Finish the required fields before saving.'; this.emit(); return; }
-      if (form || index === this.steps.length - 1) { this.waitingForResult = true; this.emit(); }
+      if (form || index === this.steps.length - 1) { this.waitingForResult = true; this.awaitConfirmation(); this.emit(); }
       else {
         this.clicked = { index, target, nextBefore: this.safeTarget(index + 1) };
         const epoch = this.epoch;
@@ -310,6 +328,7 @@ export class GuidanceSession {
     const target = this.safeTarget(this.index); const form = target ? formFor(target) : null;
     if (!form || event.target !== form || !validForm(form)) return;
     this.cancelStepTimer(); this.waitingForResult = true; this.failure = '';
+    this.awaitConfirmation();
     this.submitted = { index: this.index, nextBefore: this.safeTarget(this.index + 1) };
     this.emit();
     // A newly displayed next known control is evidence that a nonfinal form step advanced.
@@ -321,6 +340,7 @@ export class GuidanceSession {
   private finish(result: GuidanceResult): void { if (!this.running) return; this.running = false; this.cleanup(); this.callbacks.onFinish(result); }
   private cleanup(): void {
     this.cancelStepTimer();
+    this.clearConfirmationTimer();
     if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
     this.recoveryTimer = null;
     this.observer?.disconnect(); this.observer = null;

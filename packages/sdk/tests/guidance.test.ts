@@ -40,8 +40,9 @@ class DocumentDouble {
 class ObserverDouble {
   static instances: ObserverDouble[] = [];
   connected = false;
+  options: MutationObserverInit | null = null;
   constructor(private readonly callback: MutationCallback) { ObserverDouble.instances.push(this); }
-  observe() { this.connected = true; }
+  observe(_target?: unknown, options?: MutationObserverInit) { this.connected = true; this.options = options ?? null; }
   disconnect() { this.connected = false; }
   update(target: ElementDouble) { if (this.connected) this.callback([{ target } as unknown as MutationRecord], this as unknown as MutationObserver); }
 }
@@ -369,4 +370,59 @@ test('a deferred host failure is processed before a paused page transition can a
     open.visible = false; name.visible = true; state.mutate(); context.mock.timers.tick(5000); assert.equal(state.finishes.length, 0);
     state.session.setPaused(false); assert.equal(state.state.index, 0); context.mock.timers.tick(1200); assert.equal(state.finishes[0]!.reason, 'missing');
   } finally { state.restore(); context.mock.timers.reset(); }
+});
+
+test('final confirmation survives a temporarily missing or relabelled control and accepts a delayed host result', context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const save = new ButtonDouble(); const state = environment([['save', save]]);
+  try {
+    state.session.start(); state.fire('click', save); state.targets.delete('save'); state.mutate(); assert.equal(state.state.target, null); assert.match(state.state.hint, /website to confirm/);
+    context.mock.timers.tick(3000); assert.equal(state.finishes.length, 0); state.session.reportResult('save', { success: true }); assert.equal(state.finishes[0]!.verified, true);
+    context.mock.timers.tick(60000); assert.equal(state.finishes.length, 1);
+  } finally { state.restore(); context.mock.timers.reset(); }
+});
+
+test('a missing final host outcome times out honestly after 30 seconds rather than implying target failure or success', context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const save = new ButtonDouble(); const state = environment([['save', save]]);
+  try {
+    state.session.start(); state.fire('click', save); save.visible = false; state.mutate(); context.mock.timers.tick(29999); assert.equal(state.finishes.length, 0);
+    context.mock.timers.tick(1); assert.deepEqual(state.finishes, [{ reason: 'completed', verified: false, message: 'The website has not confirmed the result. Check the website before trying again.' }]); assert.equal(state.doc.listenerCount, 0);
+  } finally { state.restore(); context.mock.timers.reset(); }
+});
+
+test('Pause suspends a host confirmation timeout and Resume starts a fresh active confirmation window', context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const save = new ButtonDouble(); const state = environment([['save', save]]);
+  try {
+    state.session.start(); state.fire('click', save); save.visible = false; state.mutate(); context.mock.timers.tick(20000); state.session.setPaused(true);
+    context.mock.timers.tick(60000); assert.equal(state.finishes.length, 0); state.session.setPaused(false); context.mock.timers.tick(29999); assert.equal(state.finishes.length, 0);
+    context.mock.timers.tick(1); assert.equal(state.finishes[0]!.verified, false); assert.match(state.finishes[0]!.message!, /not confirmed/);
+  } finally { state.restore(); context.mock.timers.reset(); }
+});
+
+test('cancellation clears the host deadline and discards delayed confirmation callbacks', context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const save = new ButtonDouble(); const state = environment([['save', save]]);
+  try {
+    state.session.start(); state.fire('click', save); save.visible = false; state.mutate(); context.mock.timers.tick(1000); state.session.destroy();
+    context.mock.timers.tick(60000); state.session.reportResult('save', { success: true }); assert.deepEqual(state.finishes, [{ reason: 'stopped', verified: false }]);
+  } finally { state.restore(); context.mock.timers.reset(); }
+});
+
+test('a known host result received while paused cancels the deadline and is applied once on Resume', context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const save = new ButtonDouble(); const state = environment([['save', save]]);
+  try {
+    state.session.start(); state.fire('click', save); save.visible = false; state.mutate(); state.session.setPaused(true); state.session.reportResult('save', { success: true });
+    context.mock.timers.tick(60000); assert.equal(state.finishes.length, 0); state.session.setPaused(false); assert.equal(state.finishes[0]!.verified, true); context.mock.timers.tick(60000); assert.equal(state.finishes.length, 1);
+  } finally { state.restore(); context.mock.timers.reset(); }
+});
+
+test('grounding observes semantic attribute and text changes, not only layout mutations', () => {
+  const state = environment([['name', new InputDouble()]]);
+  try {
+    state.session.start(); const options = ObserverDouble.instances[0]!.options!; assert.equal(options.characterData, true); assert.equal(options.subtree, true);
+    for (const name of ['aria-label', 'aria-labelledby', 'role', 'title', 'placeholder', 'name', 'id', 'autocomplete', 'type']) assert.equal(options.attributeFilter?.includes(name), true, `Missing semantic observation: ${name}`);
+  } finally { state.restore(); }
 });
