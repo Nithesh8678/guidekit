@@ -13,7 +13,7 @@
     "typecheck": "tsc --noEmit",
     "build": "npm run typecheck && node --import tsx scripts/build.ts",
     "start": "node --env-file-if-exists=.env --import tsx apps/server/src/index.ts",
-    "test": "node --import tsx --test tests/*.test.ts packages/sdk/tests/*.test.ts packages/graph/tests/*.test.ts packages/runtime/src/index.test.ts",
+    "test": "node --import tsx --test tests/*.test.ts packages/sdk/tests/*.test.ts packages/graph/tests/*.test.ts packages/runtime/src/*.test.ts",
     "test:e2e": "playwright test",
     "test:live": "node --import tsx scripts/live-proof.ts",
     "test:graph": "node --env-file-if-exists=.env --import tsx scripts/graph-proof.ts",

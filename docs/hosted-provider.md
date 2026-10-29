@@ -20,7 +20,9 @@ const provider = createOpenAIProvider({
 });
 ```
 
-These names illustrate the server configuration; the factory itself does not
+Select `GUIDEKIT_PROVIDER=openai` and explicitly set `GUIDEKIT_OPENAI_ENABLED=true` to use this adapter. The default `GUIDEKIT_PROVIDER=codex` remains independent of these API fields. The server stays loopback-only for both providers; preparing the adapter does not deploy a public service.
+
+These names are wired in the server configuration; the factory itself does not
 read them. Keep the key in the server's secret manager or private process
 environment, never browser code, embed snippets, source control, image layers or
 request logs. Choose a model available to the operator's API project that supports
