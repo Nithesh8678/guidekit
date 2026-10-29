@@ -2,7 +2,7 @@ import type { Citation, ModelPlan, PublicAgent, RunResult } from '../../contract
 import { GuidanceSession, type GuidanceResult, type GuidanceState } from './guidance';
 import type { GuideStepResult } from './types';
 import { BeatScheduler, type SpeechEvents } from './beats';
-import { MotionDirector } from './motion';
+import { MotionDirector, type MotionPoint } from './motion';
 
 const styles = `
 :host{all:initial;position:fixed;inset:0;z-index:2147483000;pointer-events:none;font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#17213b;font-size:14px;line-height:1.5;color-scheme:light;--gk-accent:#365cf5}
@@ -11,6 +11,7 @@ const styles = `
 .panel{pointer-events:auto;position:fixed;right:24px;bottom:24px;width:390px;max-width:calc(100vw - 32px);height:590px;max-height:calc(100dvh - 48px);display:flex;flex-direction:column;background:#fff;border:1px solid #dfe5f0;border-radius:20px;box-shadow:0 20px 80px #17213b26,0 2px 10px #17213b14;overflow:hidden;animation:gk-appear .16s ease-out}
 @keyframes gk-appear{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
 .header{display:flex;gap:11px;align-items:center;padding:18px;border-bottom:1px solid #edf0f7;background:#fff}.mark{display:grid;place-items:center;width:36px;height:36px;flex-shrink:0;background:var(--gk-accent);border-radius:12px;color:#fff}.identity{flex:1;min-width:0}.name{font-weight:700;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.company{font-size:11px;color:#6c7890;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.icon{display:flex;align-items:center;justify-content:center;background:transparent;color:#6c7890;border-radius:8px;width:32px;height:32px;flex-shrink:0}.icon:hover{background:#f0f3fa;color:#17213b}.icon[aria-pressed=true]{background:#eef2ff;color:var(--gk-accent)}
+.cursor-dock{background:#edf1ff;background:color-mix(in srgb,var(--gk-accent) 10%,white);color:var(--gk-accent);pointer-events:none}
 .messages{padding:20px 18px 8px;overflow-y:auto;flex:1;overscroll-behavior:contain;scrollbar-width:thin;background:linear-gradient(#fafbfe,#fff 100px)}.message{margin-bottom:20px;font-size:13px;overflow-wrap:anywhere}.message.user{background:#eef2ff;padding:11px 14px;border-radius:14px 14px 3px 14px;margin-left:32px}.message.assistant{padding-right:8px}.author{text-transform:uppercase;letter-spacing:.1em;font-weight:700;font-size:9px;color:#71809c;margin-bottom:7px}.content{white-space:pre-wrap}.message.error{border-left:3px solid #df7552;padding-left:12px;color:#74452f}.sources{margin-top:12px;font-size:11px;color:#60708d}.sources summary{cursor:pointer;width:fit-content;padding:3px 0}.source{margin:9px 0;padding:10px;background:#f5f7fc;border-radius:8px}.source strong{display:block;margin-bottom:4px;color:#35425b}.source blockquote{margin:0;white-space:pre-wrap}
 .status{min-height:29px;padding:3px 18px;color:#6b7891;font-size:11px;overflow-wrap:anywhere}.status[data-error=true]{color:#a1422e}.composer{padding:0 14px 12px}.input-box{border:1px solid #dfe5f0;border-radius:13px;background:#fff;padding:10px 10px 8px;transition:border-color .2s}.input-box:focus-within{border-color:#96aaf8;box-shadow:0 0 0 3px #365cf509}textarea{display:block;width:100%;height:50px;max-height:100px;border:0;resize:none;outline:none!important;background:transparent;color:#17213b;font-size:13px;padding:0 3px;line-height:1.5}textarea::placeholder{color:#8b95a8}.input-tools{display:flex;align-items:center;gap:6px}.hint{flex:1;font-size:10px;color:#8691a5}.send{width:32px;height:32px;border-radius:9px;color:#fff;background:var(--gk-accent);display:grid;place-items:center}.stop{font-size:11px;background:#fff2ed;color:#a54428;border-radius:8px;padding:8px 10px}.footer{font-size:9px;color:#8b95a8;text-align:center;padding:0 12px 11px}.footer b{font-weight:650;color:#66748d}
 .action{margin-top:13px;border:1px solid #dfe5f0;border-radius:12px;overflow:hidden;background:#fff}.action-main{padding:13px}.action-title{font-weight:700;font-size:12px}.action-reason{font-size:12px;color:#627089;margin:5px 0 0;white-space:pre-wrap}.action pre{background:#f5f7fb;border-radius:7px;padding:10px;max-height:150px;overflow:auto;font:11px/1.5 ui-monospace,SFMono-Regular,monospace;white-space:pre-wrap;overflow-wrap:anywhere}.action-foot{border-top:1px solid #edf0f7;padding:10px 12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}.primary,.secondary{font-size:12px;font-weight:600;border-radius:8px;padding:8px 11px}.primary{background:var(--gk-accent);color:white}.secondary{background:#f0f3fa;color:#4b5a75}.action-state{font-size:11px;color:#64718a}.action-state[data-success=true]{color:#16815b}.guide-start{margin-top:12px;display:flex;align-items:center;gap:6px;width:fit-content}
@@ -63,6 +64,17 @@ export class View {
   private readonly stop: HTMLButtonElement;
   private readonly name = element('div', 'name', 'GuideKit');
   private readonly company = element('div', 'company', 'Connecting to your assistant');
+  private readonly cursorDock = element('div', 'mark cursor-dock');
+  private readonly motion: MotionDirector;
+  private readonly dockResize: ResizeObserver;
+  private cursorDocked = false;
+  private dockFrame = 0;
+  private dockUntil = 0;
+  private lastDock: MotionPoint | null = null;
+  private isBusy = false;
+  private recording = false;
+  private speaking = false;
+  private destroyed = false;
   private previousFocus: HTMLElement | null = null;
   private guideCleanup: (() => void) | null = null;
   private guideSession: GuidanceSession | null = null;
@@ -79,9 +91,11 @@ export class View {
     this.voiceLabel.textContent = provider === 'browser' ? 'Browser voice · Chrome/Edge · Microphone permission required' : 'Voice input disabled';
   }
   voiceRecording(recording: boolean): void {
+    this.recording = recording; this.cursorActivity();
     this.stop.textContent = recording ? 'Cancel voice' : 'Stop';
     this.stop.title = recording ? 'Discard this recording without sending a question' : 'Stop the current request';
   }
+  voiceSpeaking(speaking: boolean): void { this.speaking = speaking; this.cursorActivity(); }
 
   constructor(private readonly handlers: { open(): void; close(): void; submit(message: string): void; cancel(): void; mic(): void; speaker(): void; guideStep?(text: string, events: SpeechEvents): boolean; guidePause?(): void; guideFinish?(result: GuidanceResult): void; }) {
     this.host.dataset.guidekitRoot = ''; this.host.dataset.guidekitPrivate = '';
@@ -89,10 +103,10 @@ export class View {
     const style = element('style'); style.textContent = styles; this.shadow.append(style);
     this.launcher = button('', 'launcher', handlers.open); this.launcher.append(icon('spark'), element('span', '', 'Ask your assistant')); this.launcher.setAttribute('aria-label', 'Open website assistant');
     this.panel.setAttribute('role', 'dialog'); this.panel.setAttribute('aria-label', 'Website assistant'); this.panel.hidden = true;
-    const header = element('header', 'header'); const mark = element('div', 'mark'); mark.append(icon('spark'));
+    const header = element('header', 'header'); this.cursorDock.dataset.gkCursorDock = ''; this.cursorDock.setAttribute('aria-hidden', 'true');
     const identity = element('div', 'identity'); identity.append(this.name, this.company);
     this.speaker = iconButton('Read answers aloud', 'sound', handlers.speaker); this.speaker.setAttribute('aria-pressed', 'false');
-    header.append(mark, identity, this.speaker, iconButton('Close assistant', 'close', handlers.close));
+    header.append(this.cursorDock, identity, this.speaker, iconButton('Close assistant', 'close', handlers.close));
     this.messages.setAttribute('role', 'log'); this.messages.setAttribute('aria-label', 'Conversation'); this.messages.setAttribute('aria-live', 'polite'); this.messages.setAttribute('aria-relevant', 'additions');
     this.statusNode.setAttribute('role', 'status'); this.statusNode.setAttribute('aria-live', 'polite');
     const form = element('form', 'composer'); const box = element('div', 'input-box');
@@ -108,12 +122,17 @@ export class View {
     this.resumeGuide = button('Resume guide', 'secondary guide-resume', () => {
       const session = this.guideSession;
       if (!session?.active) return;
+      this.departDock();
       this.guideChatOpen = false; this.resumeGuide.hidden = true; this.panel.hidden = true; this.launcher.hidden = true;
       session.setPaused(false);
       if (this.guideSession === session && session.active) { this.guideVisibility?.(true); session.refresh(); this.guideFocus?.(); }
     }); this.resumeGuide.hidden = true;
     this.panel.append(header, this.messages, this.statusNode, this.resumeGuide, form, this.voiceLabel, footer); this.shadow.append(this.launcher, this.panel);
     document.body.append(this.host);
+    this.motion = new MotionDirector(this.shadow); this.motion.setVisible(false);
+    this.dockResize = new ResizeObserver(this.dockLayout); this.dockResize.observe(this.panel);
+    window.addEventListener('resize', this.dockLayout); window.visualViewport?.addEventListener('resize', this.dockLayout); window.visualViewport?.addEventListener('scroll', this.dockLayout);
+    document.addEventListener('visibilitychange', this.dockLayout);
   }
   configure(agent: PublicAgent): void {
     this.host.style.setProperty('--gk-accent', agent.accentColor); this.name.textContent = agent.name; this.company.textContent = `${agent.companyName} · v${agent.version}`;
@@ -122,14 +141,15 @@ export class View {
   }
   open(): void {
     if (!this.isOpen) this.previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    if (this.guideSession?.active) {
-      this.guideChatOpen = true; this.guideSession.setPaused(true); this.guideVisibility?.(false); this.handlers.guidePause?.(); this.resumeGuide.hidden = false;
+    const returning = !!this.guideSession?.active;
+    if (returning) {
+      this.guideChatOpen = true; this.guideSession?.setPaused(true); this.guideVisibility?.(false); this.handlers.guidePause?.(); this.resumeGuide.hidden = false;
     }
-    this.isOpen = true; this.panel.hidden = false; this.launcher.hidden = true; this.input.focus({ preventScroll: true });
+    this.isOpen = true; this.panel.hidden = false; this.launcher.hidden = true; this.input.focus({ preventScroll: true }); this.dockCursor(returning);
   }
-  close(): void { this.clearGuide(false); this.isOpen = false; this.panel.hidden = true; this.launcher.hidden = false; if (this.previousFocus?.isConnected) this.previousFocus.focus({ preventScroll: true }); }
+  close(): void { this.clearGuide(false); this.isOpen = false; this.panel.hidden = true; this.launcher.hidden = false; this.departDock(); this.motion.erase({ animate: false }); this.motion.setVisible(false); if (this.previousFocus?.isConnected) this.previousFocus.focus({ preventScroll: true }); }
   status(message: string, error = false): void { this.statusNode.textContent = message; this.statusNode.dataset.error = String(error); }
-  busy(value: boolean): void { this.send.disabled = value; this.stop.hidden = !value; this.input.setAttribute('aria-busy', String(value)); }
+  busy(value: boolean): void { this.isBusy = value; this.cursorActivity(); this.send.disabled = value; this.stop.hidden = !value; this.input.setAttribute('aria-busy', String(value)); }
   message(role: 'user' | 'assistant' | 'error', text: string, citations: Citation[] = []): HTMLElement {
     const message = element('div', `message ${role}`); if (role !== 'user') message.append(element('div', 'author', role === 'error' ? 'Something needs attention' : this.name.textContent ?? 'Assistant'));
     message.append(element('div', 'content', text));
@@ -180,8 +200,10 @@ export class View {
     };
   }
   guide(steps: ModelPlan['steps'], resolve: (id: string) => HTMLElement | null, onMissing: () => void): void {
+    if (this.opened && this.cursorDocked && this.motion.location !== 'flight') this.alignDock(false, true);
     this.clearGuide(false); if (!steps.length) return;
-    const motion = new MotionDirector(this.shadow), card = element('section', 'guide'), beats = new BeatScheduler();
+    this.departDock(); this.motion.setPaused(false); this.motion.setVisible(true);
+    const motion = this.motion, card = element('section', 'guide'), beats = new BeatScheduler();
     card.setAttribute('role', 'region'); card.setAttribute('aria-label', 'Visual guidance');
     const head = element('div', 'guide-header'), label = element('span', 'guide-label'), tools = element('div', 'guide-tools');
     tools.append(iconButton('Open chat', 'chat', () => this.open()), iconButton('Stop visual guidance', 'close', () => this.stopGuide())); head.append(label, tools);
@@ -193,7 +215,7 @@ export class View {
     const pause = button('Pause', 'guide-pause', () => { this.handlers.guidePause?.(); session.setPaused(!state?.paused); }); pause.setAttribute('aria-label', 'Pause guide');
     controls.append(previous, automatic, pause, next); card.append(head, progress, text, hint, controls); this.shadow.append(card);
     let state: GuidanceState | null = null, disposed = false, frame = 0, lastIndex = -1, lastNarrated = -1, narration = 0, animateNext = false;
-    let cardAnimation: Animation | null = null, observed: HTMLElement | null = null, markReady = false, lastPresented = -1, presentedTarget: HTMLElement | null = null, motionUntil = 0, lastBox = '';
+    let cardAnimation: Animation | null = null, observed: HTMLElement | null = null, markReady = false, lastPresented = -1, hasPresented = false, fromChat = true, presentedTarget: HTMLElement | null = null, motionUntil = 0, lastBox = '';
     const reduced = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
     const viewport = () => ({ left: window.visualViewport?.offsetLeft ?? 0, top: window.visualViewport?.offsetTop ?? 0, width: window.visualViewport?.width ?? document.documentElement.clientWidth, height: window.visualViewport?.height ?? window.innerHeight });
     const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(Math.max(min, max), value));
@@ -216,11 +238,11 @@ export class View {
         const box = { left, top, width: right - left, height: bottom - top };
         if (markReady && visible) {
           if (lastPresented !== state.index || presentedTarget !== current) {
-            motion.present({ id: `step-${state.index}-${state.step.targetId}`, kind: state.step.annotation ?? 'target', box, index: state.index + 1 }, { animate: !reduced(), first: lastPresented < 0 });
-            lastPresented = state.index; presentedTarget = current;
+            motion.present({ id: `step-${state.index}-${state.step.targetId}`, kind: state.step.annotation ?? 'target', box, index: state.index + 1 }, { animate: !reduced(), first: fromChat || !hasPresented });
+            fromChat = false; hasPresented = true; lastPresented = state.index; presentedTarget = current;
           } else motion.updateBounds(box);
         }
-        motion.setVisible(markReady && visible);
+        motion.setVisible(visible);
         const candidates = [[rect.right + 14, rect.top], [rect.left - cardWidth - 14, rect.top], [rect.left, rect.bottom + 14], [rect.left, rect.top - cardHeight - 14]];
         let best = Infinity;
         for (const candidate of candidates) {
@@ -251,7 +273,7 @@ export class View {
     const hostMotion = (event: Event) => {
       if (event.target instanceof Element && state?.target && event.target.contains(state.target)) { motionUntil = performance.now() + 10000; reposition(); }
     };
-    const visibility = () => { motion.setVisible(!document.hidden && !this.guideChatOpen && markReady); if (!document.hidden) schedulePosition(); };
+    const visibility = () => { if (this.cursorDocked) return; motion.setVisible(!document.hidden && !this.guideChatOpen && !!state?.target); if (!document.hidden) schedulePosition(); };
     // WAAPI-only movement emits no DOM mutation or CSS transition event. A
     // four-Hz local check notices it and enables frame tracking while moving.
     const groundingPoll = setInterval(() => {
@@ -269,13 +291,14 @@ export class View {
       onUpdate: update => {
         if (disposed) return;
         const changedStep = lastIndex !== update.index; state = update;
-        if (changedStep || update.waiting) { ++narration; markReady = false; beats.cancel(); motion.setVisible(false); this.handlers.guidePause?.(); if (update.waiting) lastNarrated = -1; }
+        const ownsMotion = !this.guideChatOpen && !this.cursorDocked;
+        if (changedStep || update.waiting) { ++narration; markReady = false; lastPresented = -1; beats.cancel(); if (ownsMotion) motion.erase({ animate: false, preserveCursor: true }); this.handlers.guidePause?.(); if (update.waiting) lastNarrated = -1; }
         const focusFirst = lastIndex < 0 && (document.activeElement === this.host || document.activeElement === document.body);
         label.textContent = `Step ${update.index + 1} of ${update.total}`; text.textContent = update.step.text; hint.textContent = update.hint;
         progress.max = update.total; progress.value = update.completed; previous.disabled = update.index === 0;
         next.textContent = update.index === update.total - 1 ? 'Finish guide' : 'Next';
         automatic.setAttribute('aria-pressed', String(update.automatic)); pause.textContent = update.paused ? 'Resume' : 'Pause'; pause.setAttribute('aria-label', update.paused ? 'Resume guide' : 'Pause guide');
-        card.dataset.paused = String(update.paused); card.dataset.waiting = String(update.waiting); motion.setPaused(update.paused); motion.element.style.opacity = update.paused ? '.45' : '1';
+        card.dataset.paused = String(update.paused); card.dataset.waiting = String(update.waiting); if (ownsMotion) { motion.setPaused(update.paused); motion.element.style.opacity = update.paused ? '.45' : '1'; }
         if (observed !== update.target) { if (observed) resize.unobserve(observed); observed = update.target; if (observed) resize.observe(observed); }
         if (!this.guideChatOpen) { this.panel.hidden = true; this.launcher.hidden = true; card.hidden = false; }
         if (focusFirst && update.target?.matches('input:not(:disabled),textarea:not(:disabled),select:not(:disabled)')) update.target.focus({ preventScroll: true });
@@ -283,7 +306,7 @@ export class View {
           const rect = update.target.getBoundingClientRect(), area = viewport();
           if (rect.top < area.top + 10 || rect.bottom > area.top + area.height - 10 || rect.left < area.left || rect.right > area.left + area.width) update.target.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: reduced() ? 'instant' : 'smooth' });
         }
-        if (update.paused) { ++narration; lastNarrated = -1; markReady = false; beats.cancel(); motion.setVisible(false); this.handlers.guidePause?.(); }
+        if (update.paused) { ++narration; lastNarrated = -1; markReady = false; lastPresented = -1; beats.cancel(); if (ownsMotion) motion.erase({ animate: false, preserveCursor: true }); this.handlers.guidePause?.(); }
         else if (!update.waiting && lastNarrated !== update.index && !this.guideChatOpen) {
           lastNarrated = update.index; const index = update.index, beat = ++narration;
           const currentBeat = () => !disposed && narration === beat && state?.index === index && !state.paused && !this.guideChatOpen;
@@ -311,12 +334,12 @@ export class View {
       }
     });
     this.guideSession = session; this.guideChatOpen = false; this.resumeGuide.hidden = true;
-    this.guideVisibility = visible => { card.hidden = !visible; motion.setVisible(visible && markReady); if (!visible) beats.cancel(); else schedulePosition(); };
+    this.guideVisibility = visible => { card.hidden = !visible; if (!this.cursorDocked) motion.setVisible(visible); if (!visible) { fromChat = true; beats.cancel(); } else schedulePosition(); };
     this.guideFocus = () => {
       if ((document.activeElement === this.host || document.activeElement === document.body) && state?.target && resolve(state.step.targetId) === state.target && state.target.matches('input:not(:disabled),textarea:not(:disabled),select:not(:disabled)')) state.target.focus({ preventScroll: true });
     };
     this.guideCleanup = () => {
-      disposed = true; session.destroy(); beats.cancel(); motion.destroy(); resize.disconnect(); mutations.disconnect(); clearInterval(groundingPoll); cancelAnimationFrame(frame); cardAnimation?.cancel();
+      disposed = true; session.destroy(); beats.cancel(); motion.erase({ animate: false, preserveCursor: true }); resize.disconnect(); mutations.disconnect(); clearInterval(groundingPoll); cancelAnimationFrame(frame); cardAnimation?.cancel();
       document.removeEventListener('scroll', reposition, true); window.removeEventListener('resize', reposition); window.visualViewport?.removeEventListener('resize', reposition); window.visualViewport?.removeEventListener('scroll', reposition);
       for (const event of ['transitionrun', 'transitionend', 'transitioncancel', 'animationstart', 'animationend', 'animationcancel']) document.removeEventListener(event, hostMotion, true);
       document.removeEventListener('visibilitychange', visibility); card.remove();
@@ -329,8 +352,32 @@ export class View {
   clearGuide(restoreChat = true): void {
     const hadGuide = !!this.guideSession; this.guideSession = null;
     const cleanup = this.guideCleanup; this.guideCleanup = null; cleanup?.(); this.guideVisibility = null; this.guideFocus = null; this.guideChatOpen = false; this.resumeGuide.hidden = true;
-    if (hadGuide && restoreChat) { this.isOpen = true; this.panel.hidden = false; this.launcher.hidden = true; this.scroll(); }
+    if (hadGuide && restoreChat) { this.isOpen = true; this.panel.hidden = false; this.launcher.hidden = true; this.scroll(); this.dockCursor(true); }
   }
-  destroy(): void { this.clearGuide(false); this.host.remove(); }
+  destroy(): void {
+    this.destroyed = true; this.clearGuide(false); this.departDock(); this.motion.destroy(); this.dockResize.disconnect();
+    window.removeEventListener('resize', this.dockLayout); window.visualViewport?.removeEventListener('resize', this.dockLayout); window.visualViewport?.removeEventListener('scroll', this.dockLayout); document.removeEventListener('visibilitychange', this.dockLayout); this.host.remove();
+  }
+  private cursorActivity(): void { if (this.cursorDocked && !this.destroyed) this.motion.setActivity(this.recording || this.speaking ? 'speaking' : this.isBusy ? 'waiting' : 'pointing'); }
+  private departDock(): void { this.cursorDocked = false; this.lastDock = null; cancelAnimationFrame(this.dockFrame); this.dockFrame = 0; }
+  private dockCursor(animate: boolean): void {
+    if (this.destroyed || !this.opened) return;
+    this.cursorDocked = true; this.motion.setPaused(false); this.motion.element.style.opacity = '1'; this.cursorActivity(); this.alignDock(animate, true);
+    this.dockUntil = performance.now() + 220; this.dockLayout();
+  }
+  private alignDock(animate: boolean, force = false): void {
+    if (this.destroyed || !this.cursorDocked || !this.opened || document.hidden || !this.cursorDock.getClientRects().length) return;
+    const rect = this.cursorDock.getBoundingClientRect(); if (!rect.width || !rect.height) return;
+    const point = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+    if (force || !this.lastDock || Math.hypot(point.x - this.lastDock.x, point.y - this.lastDock.y) > .01) { this.motion.dock(point, { animate }); this.lastDock = point; }
+    this.motion.setVisible(true);
+  }
+  private dockLayout = (): void => {
+    if (this.destroyed || !this.cursorDocked || !this.opened || document.hidden) return;
+    this.alignDock(this.motion.location === 'flight');
+    if ((performance.now() < this.dockUntil || this.panel.getAnimations().some(animation => animation.playState === 'running')) && !this.dockFrame) {
+      this.dockFrame = requestAnimationFrame(() => { this.dockFrame = 0; this.dockLayout(); });
+    }
+  };
   private scroll(): void { requestAnimationFrame(() => { this.messages.scrollTop = this.messages.scrollHeight; }); }
 }

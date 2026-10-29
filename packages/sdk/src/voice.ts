@@ -128,13 +128,14 @@ export class Voice {
     try {
       const utterance = new SpeechSynthesisUtterance(text.slice(0, 1800)); utterance.lang = document.documentElement.lang || navigator.language || 'en-US'; utterance.rate = 1;
       this.utterance = utterance;
-      utterance.onstart = () => { if (this.utterance === utterance && !this.destroyed) events?.onStart(); };
-      utterance.onend = () => { if (this.utterance === utterance) { this.utterance = null; events?.onEnd(); } };
-      utterance.onerror = () => { if (this.utterance === utterance) { this.utterance = null; events?.onError(); this.view.status('Your browser could not play the spoken answer. You can read it above.', true); } };
+      utterance.onstart = () => { if (this.utterance === utterance && !this.destroyed) { this.view.voiceSpeaking(true); events?.onStart(); } };
+      utterance.onend = () => { if (this.utterance === utterance) { this.utterance = null; this.view.voiceSpeaking(false); events?.onEnd(); } };
+      utterance.onerror = () => { if (this.utterance === utterance) { this.utterance = null; this.view.voiceSpeaking(false); events?.onError(); this.view.status('Your browser could not play the spoken answer. You can read it above.', true); } };
       window.speechSynthesis.speak(utterance); return true;
     } catch { this.utterance = null; events?.onError(); this.view.status('Spoken answers are unavailable. You can read the answer above.', true); return false; }
   }
   stopSpeaking(): void {
+    this.view.voiceSpeaking(false);
     const utterance = this.utterance; this.utterance = null;
     if (utterance) { utterance.onstart = null; utterance.onend = null; utterance.onerror = null; if ('speechSynthesis' in window) window.speechSynthesis.cancel(); }
   }

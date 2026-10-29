@@ -17,7 +17,9 @@ flowchart LR
 
 ## Interaction
 
-Chat and its launcher tuck away automatically during a walkthrough. A compact card sits beside the active control. The first editable control can receive focus when the user was in the composer. Automatic advancement moves the visual attention without moving the user's keyboard cursor. Opening chat pauses the same guide; Resume guide restores it. Pause, Back and Automatic progress remain explicit controls. Escape/Stop remove the guide and restore chat.
+The assistant cursor rests in a dock inside the chat header while the visitor asks a question. The same mounted SVG cursor departs from that exact CSS-pixel position when a grounded guide is ready. Chat and its launcher tuck away, and a compact card sits beside the active control. The first target's stroke waits until the cursor arrives. Opening chat or finishing a guide flies the cursor back into its dock; Resume guide departs from the dock again. Retargeting starts from the currently displayed pose if the user scrolls or changes the guide mid-flight.
+
+The first editable control can receive focus when the user was in the composer. Automatic advancement moves visual attention without moving the user's keyboard cursor. Opening chat pauses the same guide; Resume guide restores it. Pause, Back and Automatic progress remain explicit controls. Escape/Stop remove the guide and restore chat. The dock follows panel entrance, resize and viewport changes, while a paused guide yields renderer ownership to chat so host mutations cannot interrupt the return flight.
 
 The observer runs only for the active session. A trusted edit, native validity and 1.2 seconds of quiet complete a single-line field. A real field exit can complete it immediately. Multiline input waits for field exit; composition waits for commit. Native selections/toggles follow their change event. Quickly filled future fields are retained locally so the guide can catch up. It checks readiness, not transmitted field-value content.
 
@@ -36,7 +38,7 @@ Geometry is prepared locally and retains stable seeded variation. The annotation
 | Stroke and glow | 3.5 CSS px; radius 12, opacity .65 | Logical-point parameters adapted to browser CSS pixels |
 | Frame opening | .55 seconds | Current shipped drawing |
 | Move / erase | .5 / .4 seconds | Current shipped drawing |
-| First flight wait | .45 seconds | Current shipped drawing |
+| First flight wait | At least .45 seconds and until actual cursor arrival | .45-second source parameter; arrival gating adapts it to dock departure |
 | Later travel wait | At distance ≥110: `min(.55,.2+distance/2400)` seconds | Current shipped drawing |
 | Cursor flight | `clamp(distance/800,.6,1.4)` seconds, quadratic arc and smoothstep | Older public cursor recipe; exact current flight was unavailable |
 

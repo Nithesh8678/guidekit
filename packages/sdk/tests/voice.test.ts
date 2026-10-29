@@ -25,12 +25,13 @@ function environment(options: { supported?: boolean; secure?: boolean; gesture?:
   Recognition.instances = []; Recognition.throwOnStart = false;
   const statuses: string[] = []; const submissions: string[] = []; const attributes = new Map<string, string>(); const spoken: Utterance[] = []; let speechCancelled = 0;
   const mic = { disabled: false, title: '', setAttribute: (name: string, value: string) => attributes.set(name, value) };
-  const view = { mic, speaker: { disabled: false, title: '', setAttribute: (name: string, value: string) => attributes.set(`speaker:${name}`, value) }, input: { value: '', readOnly: false }, status: (text: string) => statuses.push(text), voiceProvider() {}, voiceRecording() {}, busy() {} } as unknown as View;
+  const speaking: boolean[] = [];
+  const view = { mic, speaker: { disabled: false, title: '', setAttribute: (name: string, value: string) => attributes.set(`speaker:${name}`, value) }, input: { value: '', readOnly: false }, status: (text: string) => statuses.push(text), voiceProvider() {}, voiceRecording() {}, voiceSpeaking(value: boolean) { speaking.push(value); }, busy() {} } as unknown as View;
   const descriptors = new Map<string, PropertyDescriptor | undefined>();
   for (const [key, value] of Object.entries({ window: { isSecureContext: options.secure ?? true, ...(options.supported === false ? {} : { webkitSpeechRecognition: Recognition }), speechSynthesis: { speak: (utterance: Utterance) => spoken.push(utterance), cancel: () => { speechCancelled++; } } }, SpeechSynthesisUtterance: Utterance, navigator: { userActivation: { isActive: options.gesture ?? true }, language: 'en-US' }, document: { documentElement: { lang: 'en-IN' } } })) {
     descriptors.set(key, Object.getOwnPropertyDescriptor(globalThis, key)); Object.defineProperty(globalThis, key, { value, configurable: true });
   }
-  return { view, statuses, submissions, attributes, spoken, speechCancelled: () => speechCancelled, submit: (message: string) => submissions.push(message), restore: () => { for (const [key, descriptor] of descriptors) { if (descriptor) Object.defineProperty(globalThis, key, descriptor); else Reflect.deleteProperty(globalThis, key); } } };
+  return { view, statuses, submissions, attributes, spoken, speaking, speechCancelled: () => speechCancelled, submit: (message: string) => submissions.push(message), restore: () => { for (const [key, descriptor] of descriptors) { if (descriptor) Object.defineProperty(globalThis, key, descriptor); else Reflect.deleteProperty(globalThis, key); } } };
 }
 
 test('browser voice question starts on gesture, finishes once, submits only final text, and enables browser TTS', () => {
@@ -120,8 +121,8 @@ test('narration callbacks follow actual playback and reject cancelled speech', (
   try {
     assert.equal(voice.speak('Muted', callbacks), false); voice.toggleOutput();
     assert.equal(voice.speak('Step one', callbacks), true); assert.deepEqual(events, []);
-    const first = state.spoken[0]!; first.onstart?.(); assert.deepEqual(events, ['start']); const late = first.onend;
-    voice.stopSpeaking(); late?.(); assert.equal(first.onstart, null); assert.deepEqual(events, ['start']);
+    const first = state.spoken[0]!; first.onstart?.(); assert.deepEqual(events, ['start']); assert.equal(state.speaking.at(-1), true); const late = first.onend;
+    voice.stopSpeaking(); late?.(); assert.equal(first.onstart, null); assert.deepEqual(events, ['start']); assert.equal(state.speaking.at(-1), false);
     voice.speak('Step two', callbacks); state.spoken[1]!.onstart?.(); state.spoken[1]!.onend?.(); assert.deepEqual(events, ['start', 'start', 'end']);
   } finally { voice.destroy(); state.restore(); }
 });
