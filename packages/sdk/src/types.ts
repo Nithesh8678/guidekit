@@ -10,6 +10,14 @@ export interface RegisteredAction {
   /** Defaults to 30 seconds; maximum 120 seconds. The host must honor signal. */
   timeoutMs?: number;
 }
+export interface VoiceOptions {
+  /** Browser speech recognition is the default; requires HTTPS/localhost and permission. */
+  provider?: 'browser' | 'disabled';
+  /** Defaults to true: the keyboard shortcut starts/stops a voice question. */
+  hotkeyStartsListening?: boolean;
+  /** Defaults to true for shortcut/API voice; microphone dictation defaults to review. */
+  autoSubmit?: boolean;
+}
 export interface MountOptions {
   agentId: string;
   endpoint: string;
@@ -17,11 +25,16 @@ export interface MountOptions {
   /** Supply deliberately public, small application context. Never include secrets. */
   getContext?(): Record<string, unknown> | Promise<Record<string, unknown>>;
   hotkey?: string;
+  voice?: VoiceOptions;
 }
 export interface GuideKitInstance {
   readonly ready: Promise<PublicAgent>;
   open(): void;
   close(): void;
+  /** Call from a real user gesture. Starts voice input and enables browser spoken answers. */
+  startVoice(): void;
+  /** Commits the current recording; close/Escape/destroy instead discard it. */
+  stopVoice(): void;
   destroy(): void;
   registerAction(name: string, action: RegisteredAction): void;
   setContext(context: Record<string, unknown>): void;
@@ -34,6 +47,8 @@ export interface GuideKitAPI {
   setContext(context: Record<string, unknown>): void;
   open(): void;
   close(): void;
+  startVoice(): void;
+  stopVoice(): void;
   destroy(): void;
 }
 declare global { interface Window { GuideKit: GuideKitAPI; } }

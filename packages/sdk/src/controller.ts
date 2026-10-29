@@ -45,18 +45,19 @@ export class Assistant implements GuideKitInstance {
     if (!validId(options.agentId)) throw new Error('GuideKit needs a valid published agent ID.');
     this.endpoint = endpointOrigin(options.endpoint);
     for (const [name, action] of Object.entries(options.actions ?? {})) this.registerAction(name, action);
-    this.view = new View({ open: () => this.open(), close: () => this.close(), submit: message => { void this.ask(message); }, cancel: () => { void this.cancel(); }, mic: () => this.voice.toggleInput(), speaker: () => this.voice.toggleOutput() });
-    this.voice = new Voice(this.view);
+    this.view = new View({ open: () => this.open(), close: () => this.close(), submit: message => { void this.ask(message); }, cancel: () => { void this.cancel(); }, mic: () => this.toggleVoice(false), speaker: () => this.voice.toggleOutput() });
+    this.voice = new Voice(this.view, options.voice ?? {}, message => { void this.ask(message); });
     const parts = (options.hotkey ?? 'mod+shift+k').toLowerCase().split('+'); const key = parts.at(-1);
     this.keyboard = event => {
-      if (event.key === 'Escape' && this.view.shadow.activeElement) { event.preventDefault(); this.close(); return; }
+      if (event.key === 'Escape' && (this.view.opened || this.voice.active)) { event.preventDefault(); this.close(); return; }
       const mod = parts.includes('mod');
       if (event.key.toLowerCase() !== key || event.repeat || (mod ? !(event.metaKey || event.ctrlKey) : event.metaKey !== parts.includes('meta') || event.ctrlKey !== parts.includes('ctrl')) || event.altKey !== parts.includes('alt') || event.shiftKey !== parts.includes('shift')) return;
       event.preventDefault(); this.open();
+      if (options.voice?.hotkeyStartsListening !== false) this.toggleVoice(true);
     };
     document.addEventListener('keydown', this.keyboard);
     this.view.status('Connecting to your published assistant…');
-    this.ready = this.ensureSession().then(session => { this.view.status('Ready. Ask anything about this website.'); return session.agent; }).catch(error => { if (!this.destroyed) { this.view.status(messageOf(error), true); this.view.message('error', `${messageOf(error)} You can retry by sending a question.`); } throw error; });
+    this.ready = this.ensureSession().then(session => { if (!this.voice.active) this.view.status('Ready. Ask anything about this website.'); return session.agent; }).catch(error => { if (!this.destroyed) { this.view.status(messageOf(error), true); this.view.message('error', `${messageOf(error)} You can retry by sending a question.`); } throw error; });
     // Auto-install must not produce an unhandled rejection when a server is offline.
     void this.ready.catch(() => undefined);
   }
@@ -66,6 +67,12 @@ export class Assistant implements GuideKitInstance {
   }
   setContext(context: Record<string, unknown>): void { this.explicitContext = safeContext(context); }
   open(): void { if (!this.destroyed) this.view.open(); }
+  startVoice(): void { if (!this.destroyed) { this.open(); if (!this.voice.active) { void this.cancel(false); this.voice.start(true); } } }
+  stopVoice(): void { if (!this.destroyed) this.voice.finishInput(); }
+  private toggleVoice(voiceFlow: boolean): void {
+    if (this.voice.active) this.voice.finishInput();
+    else { void this.cancel(false); this.voice.start(voiceFlow); }
+  }
   close(): void { if (this.destroyed) return; void this.cancel(); this.view.close(); }
   destroy(): void {
     if (this.destroyed) return;

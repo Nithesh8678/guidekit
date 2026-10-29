@@ -1,7 +1,7 @@
 import { Assistant } from './controller';
 import { compileAction, safeContext } from './security';
 import type { GuideKitAPI, GuideKitInstance, MountOptions, RegisteredAction } from './types';
-export type { ActionResult, GuideKitAPI, GuideKitInstance, MountOptions, RegisteredAction } from './types';
+export type { ActionResult, GuideKitAPI, GuideKitInstance, MountOptions, RegisteredAction, VoiceOptions } from './types';
 
 let instance: GuideKitInstance | null = null;
 const registered = new Map<string, RegisteredAction>();
@@ -22,9 +22,11 @@ export function registerAction(name: string, action: RegisteredAction): void {
 export function setContext(value: Record<string, unknown>): void { context = safeContext(value); instance?.setContext(context); }
 export function open(): void { instance?.open(); }
 export function close(): void { instance?.close(); }
+export function startVoice(): void { instance?.startVoice(); }
+export function stopVoice(): void { instance?.stopVoice(); }
 export function destroy(): void { instance?.destroy(); instance = null; }
 
-export const GuideKit: GuideKitAPI = { mount, registerAction, setContext, open, close, destroy };
+export const GuideKit: GuideKitAPI = { mount, registerAction, setContext, open, close, startVoice, stopVoice, destroy };
 
 if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   const script = document.currentScript instanceof HTMLScriptElement ? document.currentScript : null;
@@ -34,7 +36,15 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   document.dispatchEvent(new CustomEvent('guidekit:ready', { detail: { api: GuideKit } }));
   if (agentId && endpoint) {
     const start = () => {
-      try { mount({ agentId, endpoint, ...(script?.dataset.hotkey ? { hotkey: script.dataset.hotkey } : {}) }); }
+      try {
+        const provider = script?.dataset.voiceProvider;
+        if (provider && !['browser', 'disabled'].includes(provider)) throw new Error('GuideKit data-voice-provider must be browser or disabled.');
+        mount({ agentId, endpoint, ...(script?.dataset.hotkey ? { hotkey: script.dataset.hotkey } : {}), voice: {
+          ...(provider ? { provider: provider as 'browser' | 'disabled' } : {}),
+          ...(script?.dataset.voiceHotkey ? { hotkeyStartsListening: script.dataset.voiceHotkey !== 'false' } : {}),
+          ...(script?.dataset.voiceAutoSubmit ? { autoSubmit: script.dataset.voiceAutoSubmit !== 'false' } : {})
+        } });
+      }
       catch (error) { document.dispatchEvent(new CustomEvent('guidekit:error', { detail: { message: error instanceof Error ? error.message : 'GuideKit could not start.' } })); }
     };
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true }); else start();

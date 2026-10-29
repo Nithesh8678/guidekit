@@ -61,6 +61,15 @@ export class View {
   private previousFocus: HTMLElement | null = null;
   private guideCleanup: (() => void) | null = null;
   private isOpen = false;
+  private readonly voiceLabel = element('div', 'footer');
+  get opened(): boolean { return this.isOpen; }
+  voiceProvider(provider: 'browser' | 'disabled'): void {
+    this.voiceLabel.textContent = provider === 'browser' ? 'Browser voice · Chrome/Edge · Microphone permission required' : 'Voice input disabled';
+  }
+  voiceRecording(recording: boolean): void {
+    this.stop.textContent = recording ? 'Cancel voice' : 'Stop';
+    this.stop.title = recording ? 'Discard this recording without sending a question' : 'Stop the current request';
+  }
 
   constructor(handlers: { open(): void; close(): void; submit(message: string): void; cancel(): void; mic(): void; speaker(): void; }) {
     this.host.dataset.guidekitRoot = ''; this.host.dataset.guidekitPrivate = '';
@@ -84,7 +93,7 @@ export class View {
     box.append(this.input, tools); form.append(box);
     form.addEventListener('submit', event => { event.preventDefault(); const message = this.input.value.trim(); if (!message || this.send.disabled) return; this.input.value = ''; handlers.submit(message); });
     const footer = element('div', 'footer'); footer.append(document.createTextNode('Powered by '), element('b', '', 'GuideKit'), document.createTextNode(' · Actions need your approval'));
-    this.panel.append(header, this.messages, this.statusNode, form, footer); this.shadow.append(this.launcher, this.panel);
+    this.panel.append(header, this.messages, this.statusNode, form, this.voiceLabel, footer); this.shadow.append(this.launcher, this.panel);
     document.body.append(this.host);
   }
   configure(agent: PublicAgent): void {
