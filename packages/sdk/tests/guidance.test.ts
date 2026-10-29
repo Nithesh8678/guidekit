@@ -269,3 +269,104 @@ test('remembered future input is discarded if its safe element is replaced or ma
     state.fire('input', replacement); replacement.setAttribute('data-guidekit-private', ''); context.mock.timers.tick(1200); assert.equal(state.state.target, null); context.mock.timers.tick(1200); assert.equal(state.finishes[0]!.reason, 'missing');
   } finally { state.restore(); context.mock.timers.reset(); }
 });
+
+test('a hidden but connected nonfinal clicked control follows a newly available safe target without reading its value', context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const open = new ButtonDouble(); Object.defineProperty(open, 'value', { get: () => { throw new Error('Button value must never be inspected'); } });
+  const name = new InputDouble(); name.visible = false; const state = environment([['open', open], ['name', name], ['save', new ButtonDouble()]]);
+  try {
+    state.session.start(); state.fire('click', open); open.visible = false; name.visible = true; state.mutate();
+    assert.equal(open.isConnected, true); assert.equal(state.state.index, 1); context.mock.timers.tick(1200); assert.equal(state.finishes.length, 0);
+  } finally { state.restore(); context.mock.timers.reset(); }
+});
+
+test('an explicit privacy change on the clicked control does not become evidence of progress', context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const open = new ButtonDouble(); const name = new InputDouble(); name.visible = false; const state = environment([['open', open], ['name', name]]);
+  try {
+    state.session.start(); state.fire('click', open); open.setAttribute('data-guidekit-private', ''); name.visible = true; state.mutate();
+    assert.equal(state.state.index, 0); context.mock.timers.tick(1200); assert.equal(state.finishes[0]!.reason, 'missing'); assert.equal(state.finishes[0]!.verified, false);
+  } finally { state.restore(); context.mock.timers.reset(); }
+});
+
+test('clicking Pause through the HUD retains a trusted text edit and rearms its valid quiet period on Resume', context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const name = new InputDouble(); const state = environment([['name', name], ['save', new ButtonDouble()]]); const hud = new ElementDouble('div'); hud.setAttribute('data-guidekit-root', '');
+  try {
+    state.session.start(); name.value = 'Taylor'; state.fire('input', name); context.mock.timers.tick(300);
+    state.fire('focusout', name, { relatedTarget: hud }); state.session.setPaused(true); context.mock.timers.tick(5000); assert.equal(state.state.index, 0); assert.equal(state.finishes.length, 0);
+    state.session.setPaused(false); context.mock.timers.tick(1199); assert.equal(state.state.index, 0); context.mock.timers.tick(1); assert.equal(state.state.index, 1);
+  } finally { state.restore(); context.mock.timers.reset(); }
+});
+
+test('Back keeps an earlier completed step open for review and a suspended later edit resumes only when reached again', context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const name = new InputDouble(); const company = new InputDouble(); const state = environment([['name', name], ['company', company], ['save', new ButtonDouble()]]); const hud = new ElementDouble('div'); hud.setAttribute('data-guidekit-root', '');
+  try {
+    state.session.start(); name.value = 'Taylor'; state.fire('input', name); context.mock.timers.tick(1200);
+    company.value = 'Acme'; state.fire('input', company); context.mock.timers.tick(300); state.fire('focusout', company, { relatedTarget: hud }); state.session.back();
+    context.mock.timers.tick(5000); assert.equal(state.state.index, 0); state.session.next(); assert.equal(state.state.index, 1); context.mock.timers.tick(1199); assert.equal(state.state.index, 1); context.mock.timers.tick(1); assert.equal(state.state.index, 2);
+  } finally { state.restore(); context.mock.timers.reset(); }
+});
+
+test('Pause suspends missing-target expiry and Resume gives a full recovery period', context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const name = new InputDouble(); const state = environment([['name', name], ['save', new ButtonDouble()]]);
+  try {
+    state.session.start(); name.visible = false; state.mutate(); context.mock.timers.tick(600); state.session.setPaused(true); context.mock.timers.tick(5000); assert.equal(state.finishes.length, 0);
+    state.session.setPaused(false); context.mock.timers.tick(1199); assert.equal(state.finishes.length, 0); context.mock.timers.tick(1); assert.equal(state.finishes[0]!.reason, 'missing');
+  } finally { state.restore(); context.mock.timers.reset(); }
+});
+
+test('resuming a suspended observation revalidates privacy before touching the control value', context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const name = new InputDouble(); const state = environment([['name', name], ['save', new ButtonDouble()]]); const hud = new ElementDouble('div'); hud.setAttribute('data-guidekit-root', '');
+  try {
+    state.session.start(); name.value = 'Taylor'; state.fire('input', name); state.fire('focusout', name, { relatedTarget: hud }); state.session.setPaused(true);
+    name.setAttribute('data-guidekit-private', ''); Object.defineProperty(name, 'value', { get: () => { throw new Error('Private value read'); } });
+    state.session.setPaused(false); context.mock.timers.tick(1200); assert.equal(state.finishes[0]!.reason, 'missing');
+  } finally { state.restore(); context.mock.timers.reset(); }
+});
+
+test('repeated target IDs use the current occurrence and require a fresh edit for that occurrence', context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const name = new InputDouble(); const company = new InputDouble(); const save = new ButtonDouble(); const state = environment([['name', name], ['company', company], ['name', name], ['save', save]]);
+  try {
+    state.session.start(); name.value = 'Taylor'; state.fire('input', name); context.mock.timers.tick(1200);
+    company.value = 'Acme'; state.fire('input', company); context.mock.timers.tick(1200); assert.equal(state.state.index, 2);
+    state.fire('focusin', name); assert.equal(state.state.index, 2); state.fire('focusout', name, { relatedTarget: save }); context.mock.timers.tick(0); assert.equal(state.state.index, 2);
+    name.value = 'Taylor Morgan'; state.fire('input', name); context.mock.timers.tick(1200); assert.equal(state.state.index, 3);
+    state.session.reportResult('save', { success: true }); assert.equal(state.finishes[0]!.verified, true);
+  } finally { state.restore(); context.mock.timers.reset(); }
+});
+
+test('host results bind repeated buttons to the current occurrence, including the final occurrence', context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const save = new ButtonDouble(); const name = new InputDouble(); const state = environment([['save', save], ['name', name], ['save', save]]);
+  try {
+    state.session.start(); state.session.reportResult('save', { success: true }); assert.equal(state.state.index, 1); assert.equal(state.finishes.length, 0);
+    name.value = 'Taylor'; state.fire('input', name); context.mock.timers.tick(1200); assert.equal(state.state.index, 2);
+    state.session.reportResult('save', { success: false, message: 'Retry the final save.' }); assert.equal(state.state.index, 2); assert.match(state.state.hint, /final save/);
+    state.session.reportResult('save', { success: true }); assert.equal(state.finishes[0]!.verified, true);
+  } finally { state.restore(); context.mock.timers.reset(); }
+});
+
+test('an equally near repeated target records the future occurrence without jumping back to its completed occurrence', context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const name = new InputDouble(); const next = new ButtonDouble(); const state = environment([['name', name], ['next', next], ['name', name], ['save', new ButtonDouble()]]);
+  try {
+    state.session.start(); name.value = 'Taylor'; state.fire('input', name); context.mock.timers.tick(1200); assert.equal(state.state.index, 1);
+    state.fire('focusin', name); name.value = 'Taylor Morgan'; state.fire('input', name); assert.equal(state.state.index, 1);
+    state.session.reportResult('next', { success: true }); assert.equal(state.state.index, 2); context.mock.timers.tick(1200); assert.equal(state.state.index, 3);
+  } finally { state.restore(); context.mock.timers.reset(); }
+});
+
+test('a deferred host failure is processed before a paused page transition can advance the guide', context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const open = new ButtonDouble(); const name = new InputDouble(); name.visible = false; const state = environment([['open', open], ['name', name]]);
+  try {
+    state.session.start(); state.fire('click', open); state.session.setPaused(true); state.session.reportResult('open', { success: false });
+    open.visible = false; name.visible = true; state.mutate(); context.mock.timers.tick(5000); assert.equal(state.finishes.length, 0);
+    state.session.setPaused(false); assert.equal(state.state.index, 0); context.mock.timers.tick(1200); assert.equal(state.finishes[0]!.reason, 'missing');
+  } finally { state.restore(); context.mock.timers.reset(); }
+});
