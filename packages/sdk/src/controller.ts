@@ -12,6 +12,7 @@ interface PendingAction {
   outcome?: { status: 'succeeded' | 'failed' | 'cancelled'; message: string };
   reporting?: Promise<void>;
   token: string;
+  expiresAt: number;
 }
 function requestController(signal: AbortSignal | undefined, timeout: number): { controller: AbortController; cleanup(): void } {
   const controller = new AbortController(); const abort = () => controller.abort();
@@ -133,11 +134,15 @@ export class Assistant implements GuideKitInstance {
       this.view.message('error', 'The proposed action did not pass this website’s validation. Nothing was executed.');
       void this.json('/api/embed/session/action-result', { receiptId: action.receiptId, status: 'failed', message: 'Action arguments did not pass host JSON Schema or permission validation.' }, session.token).catch(() => undefined); return;
     }
-    const pending: PendingAction = { run, action, registered, controller: new AbortController(), started: false, terminal: false, token: session.token, card: null as unknown as ActionCard };
+    const pending: PendingAction = { run, action, registered, controller: new AbortController(), started: false, terminal: false, token: session.token, expiresAt: session.expiresAt, card: null as unknown as ActionCard };
     pending.card = this.view.action(container, action.name, action.reason, action.arguments, () => { void this.execute(pending); }, () => { void this.finish(pending, 'cancelled', 'The visitor declined this action.'); }); this.pending = pending;
   }
   private async execute(pending: PendingAction): Promise<void> {
     if (this.pending !== pending || pending.started || pending.terminal || pending.outcome || this.destroyed) return;
+    if (pending.expiresAt <= Date.now() + 1000) {
+      await this.finish(pending, 'cancelled', 'This approval expired before execution. Ask again to review a fresh action.');
+      return;
+    }
     pending.started = true; pending.card.executing(); this.view.busy(true); this.view.status('Running your approved action…');
     const request = requestController(pending.controller.signal, pending.registered.definition.timeoutMs ?? 30_000);
     try {

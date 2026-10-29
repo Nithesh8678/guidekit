@@ -16,7 +16,7 @@ export function isSafeTarget(element: Element): element is HTMLElement {
 function publicText(element: Element): string {
   if (element.closest(privateSelector)) return '';
   let text = '';
-  const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT, { acceptNode: node => node.parentElement?.closest(`${privateSelector},script,style,textarea,select,input`) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT });
+  const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT, { acceptNode: node => node.parentElement?.closest(`${privateSelector},script,style,textarea,select,input,[contenteditable]:not([contenteditable="false"])`) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT });
   while (walker.nextNode() && text.length < 200) text += ` ${walker.currentNode.textContent ?? ''}`;
   return text.replace(/\s+/g, ' ').trim().slice(0, 160);
 }

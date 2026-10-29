@@ -1,4 +1,4 @@
-import Ajv, { type ValidateFunction } from 'ajv';
+import { compileInputSchema, type InputValidator } from '../../contracts/src/schema';
 import type { PublicAgent, RunResult } from '../../contracts/src/index';
 import type { RegisteredAction } from './types';
 
@@ -38,8 +38,7 @@ export function safeContext(value: unknown): Record<string, unknown> {
   return record(value) ? (copy(value, 0) as Record<string, unknown> ?? {}) : {};
 }
 
-export interface CompiledAction { definition: RegisteredAction; validate: ValidateFunction; }
-const ajv = new Ajv({ strict: true, allErrors: false, coerceTypes: false, useDefaults: false, removeAdditional: false, ownProperties: true });
+export interface CompiledAction { definition: RegisteredAction; validate: InputValidator; }
 export function compileAction(name: string, definition: RegisteredAction): CompiledAction {
   if (!validId(name) || !record(definition) || typeof definition.description !== 'string' || definition.description.length > 500 || !record(definition.inputSchema) || typeof definition.execute !== 'function' || definition.requiresConfirmation !== true) throw new Error('Actions require a valid name, description, object JSON Schema, execute function, and requiresConfirmation: true.');
   const schemaText = JSON.stringify(definition.inputSchema);
@@ -47,7 +46,7 @@ export function compileAction(name: string, definition: RegisteredAction): Compi
   if (definition.timeoutMs !== undefined && (!Number.isFinite(definition.timeoutMs) || definition.timeoutMs < 100 || definition.timeoutMs > 120_000)) throw new Error('Action timeout must be between 100 and 120000 ms.');
   // Snapshot the descriptor so later host mutations cannot change an approved action.
   const copied = { ...definition, inputSchema: JSON.parse(schemaText) as Record<string, unknown> };
-  return { definition: copied, validate: ajv.compile(copied.inputSchema) };
+  return { definition: copied, validate: compileInputSchema(copied.inputSchema) };
 }
 
 export function parsePublicAgent(value: unknown): PublicAgent {

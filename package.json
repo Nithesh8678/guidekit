@@ -7,21 +7,20 @@
     "node": ">=24.0.0"
   },
   "scripts": {
-    "dev": "tsx scripts/dev.ts",
-    "dev:server": "tsx watch apps/server/src/index.ts",
+    "dev": "node --import tsx scripts/dev.ts",
+    "dev:server": "node --import tsx --watch apps/server/src/index.ts",
     "dev:dashboard": "vite --host 127.0.0.1",
     "typecheck": "tsc --noEmit",
-    "build": "npm run typecheck && tsx scripts/build.ts",
-    "start": "tsx apps/server/src/index.ts",
-    "test": "tsx --test tests/*.test.ts",
+    "build": "npm run typecheck && node --import tsx scripts/build.ts",
+    "start": "node --import tsx apps/server/src/index.ts",
+    "test": "node --import tsx --test tests/*.test.ts packages/sdk/tests/*.test.ts packages/runtime/src/index.test.ts",
     "test:e2e": "playwright test",
-    "test:live": "tsx scripts/live-proof.ts",
+    "test:live": "node --import tsx scripts/live-proof.ts",
     "check": "npm run typecheck && npm test && npm run build",
     "audit:secrets": "node scripts/check-secrets.mjs"
   },
   "dependencies": {
     "@node-rs/argon2": "2.0.2",
-    "ajv": "8.20.0",
     "express": "5.1.0",
     "express-rate-limit": "8.7.1",
     "express-session": "1.18.2",
