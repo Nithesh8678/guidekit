@@ -1,0 +1,72 @@
+// Install on a dedicated TigerGraph database. These statements deliberately do
+// not drop or replace existing schema. See docs/tigergraph.md for setup.
+// Vertex IDs are SHA-256 hashes containing tenant, agent and published version.
+CREATE VERTEX GKVersion (
+  PRIMARY_ID id STRING,
+  scope STRING,
+  tenant_id STRING,
+  agent_id STRING,
+  version INT,
+  manifest STRING,
+  ready BOOL DEFAULT false,
+  vertex_count INT,
+  edge_count INT
+)
+
+CREATE VERTEX GKDocument (
+  PRIMARY_ID id STRING,
+  scope STRING,
+  tenant_id STRING,
+  agent_id STRING,
+  version INT,
+  document_id STRING,
+  title STRING
+)
+
+CREATE VERTEX GKChunk (
+  PRIMARY_ID id STRING,
+  scope STRING,
+  tenant_id STRING,
+  agent_id STRING,
+  version INT,
+  document_id STRING,
+  title STRING,
+  excerpt STRING,
+  ordinal INT
+)
+
+CREATE VERTEX GKConcept (
+  PRIMARY_ID id STRING,
+  scope STRING,
+  tenant_id STRING,
+  agent_id STRING,
+  version INT,
+  term STRING
+)
+
+// Action vertices are descriptive metadata. They never authorize execution.
+CREATE VERTEX GKAction (
+  PRIMARY_ID id STRING,
+  scope STRING,
+  tenant_id STRING,
+  agent_id STRING,
+  version INT,
+  name STRING
+)
+
+CREATE DIRECTED EDGE GK_HAS_DOCUMENT (FROM GKVersion, TO GKDocument)
+  WITH REVERSE_EDGE="GK_DOCUMENT_OF"
+CREATE DIRECTED EDGE GK_HAS_CHUNK (FROM GKDocument, TO GKChunk)
+  WITH REVERSE_EDGE="GK_CHUNK_OF"
+CREATE DIRECTED EDGE GK_MENTIONS (FROM GKChunk, TO GKConcept)
+  WITH REVERSE_EDGE="GK_MENTIONED_BY"
+CREATE DIRECTED EDGE GK_ALLOWS_ACTION (FROM GKVersion, TO GKAction)
+  WITH REVERSE_EDGE="GK_ACTION_OF"
+
+CREATE GRAPH GuideKit (
+  GKVersion, GKDocument, GKChunk, GKConcept, GKAction,
+  GK_HAS_DOCUMENT, GK_DOCUMENT_OF,
+  GK_HAS_CHUNK, GK_CHUNK_OF,
+  GK_MENTIONS, GK_MENTIONED_BY,
+  GK_ALLOWS_ACTION, GK_ACTION_OF
+)

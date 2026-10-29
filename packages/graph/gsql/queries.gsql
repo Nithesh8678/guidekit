@@ -1,0 +1,141 @@
+USE GRAPH GuideKit
+
+CREATE QUERY guidekit_status() FOR GRAPH GuideKit SYNTAX v2 {
+  PRINT 1 AS schema_version;
+}
+
+CREATE QUERY guidekit_version(
+  STRING scope, STRING tenant_id, STRING agent_id, INT version
+) FOR GRAPH GuideKit SYNTAX v2 {
+  Versions = SELECT v FROM GKVersion:v
+    WHERE v.scope == scope AND v.tenant_id == tenant_id
+      AND v.agent_id == agent_id AND v.version == version;
+  PRINT Versions AS versions;
+}
+
+CREATE QUERY guidekit_retrieve(
+  STRING scope, STRING tenant_id, STRING agent_id, INT version,
+  SET<STRING> terms, INT max_results = 8
+) FOR GRAPH GuideKit SYNTAX v2 {
+  TYPEDEF TUPLE<STRING seed_document_id, STRING concept> Path;
+  OrAccum @@version_ready;
+  SumAccum<INT> @direct_matches;
+  SumAccum<INT> @score;
+  MinAccum<INT> @first_candidate_ordinal;
+  SetAccum<STRING> @seed_document_ids;
+  HeapAccum<Path>(8, seed_document_id ASC, concept ASC) @paths;
+  INT result_limit = max_results;
+
+  IF result_limit < 1 THEN result_limit = 1; END;
+  IF result_limit > 16 THEN result_limit = 16; END;
+
+  ReadyVersions = SELECT v FROM GKVersion:v
+    WHERE v.scope == scope AND v.tenant_id == tenant_id
+      AND v.agent_id == agent_id AND v.version == version
+      AND v.ready == true
+    ACCUM @@version_ready += true;
+
+  Documents = SELECT d
+    FROM ReadyVersions:v -(GK_HAS_DOCUMENT>)- GKDocument:d
+    WHERE v.scope == scope AND v.tenant_id == tenant_id
+      AND v.agent_id == agent_id AND v.version == version
+      AND d.scope == scope AND d.tenant_id == tenant_id
+      AND d.agent_id == agent_id AND d.version == version;
+
+  Chunks = SELECT ch
+    FROM Documents:d -(GK_HAS_CHUNK>)- GKChunk:ch
+    WHERE d.scope == scope AND d.tenant_id == tenant_id
+      AND d.agent_id == agent_id AND d.version == version
+      AND ch.scope == scope AND ch.tenant_id == tenant_id
+      AND ch.agent_id == agent_id AND ch.version == version;
+
+  // Match question concepts, then keep at most 32 seed chunks. Accumulation
+  // precedes LIMIT; only the bounded returned seed set is expanded below.
+  Seeds = SELECT ch
+    FROM Chunks:ch -(GK_MENTIONS>)- GKConcept:c
+    WHERE ch.scope == scope AND ch.tenant_id == tenant_id
+      AND ch.agent_id == agent_id AND ch.version == version
+      AND c.scope == scope AND c.tenant_id == tenant_id
+      AND c.agent_id == agent_id AND c.version == version
+      AND c.term IN terms
+    ACCUM ch.@direct_matches += 1,
+      ch.@score += 1,
+      ch.@paths += Path(ch.document_id, c.term)
+    ORDER BY ch.@direct_matches DESC, ch.document_id ASC, ch.ordinal ASC
+    LIMIT 32;
+
+  // Expand ALL concepts of the seed chunks, including concepts absent from
+  // the question. Shared concepts can therefore find additional documents.
+  Bridges = SELECT c
+    FROM Seeds:ch -(GK_MENTIONS>)- GKConcept:c
+    WHERE ch.scope == scope AND ch.tenant_id == tenant_id
+      AND ch.agent_id == agent_id AND ch.version == version
+      AND c.scope == scope AND c.tenant_id == tenant_id
+      AND c.agent_id == agent_id AND c.version == version
+    ACCUM c.@seed_document_ids += ch.document_id
+    ORDER BY c.term ASC
+    LIMIT 256;
+
+  // Verify the related chunk's document and version memberships as well as
+  // every vertex's scope. A malformed cross-scope edge cannot join snapshots.
+  Related = SELECT ch
+    FROM Bridges:c -(GK_MENTIONED_BY>)- GKChunk:ch
+      -(GK_CHUNK_OF>)- GKDocument:d -(GK_DOCUMENT_OF>)- GKVersion:v
+    WHERE c.scope == scope AND c.tenant_id == tenant_id
+      AND c.agent_id == agent_id AND c.version == version
+      AND ch.scope == scope AND ch.tenant_id == tenant_id
+      AND ch.agent_id == agent_id AND ch.version == version
+      AND d.scope == scope AND d.tenant_id == tenant_id
+      AND d.agent_id == agent_id AND d.version == version
+      AND ch.document_id == d.document_id
+      AND v.scope == scope AND v.tenant_id == tenant_id
+      AND v.agent_id == agent_id AND v.version == version AND v.ready == true
+    ACCUM FOREACH seed_document_id IN c.@seed_document_ids DO
+      ch.@score += 1,
+      ch.@paths += Path(seed_document_id, c.term)
+    END;
+
+  Candidates = Seeds UNION Related;
+
+  // Keep one representative chunk per document before the final LIMIT, so
+  // repeated title concepts in a long document cannot consume every slot.
+  CandidateDocuments = SELECT d
+    FROM Candidates:ch -(GK_CHUNK_OF>)- GKDocument:d
+    WHERE ch.scope == scope AND ch.tenant_id == tenant_id
+      AND ch.agent_id == agent_id AND ch.version == version
+      AND d.scope == scope AND d.tenant_id == tenant_id
+      AND d.agent_id == agent_id AND d.version == version
+      AND ch.document_id == d.document_id
+    ACCUM d.@first_candidate_ordinal += ch.ordinal;
+
+  UniqueChunks = SELECT ch
+    FROM Candidates:ch -(GK_CHUNK_OF>)- GKDocument:d
+    WHERE ch.scope == scope AND ch.tenant_id == tenant_id
+      AND ch.agent_id == agent_id AND ch.version == version
+      AND d.scope == scope AND d.tenant_id == tenant_id
+      AND d.agent_id == agent_id AND d.version == version
+      AND ch.document_id == d.document_id
+      AND ch.ordinal == d.@first_candidate_ordinal;
+
+  Chosen = SELECT ch FROM UniqueChunks:ch
+    ORDER BY ch.@direct_matches DESC, ch.@score DESC,
+      ch.document_id ASC, ch.ordinal ASC
+    LIMIT result_limit;
+
+  // Projection aliases make the JSON contract independent of GSQL's implicit
+  // attribute prefixes. Each paths entry is a tuple encoded as a JSON object.
+  PRINT @@version_ready AS version_ready;
+  PRINT Chosen[
+    Chosen.scope AS scope,
+    Chosen.tenant_id AS tenant_id,
+    Chosen.agent_id AS agent_id,
+    Chosen.version AS version,
+    Chosen.document_id AS document_id,
+    Chosen.title AS title,
+    Chosen.excerpt AS excerpt,
+    Chosen.@score AS score,
+    Chosen.@paths AS paths
+  ] AS evidence;
+}
+
+INSTALL QUERY guidekit_status, guidekit_version, guidekit_retrieve
