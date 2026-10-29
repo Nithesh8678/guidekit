@@ -160,8 +160,8 @@ test('editing a previous field cancels the pending next-field timer and returns 
     state.session.start(); name.value = 'Taylor'; state.fire('input', name); context.mock.timers.tick(1200); assert.equal(state.state.index, 1);
     company.value = 'Acme'; state.fire('input', company); context.mock.timers.tick(600);
     state.fire('focusin', name); assert.equal(state.state.index, 0); context.mock.timers.tick(1200); assert.equal(state.state.index, 0);
-    name.value = 'Taylor Morgan'; state.fire('input', name); assert.equal(state.state.completed, 0); context.mock.timers.tick(1200); assert.equal(state.state.index, 1);
-    state.session.back(); assert.equal(state.state.index, 0); state.session.next(); assert.equal(state.state.index, 1);
+    name.value = 'Taylor Morgan'; state.fire('input', name); assert.equal(state.state.completed, 0); context.mock.timers.tick(1200); assert.equal(state.state.index, 2); // Company was already genuinely edited and valid.
+    state.session.back(); assert.equal(state.state.index, 1); state.session.next(); assert.equal(state.state.index, 2);
   } finally { state.restore(); context.mock.timers.reset(); }
 });
 
@@ -193,4 +193,79 @@ test('host verification can arrive synchronously before the click completes, wit
   const save = new ButtonDouble(); const state = environment([['save', save]]);
   try { state.session.start(); state.fire('click', save); state.session.reportResult('save', { success: true }); state.fire('submit', new FormDouble()); state.session.reportResult('save', { success: true }); context.mock.timers.tick(2000); assert.equal(state.finishes.length, 1); assert.equal(state.finishes[0]!.verified, true); }
   finally { state.restore(); context.mock.timers.reset(); }
+});
+
+test('rapid Tab and filling the next known field needs no second edit or idle wait after either field exit', context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const name = new InputDouble(); const company = new InputDouble(); const save = new ButtonDouble(); const state = environment([['name', name], ['company', company], ['save', save]]);
+  try {
+    state.session.start(); name.value = 'Taylor'; state.fire('input', name);
+    state.fire('focusout', name, { relatedTarget: company }); state.fire('focusin', company); company.value = 'Acme'; state.fire('input', company);
+    state.fire('focusout', company, { relatedTarget: save }); state.fire('focusin', save);
+    assert.equal(state.state.index, 0); context.mock.timers.tick(0); assert.equal(state.state.index, 2); assert.equal(state.state.completed, 2);
+    state.fire('click', save); assert.equal(state.state.waiting, true); context.mock.timers.tick(1200); assert.equal(state.finishes.length, 0);
+    state.session.reportResult('save', { success: true }); assert.equal(state.finishes[0]!.verified, true);
+  } finally { state.restore(); context.mock.timers.reset(); }
+});
+
+test('a trusted future choice is remembered, but an invalid future field cannot be skipped', context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const name = new InputDouble(); const status = new SelectDouble(); const company = new InputDouble(); const state = environment([['name', name], ['status', status], ['company', company], ['save', new ButtonDouble()]]);
+  try {
+    state.session.start(); name.value = 'Taylor'; state.fire('input', name);
+    state.fire('change', status); company.value = 'Acme'; state.fire('input', company); company.validity.valid = false;
+    context.mock.timers.tick(1200); assert.equal(state.state.index, 2); assert.equal(state.state.completed, 2); assert.equal(state.finishes.length, 0);
+    company.validity.valid = true; context.mock.timers.tick(5000); assert.equal(state.state.index, 2); // Fixing validity programmatically does not impersonate another edit.
+    state.fire('input', company); context.mock.timers.tick(1200); assert.equal(state.state.index, 3);
+  } finally { state.restore(); context.mock.timers.reset(); }
+});
+
+test('future textarea and IME input retain their completion rules when the guide catches up', context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const name = new InputDouble(); const description = new TextareaDouble(); const company = new InputDouble(); const state = environment([['name', name], ['description', description], ['company', company], ['save', new ButtonDouble()]]);
+  try {
+    state.session.start(); name.value = 'Taylor'; state.fire('input', name);
+    description.value = 'Still writing'; state.fire('input', description);
+    company.value = 'Acme'; state.fire('compositionstart', company); state.fire('input', company, { isComposing: true });
+    context.mock.timers.tick(5000); assert.equal(state.state.index, 1);
+    state.fire('focusout', description, { relatedTarget: company }); context.mock.timers.tick(0); assert.equal(state.state.index, 2);
+    context.mock.timers.tick(5000); assert.equal(state.state.index, 2);
+    state.fire('compositionend', company); context.mock.timers.tick(1200); assert.equal(state.state.index, 3);
+  } finally { state.restore(); context.mock.timers.reset(); }
+});
+
+test('earlier user edits discard a deferred final host result instead of completing from a stale receipt', context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const name = new InputDouble(); const save = new ButtonDouble(); const state = environment([['name', name], ['save', save]]);
+  try {
+    state.session.start(); name.value = 'Taylor'; state.fire('input', name); context.mock.timers.tick(1200); assert.equal(state.state.index, 1);
+    state.fire('click', save); state.session.setPaused(true); state.session.reportResult('save', { success: true }); assert.equal(state.finishes.length, 0);
+    state.fire('focusin', name); name.value = 'Taylor Morgan'; state.fire('input', name); assert.equal(state.state.index, 0); assert.equal(state.state.completed, 0);
+    state.session.setPaused(false); assert.equal(state.finishes.length, 0); context.mock.timers.tick(1200); assert.equal(state.state.index, 1); assert.equal(state.finishes.length, 0);
+  } finally { state.restore(); context.mock.timers.reset(); }
+});
+
+test('a disappearing nonfinal clicked control advances only when the next known target newly appears', context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const open = new ButtonDouble(); const name = new InputDouble(); name.visible = false; const state = environment([['open', open], ['name', name], ['save', new ButtonDouble()]]);
+  try {
+    state.session.start(); state.fire('click', open); open.isConnected = false; name.visible = true; state.mutate(); assert.equal(state.state.index, 1); assert.equal(state.state.completed, 1);
+    context.mock.timers.tick(1200); assert.equal(state.finishes.length, 0);
+  } finally { state.restore(); }
+  const visibleOpen = new ButtonDouble(); const visibleNext = new InputDouble(); const existing = environment([['open', visibleOpen], ['name', visibleNext]]);
+  try {
+    existing.session.start(); existing.fire('click', visibleOpen); visibleOpen.isConnected = false; existing.mutate(); assert.equal(existing.state.index, 0);
+    context.mock.timers.tick(1200); assert.equal(existing.finishes[0]!.reason, 'missing'); assert.equal(existing.finishes[0]!.verified, false);
+  } finally { existing.restore(); context.mock.timers.reset(); }
+});
+
+test('remembered future input is discarded if its safe element is replaced or made private before consumption', context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const name = new InputDouble(); const company = new InputDouble(); const state = environment([['name', name], ['company', company], ['save', new ButtonDouble()]]);
+  try {
+    state.session.start(); name.value = 'Taylor'; state.fire('input', name); company.value = 'Acme'; state.fire('input', company);
+    const replacement = new InputDouble(); replacement.ownerDocument = state.doc; replacement.value = 'Prefilled by the site'; company.isConnected = false; state.targets.set('company', replacement);
+    context.mock.timers.tick(1200); assert.equal(state.state.index, 1); context.mock.timers.tick(5000); assert.equal(state.state.index, 1);
+    state.fire('input', replacement); replacement.setAttribute('data-guidekit-private', ''); context.mock.timers.tick(1200); assert.equal(state.state.target, null); context.mock.timers.tick(1200); assert.equal(state.finishes[0]!.reason, 'missing');
+  } finally { state.restore(); context.mock.timers.reset(); }
 });

@@ -16,6 +16,7 @@ export interface GuidanceState {
 export interface GuidanceResult { reason: 'completed' | 'stopped' | 'missing'; verified: boolean; message?: string; }
 interface Callbacks { onUpdate(state: GuidanceState): void; onFinish(result: GuidanceResult): void; }
 interface HostResult { success: boolean; message?: string; }
+interface Observation { target: HTMLElement; kind: 'text' | 'textarea' | 'choice'; ready: boolean; timer: ReturnType<typeof setTimeout> | null; }
 const quietMs = 1200;
 const recoveryMs = 1200;
 const events = ['input', 'change', 'focusin', 'focusout', 'compositionstart', 'compositionend', 'click', 'submit'] as const;
@@ -41,6 +42,7 @@ function validForm(form: HTMLFormElement): boolean {
   return Array.from(form.elements).every(element => !('willValidate' in element) || !(element as HTMLInputElement).willValidate || ((element as HTMLInputElement).validity.valid && element.getAttribute('aria-invalid') !== 'true'));
 }
 function guideControl(target: EventTarget | null): boolean { return target instanceof HTMLElement && Boolean(target.closest('[data-guidekit-root]')); }
+function pageControl(target: EventTarget | null): target is HTMLElement { return target instanceof HTMLElement && !guideControl(target) && isSafeTarget(target) && enabled(target) && (input(target) || textarea(target) || choice(target) || clickable(target)); }
 
 /** Local, bounded observation of the known controls in a guide. Never reads values into callbacks. */
 export class GuidanceSession {
@@ -53,6 +55,7 @@ export class GuidanceSession {
   private completed = new Set<number>();
   private edited = new WeakSet<HTMLElement>();
   private composing = new WeakSet<HTMLElement>();
+  private observations = new Map<number, Observation>();
   private target: HTMLElement | null = null;
   private document: Document | null = null;
   private observer: MutationObserver | null = null;
@@ -62,6 +65,7 @@ export class GuidanceSession {
   private waitingForResult = false;
   private failure = '';
   private submitted: { index: number; nextBefore: HTMLElement | null } | null = null;
+  private clicked: { index: number; target: HTMLElement; nextBefore: HTMLElement | null } | null = null;
   private deferredResult: { id: string; result: HostResult } | null = null;
   private lastState: GuidanceState | null = null;
 
@@ -83,20 +87,21 @@ export class GuidanceSession {
 
   next(): void {
     if (!this.running) return;
+    this.forgetObservation(this.index);
     this.completed.add(this.index);
     if (this.index === this.steps.length - 1) { this.finish({ reason: 'completed', verified: false, message: 'Guide ended without a confirmed website result.' }); return; }
     this.move(this.index + 1);
   }
-  back(): void { if (this.running) this.move(Math.max(0, this.index - 1)); }
+  back(): void { if (this.running) this.move(Math.max(0, this.index - 1), false); }
   setAutomatic(value: boolean): void {
     if (!this.running) return;
     this.automatic = value; this.cancelStepTimer(); this.emit();
-    if (value && !this.paused) this.applyDeferredResult();
+    if (value && !this.paused) { this.applyDeferredResult(); this.consumeObservation(); }
   }
   setPaused(value: boolean): void {
     if (!this.running) return;
     this.paused = value; this.cancelStepTimer(); this.emit();
-    if (!value && this.automatic) this.applyDeferredResult();
+    if (!value && this.automatic) { this.applyDeferredResult(); this.consumeObservation(); }
   }
 
   reportResult(targetId: string, result: HostResult): void {
@@ -104,7 +109,7 @@ export class GuidanceSession {
     const index = this.steps.findIndex(step => step.targetId === targetId);
     if (index < 0 || (index !== this.index && index !== this.steps.length - 1)) return;
     if (this.paused || !this.automatic) { this.deferredResult = { id: targetId, result: { ...result } }; return; }
-    this.cancelStepTimer(); this.submitted = null;
+    this.cancelStepTimer(); this.submitted = null; this.clicked = null;
     if (!result.success) {
       if (index !== this.index) return;
       this.waitingForResult = false;
@@ -117,12 +122,17 @@ export class GuidanceSession {
 
   refresh(): void {
     if (!this.running) return;
+    if (this.clicked && this.automatic && !this.paused && this.index < this.steps.length - 1 && !this.clicked.target.isConnected) {
+      const next = this.safeTarget(this.index + 1);
+      if (next && next !== this.clicked.nextBefore) { this.complete(); return; }
+    }
     if (this.submitted && this.automatic && !this.paused && this.index < this.steps.length - 1) {
       const next = this.safeTarget(this.index + 1);
       if (next && next !== this.submitted.nextBefore) { this.complete(); return; }
     }
     const target = this.safeTarget(this.index);
     if (target !== this.target) { this.cancelStepTimer(); this.target = target; }
+    if (this.observations.get(this.index)?.target !== target) this.forgetObservation(this.index);
     if (target) {
       if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
       this.recoveryTimer = null;
@@ -143,14 +153,16 @@ export class GuidanceSession {
     const step = this.steps[index]; if (!step) return null;
     try { const target = this.resolve(step.targetId); return target && isSafeTarget(target) ? target : null; } catch { return null; }
   }
-  private move(index: number): void {
+  private move(index: number, consume = true): void {
     this.cancelStepTimer();
     if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
-    this.recoveryTimer = null; this.index = index; this.target = null; this.waitingForResult = false; this.failure = ''; this.submitted = null; this.lastState = null;
+    this.recoveryTimer = null; this.index = index; this.target = null; this.waitingForResult = false; this.failure = ''; this.submitted = null; this.clicked = null; this.lastState = null;
     this.refresh();
+    if (consume) this.consumeObservation();
   }
   private complete(): void {
     if (!this.running || this.paused || !this.automatic) return;
+    this.forgetObservation(this.index);
     this.completed.add(this.index);
     let next = this.steps.findIndex((_, index) => index > this.index && !this.completed.has(index));
     if (next < 0) next = this.steps.findIndex((_, index) => !this.completed.has(index));
@@ -158,6 +170,29 @@ export class GuidanceSession {
     else this.move(next);
   }
   private applyDeferredResult(): void { const pending = this.deferredResult; this.deferredResult = null; if (pending) this.reportResult(pending.id, pending.result); }
+  private forgetObservation(index: number): void { const previous = this.observations.get(index); if (previous?.timer) clearTimeout(previous.timer); this.observations.delete(index); }
+  private remember(index: number, target: HTMLElement, kind: Observation['kind'], ready: boolean): void {
+    this.forgetObservation(index);
+    const observation: Observation = { target, kind, ready, timer: null };
+    this.observations.set(index, observation);
+    if (kind === 'text' && !ready && valid(target) && !this.composing.has(target)) {
+      observation.timer = setTimeout(() => {
+        observation.timer = null;
+        if (!this.running || this.observations.get(index) !== observation) return;
+        if (this.safeTarget(index) !== target || !valid(target) || this.composing.has(target)) { this.forgetObservation(index); if (index === this.index) this.refresh(); return; }
+        observation.ready = true;
+        if (this.index === index && this.automatic && !this.paused) this.complete();
+      }, quietMs);
+    }
+    if (ready && index === this.index) this.consumeObservation();
+  }
+  private consumeObservation(): void {
+    if (!this.running || this.paused || !this.automatic) return;
+    const observation = this.observations.get(this.index);
+    if (!observation?.ready || this.composing.has(observation.target)) return;
+    if (this.safeTarget(this.index) !== observation.target || !valid(observation.target)) { this.forgetObservation(this.index); return; }
+    this.later(observation.target, 0, () => this.complete());
+  }
   private cancelStepTimer(): void { this.epoch++; if (this.stepTimer) clearTimeout(this.stepTimer); this.stepTimer = null; }
   private later(target: HTMLElement, delay: number, callback: () => void): void {
     this.cancelStepTimer(); if (!this.automatic || this.paused) return;
@@ -196,40 +231,58 @@ export class GuidanceSession {
     const source = event.target;
     const index = this.steps.findIndex((_, index) => { const target = this.safeTarget(index); return target === source || (event.type === 'click' && Boolean(target && clickable(target) && target.contains(source))); });
     if (index < 0) return;
-    if ((event.type === 'focusin' || event.type === 'input') && index < this.index) this.move(index);
-    if (index !== this.index) return;
+    if ((event.type === 'focusin' || event.type === 'input') && index < this.index) this.move(index, false);
     const target = this.safeTarget(index); if (!target || !enabled(target)) return;
-    if (event.type === 'focusin') { this.cancelStepTimer(); return; }
-    if (event.type === 'compositionstart') { this.composing.add(target); this.cancelStepTimer(); return; }
+    if (event.type === 'focusin') { if (index === this.index) this.cancelStepTimer(); return; }
+    if (event.type === 'compositionstart') { this.composing.add(target); this.forgetObservation(index); if (index === this.index) this.cancelStepTimer(); return; }
     if (event.type === 'compositionend') {
       this.composing.delete(target);
-      if (this.edited.has(target) && input(target) && !choice(target) && !clickable(target) && valid(target)) this.later(target, quietMs, () => this.complete());
+      if (this.edited.has(target) && input(target) && !choice(target) && !clickable(target) && valid(target)) this.remember(index, target, 'text', false);
       return;
     }
     if (event.type === 'input') {
-      this.cancelStepTimer(); this.completed.delete(index); this.edited.add(target); this.failure = ''; this.waitingForResult = false;
+      if (index === this.index) { this.cancelStepTimer(); this.failure = ''; this.waitingForResult = false; }
+      this.completed.delete(index); this.edited.add(target); this.deferredResult = null; this.submitted = null;
       if ((event as InputEvent).isComposing) this.composing.add(target);
-      if (input(target) && !choice(target) && !clickable(target) && valid(target) && !this.composing.has(target)) this.later(target, quietMs, () => this.complete());
+      if (textarea(target)) this.remember(index, target, 'textarea', false);
+      else if (input(target) && !choice(target) && !clickable(target)) this.remember(index, target, 'text', false);
+      else if (choice(target)) this.remember(index, target, 'choice', false);
       this.emit(); return;
     }
     if (event.type === 'change') {
+      this.forgetObservation(index); this.completed.delete(index); this.edited.add(target); this.deferredResult = null;
       if (!valid(target) || this.composing.has(target)) return;
-      this.completed.delete(index); this.edited.add(target); this.failure = '';
-      if (choice(target) || textarea(target)) this.later(target, 0, () => this.complete());
-      else if (input(target) && !clickable(target)) this.later(target, quietMs, () => this.complete());
+      if (index === this.index) this.failure = '';
+      if (choice(target)) this.remember(index, target, 'choice', true);
+      else if (textarea(target)) this.remember(index, target, 'textarea', true);
+      else if (input(target) && !clickable(target)) this.remember(index, target, 'text', false);
       return;
     }
     if (event.type === 'focusout') {
-      if (guideControl((event as FocusEvent).relatedTarget)) { this.cancelStepTimer(); return; }
-      if (textarea(target) && this.edited.has(target) && valid(target) && !this.composing.has(target)) this.later(target, 0, () => this.complete());
+      const destination = (event as FocusEvent).relatedTarget;
+      if (guideControl(destination)) { this.forgetObservation(index); if (index === this.index) this.cancelStepTimer(); return; }
+      if (this.edited.has(target) && valid(target) && !this.composing.has(target)) {
+        if (textarea(target)) this.remember(index, target, 'textarea', true);
+        else if (input(target) && !choice(target) && !clickable(target) && destination !== target && pageControl(destination)) this.remember(index, target, 'text', true);
+      }
       return;
     }
+    if (index !== this.index) return;
     if (event.type === 'click' && clickable(target) && valid(target) && this.automatic && !this.paused) {
       this.failure = ''; this.cancelStepTimer();
       const form = formFor(target);
       if (form && !validForm(form)) { this.failure = 'Finish the required fields before saving.'; this.emit(); return; }
       if (form || index === this.steps.length - 1) { this.waitingForResult = true; this.emit(); }
-      else this.later(target, 0, () => this.complete());
+      else {
+        this.clicked = { index, target, nextBefore: this.safeTarget(index + 1) };
+        const epoch = this.epoch;
+        this.stepTimer = setTimeout(() => {
+          this.stepTimer = null;
+          if (!this.running || this.paused || !this.automatic || epoch !== this.epoch || this.index !== index) return;
+          if (this.safeTarget(index) === target && valid(target)) this.complete();
+          else this.refresh();
+        }, 0);
+      }
     }
   };
 
@@ -253,6 +306,7 @@ export class GuidanceSession {
     this.recoveryTimer = null;
     this.observer?.disconnect(); this.observer = null;
     if (this.document) for (const name of events) this.document.removeEventListener(name, this.onEvent, true);
-    this.document = null; this.target = null; this.submitted = null; this.deferredResult = null;
+    for (const index of this.observations.keys()) this.forgetObservation(index);
+    this.document = null; this.target = null; this.submitted = null; this.clicked = null; this.deferredResult = null;
   }
 }
