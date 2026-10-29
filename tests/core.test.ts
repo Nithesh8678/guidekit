@@ -115,8 +115,13 @@ test('real HTTP core: tenancy, publishing, retrieval, actions, and private runti
       const fresh = await request(`/api/embed/${agentId}/session`, { origin: website, body: {} }); assert.equal(fresh.data.agent.version, 2);
     });
     await t.test('expired embed tokens cannot use the model; dashboard logout invalidates its session', async () => {
-      core.repo.db.prepare('UPDATE embed_sessions SET expires=0').run();
+      nextPlan = { answer: 'Review a fresh contact.', steps: [], action: { name: 'create_contact', argumentsJson: JSON.stringify({ name: 'Grace Tester', company: 'Acme', status: 'New' }), reason: 'Requested' }, citationIds: [] };
+      const graceRun = await ask('Create Grace Tester at Acme', 'grace_receipt'); assert.equal(graceRun.status, 200);
+      core.repo.db.prepare('UPDATE embed_sessions SET expires=?').run(Date.now() - 1000);
       const before = calls; assert.equal((await ask('Hello', 'expired')).status, 401); assert.equal(calls, before);
+      assert.equal((await request('/api/embed/session/action-result', { origin: website, token, body: { receiptId: graceRun.data.action.receiptId, status: 'cancelled', message: 'Approval expired before host execution.' } })).status, 200);
+      core.repo.db.prepare('UPDATE embed_sessions SET expires=0').run();
+      assert.equal((await request('/api/embed/session/action-result', { origin: website, token, body: { receiptId: graceRun.data.action.receiptId, status: 'cancelled', message: 'Approval expired before host execution.' } })).status, 401);
       assert.equal((await request('/api/auth/logout', { cookie: cookieA, body: {} })).status, 200);
       assert.equal((await request('/api/agents', { cookie: cookieA })).status, 401);
     });

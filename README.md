@@ -77,9 +77,13 @@ npm test
 npm run build
 npm run audit:secrets
 npm audit --audit-level=high
+npx playwright install chromium
+npm run test:e2e
 ```
 
-Unit and HTTP contract tests use explicitly isolated test providers; the production app never falls back to those providers. Browser and live-model verification status is recorded in [docs/status.md](docs/status.md). Build success alone is not evidence of working voice, model access, a hosted deployment, or production readiness.
+`npm run test:live` is a separate manual opt-in: it spends ChatGPT subscription usage on synthetic data, exercises the real HTTP/model/receipt path, verifies a disposable host record, and removes its temporary workspace. CI never runs this command. It does not replace browser acceptance testing.
+
+Unit, HTTP contract and Chromium acceptance tests use explicitly isolated test providers; the production app never falls back to those providers. The browser suite uses disposable workspaces on ports 4510–4512 and requires the production assets from `npm run build`. Browser and live-model verification status is recorded in [docs/status.md](docs/status.md). Build success alone is not evidence of working voice, model access, a hosted deployment, or production readiness.
 
 CI installs locked dependencies through [Socket Firewall Free](https://docs.socket.dev/docs/socket-firewall-free), runs advisory/secret checks, and executes the core checks. Actions are pinned to immutable commits; Dependabot proposes updates. The optional Socket GitHub App has not been installed.
 
