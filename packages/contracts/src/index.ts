@@ -63,7 +63,8 @@ export interface KnowledgePath { nodes: string[]; relation: string; }
 export interface RunResult { runId: string; answer: string; steps: ModelPlan['steps']; action: (NonNullable<ModelPlan['action']> & { receiptId: string; requiresConfirmation: true }) | null; citations: Citation[]; provider: ModelProviderId; version: number; knowledge?: { source: 'tigergraph' | 'local'; paths: KnowledgePath[] }; journey?: JourneyResult; }
 export interface RunSummary { id: string; question: string; answer: string; status: string; createdAt: string; actionName: string | null; }
 export interface AgentDetail { agent: Agent; documents: KnowledgeDocument[]; versions: AgentVersion[]; sessions: RunSummary[]; }
-export interface Workspace { user: { id: string; email: string; name: string }; tenant: { id: string; name: string }; }
+export type WorkspaceRole = 'owner' | 'admin' | 'editor' | 'viewer';
+export interface Workspace { user: { id: string; email: string; name: string; emailVerified?: boolean }; tenant: { id: string; name: string }; role?: WorkspaceRole; }
 export interface RuntimeStatus { provider: ModelProviderId; available: boolean; authenticated: boolean; message: string; }
 
 export const askSchema = z.object({

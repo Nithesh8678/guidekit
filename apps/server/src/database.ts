@@ -51,18 +51,22 @@ export class Repository {
   }
   row(sql: string, ...args: (string | number | null)[]): Row | undefined { return this.db.prepare(sql).get(...args) as Row | undefined; }
   rows(sql: string, ...args: (string | number | null)[]): Row[] { return this.db.prepare(sql).all(...args) as Row[]; }
-  workspace(userId: string): Workspace | null {
-    const row = this.row('SELECT u.id, u.email, u.name, t.id AS tenantId, t.name AS tenantName FROM users u JOIN tenants t ON t.id=u.tenant_id WHERE u.id=?', userId);
-    return row ? { user: { id: String(row.id), email: String(row.email), name: String(row.name) }, tenant: { id: String(row.tenantId), name: String(row.tenantName) } } : null;
+  workspace(userId: string, tenantId?: string): Workspace | null {
+    const row = this.row('SELECT u.id,u.email,u.name,u.verified_at,m.role,t.id AS tenantId,t.name AS tenantName FROM users u JOIN memberships m ON m.user_id=u.id JOIN tenants t ON t.id=m.tenant_id WHERE u.id=? AND (? IS NULL OR t.id=?) ORDER BY (t.id=u.tenant_id) DESC,m.created_at LIMIT 1', userId, tenantId ?? null, tenantId ?? null);
+    return row ? { user: { id: String(row.id), email: String(row.email), name: String(row.name), emailVerified: !!row.verified_at }, tenant: { id: String(row.tenantId), name: String(row.tenantName) }, role: row.role as Workspace['role'] } : null;
   }
   register(input: { email: string; name: string; companyName: string }, passwordHash: string): Workspace {
     if (this.row('SELECT id FROM users WHERE email=?', input.email)) throw new AppError(409, 'An account with this email already exists.');
     return this.transaction(() => {
       const tenantId = newId('org'), userId = newId('usr');
       this.db.prepare('INSERT INTO tenants VALUES (?,?)').run(tenantId, input.companyName);
-      this.db.prepare('INSERT INTO users VALUES (?,?,?,?,?)').run(userId, tenantId, input.email, input.name, passwordHash);
+      this.db.prepare('INSERT INTO users (id,tenant_id,email,name,password_hash) VALUES (?,?,?,?,?)').run(userId, tenantId, input.email, input.name, passwordHash);
+      this.db.prepare('INSERT INTO memberships VALUES (?,?,?,?)').run(userId, tenantId, 'owner', now());
       return this.workspace(userId)!;
     });
+  }
+  audit(tenantId: string, actorId: string, event: string, resourceId: string, details: Record<string, string | number | boolean | null> = {}): void {
+    this.db.prepare('INSERT INTO audit_events VALUES (?,?,?,?,?,?,?)').run(newId('aud'), tenantId, actorId, event, resourceId, JSON.stringify(details), now());
   }
   agentFrom(row: Row): Agent {
     return { ...JSON.parse(String(row.config)), id: String(row.id), tenantId: String(row.tenant_id), publishedVersion: row.published_version === null ? null : Number(row.published_version), createdAt: String(row.created_at), updatedAt: String(row.updated_at) };

@@ -1,6 +1,6 @@
 # Local operations and recovery
 
-GuideKit remains a local, single-owner application. The container recipe packages
+GuideKit remains a local application with workspace roles. The container recipe packages
 that application; it does not turn a personal ChatGPT subscription into a public
 shared inference service. The server's loopback listeners and Host restrictions
 remain in place. Commercial hosting and customer inference identity are separate
@@ -152,3 +152,7 @@ For restore, stop the service container first and use a one-off container with t
 same data/backup volumes. No automated container launch, authentication or live
 subscription use is part of the build. The health check proves HTTP availability,
 not a completed model request or universal host compatibility.
+
+## Local account delivery
+
+Recovery, email-verification and invitation links are delivered through the configured account adapter. The default is a private operator outbox at `.data/account-outbox/` (or the selected data directory), with `0700` directories and `0600` message files. No external email is sent. Open a requested message locally and use its expiring link; do not commit or share the outbox. Links keep their token in the browser fragment, and APIs store only token digests. Password changes/reset revoke prior sessions using an account epoch, including stale session writes. The backup archive intentionally excludes the outbox: after restoration, request new links rather than restoring old delivery messages. Configure a real delivery adapter and test delivery before offering hosted recovery.

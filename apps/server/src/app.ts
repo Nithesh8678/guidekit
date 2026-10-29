@@ -10,16 +10,17 @@ import { compileInputSchema } from '../../../packages/contracts/src/schema.js';
 import { createTigerGraphProvider, TigerGraphError, type TigerGraphProvider } from '../../../packages/graph/src/index.js';
 import { Repository, SqliteSessionStore, AppError, digest, newId, now } from './database.js';
 import { Publications } from './publications.js';
+import { localAccountDelivery, registerAccounts, type AccountDelivery } from './accounts.js';
 import { agentConfigSchema, askSchema, actionResultSchema, modelPlanSchema, type JourneyRequest, type PageContext, type Citation, type RunResult, type RuntimeStatus, type Workspace, type ModelProviderId } from '../../../packages/contracts/src/index.js';
 
-declare module 'express-session' { interface SessionData { userId?: string; } }
+declare module 'express-session' { interface SessionData { userId?: string; tenantId?: string; authEpoch?: number; } }
 export interface InferenceProvider {
   readonly id?: ModelProviderId;
   status(): Promise<RuntimeStatus>;
   infer(input: { prompt: string; schema: Record<string, unknown>; signal?: AbortSignal }): Promise<string>;
   close(): Promise<void>;
 }
-export interface AppOptions { dataDir: string; provider: InferenceProvider; adminOrigins: Set<string>; root?: string; testing?: boolean; graph?: TigerGraphProvider; endpointOrigin?: string; demoOrigins?: { crm: string; support: string }; }
+export interface AppOptions { dataDir: string; provider: InferenceProvider; adminOrigins: Set<string>; root?: string; testing?: boolean; graph?: TigerGraphProvider; endpointOrigin?: string; demoOrigins?: { crm: string; support: string }; delivery?: AccountDelivery; }
 const email = z.string().trim().toLowerCase().email().max(200);
 const credentials = z.object({ email, password: z.string().min(1).max(256) }).strict();
 const registration = credentials.extend({ password: z.string().min(12).max(256), name: z.string().trim().min(2).max(100), companyName: z.string().trim().min(2).max(100) });
@@ -73,17 +74,20 @@ export function createApp(options: AppOptions) {
     next();
   });
   const workspace = (req: Request): Workspace => {
-    const value = req.session.userId ? repo.workspace(req.session.userId) : null;
+    const epoch = req.session.userId ? repo.row('SELECT auth_epoch FROM users WHERE id=?', req.session.userId)?.auth_epoch : null;
+    const value = req.session.userId && epoch === (req.session.authEpoch ?? 0) ? repo.workspace(req.session.userId, req.session.tenantId) : null;
     if (!value) throw new AppError(401, 'Sign in to your workspace.');
     return value;
   };
-  const signedIn = async (req: Request, userId: string) => {
+  const signedIn = async (req: Request, userId: string, tenantId?: string) => {
     await new Promise<void>((accept, reject) => req.session.regenerate(error => error ? reject(error) : accept()));
     req.session.userId = userId;
+    req.session.tenantId = tenantId;
+    req.session.authEpoch = Number(repo.row('SELECT auth_epoch FROM users WHERE id=?', userId)!.auth_epoch);
     await new Promise<void>((accept, reject) => req.session.save(error => error ? reject(error) : accept()));
   };
   const authLimit = rateLimit({ windowMs: 900_000, limit: options.testing ? 100 : 20, standardHeaders: 'draft-8', legacyHeaders: false, message: { error: 'Too many sign-in attempts. Try again in 15 minutes.' } });
-  app.get('/api/auth/me', (req, res) => res.json({ workspace: req.session.userId ? repo.workspace(req.session.userId) : null }));
+  app.get('/api/auth/me', (req, res) => { try { res.json({ workspace: workspace(req) }); } catch { res.json({ workspace: null }); } });
   app.post('/api/auth/register', authLimit, async (req, res) => {
     const input = registration.parse(req.body);
     const passwordHash = await hash(input.password, { memoryCost: 19456, timeCost: 2, parallelism: 1 });
@@ -98,6 +102,15 @@ export function createApp(options: AppOptions) {
   app.post('/api/auth/logout', async (req, res) => {
     await new Promise<void>((accept, reject) => req.session.destroy(error => error ? reject(error) : accept()));
     res.clearCookie('gk.sid', { httpOnly: true, sameSite: 'strict', secure: false }).json({ ok: true });
+  });
+  registerAccounts(app, repo, { workspace, signedIn, authLimit, origin: options.endpointOrigin, delivery: options.delivery ?? localAccountDelivery(options.dataDir) });
+  app.use('/api/agents', (req, res, next) => {
+    if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
+    const actor = workspace(req);
+    if (actor.role === 'viewer') throw new AppError(403, 'Viewers cannot change agents or publish versions. Ask a workspace admin for editor access.');
+    const path = req.path, method = req.method;
+    res.once('finish', () => { if (res.statusCode < 400) repo.audit(actor.tenant.id, actor.user.id, `agent.${method.toLowerCase()}`, path.split('/').filter(Boolean).slice(0, 4).join('/') || 'new', { status: res.statusCode }); });
+    next();
   });
   app.get('/api/agents', (req, res) => res.json({ agents: repo.listAgents(workspace(req).tenant.id) }));
   app.post('/api/agents', (req, res) => res.status(201).json({ agent: repo.createAgent(workspace(req).tenant.id, agentConfigSchema.parse(req.body)) }));
@@ -122,7 +135,7 @@ export function createApp(options: AppOptions) {
       { id: 'knowledge', status: version?.documentCount ? 'pass' : 'error', message: version?.documentCount ? `${version.documentCount} documents in the active snapshot.` : 'Add company knowledge and publish.' },
       { id: 'runtime', status: runtime.available && runtime.authenticated ? 'pass' : 'error', message: runtime.message },
       { id: 'graph', status: graph ? graph.connected ? 'pass' : 'error' : version?.graphSource === 'tigergraph' ? 'error' : 'warning', message: graph ? graph.connected ? 'TigerGraph is connected.' : 'TigerGraph is unavailable; check the server integration.' : version?.graphSource === 'tigergraph' ? 'This publication requires TigerGraph. Restore the server configuration.' : 'Local retrieval selected. TigerGraph is not configured.' },
-      { id: 'origins', status: agent.allowedOrigins.length ? 'pass' : 'error', message: `Allowed website origins: ${agent.allowedOrigins.join(', ')}` },
+      { id: 'origins', status: version ? 'pass' : 'error', message: version ? `Active snapshot website origins: ${repo.version(tenantId, agent.id, version.number).config.allowedOrigins.join(', ')}` : 'No active snapshot origins. Publish an agent first.' },
       { id: 'host-actions', status: 'warning', message: 'Business actions require website registration, application authorization and outcome verification. Test them on the installed website.' },
       { id: 'voice', status: 'warning', message: 'Physical voice requires HTTPS/localhost, supported Chrome/Edge and microphone permission. Test on the visitor device.' }
     ];

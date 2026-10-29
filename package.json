@@ -18,7 +18,9 @@
     "test:live": "node --import tsx scripts/live-proof.ts",
     "test:graph": "node --env-file-if-exists=.env --import tsx scripts/graph-proof.ts",
     "check": "npm run typecheck && npm test && npm run build",
-    "audit:secrets": "node scripts/check-secrets.mjs"
+    "audit:secrets": "node scripts/check-secrets.mjs",
+    "backup": "node --import tsx scripts/backup.ts",
+    "restore": "node --import tsx scripts/restore.ts"
   },
   "dependencies": {
     "@node-rs/argon2": "2.0.2",
