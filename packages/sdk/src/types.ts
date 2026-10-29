@@ -1,6 +1,8 @@
 import type { PageContext, PublicAgent, RunResult } from '../../contracts/src/index';
 
 export interface ActionResult { success: boolean; message: string; }
+/** Local host observation for a guided step. This does not authorize or execute an action. */
+export interface GuideStepResult { success: boolean; message?: string; }
 export interface RegisteredAction {
   description: string;
   inputSchema: Record<string, unknown>;
@@ -35,6 +37,7 @@ export interface GuideKitInstance {
   startVoice(): void;
   /** Commits the current recording; close/Escape/destroy instead discard it. */
   stopVoice(): void;
+  reportStepResult(targetId: string, result: GuideStepResult): void;
   destroy(): void;
   registerAction(name: string, action: RegisteredAction): void;
   setContext(context: Record<string, unknown>): void;
@@ -49,6 +52,7 @@ export interface GuideKitAPI {
   close(): void;
   startVoice(): void;
   stopVoice(): void;
+  reportStepResult(targetId: string, result: GuideStepResult): void;
   destroy(): void;
 }
 declare global { interface Window { GuideKit: GuideKitAPI; } }

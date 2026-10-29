@@ -55,7 +55,7 @@ export function parsePublicAgent(value: unknown): PublicAgent {
 }
 export function parseRun(value: unknown): RunResult {
   if (!record(value) || !validId(value.runId) || typeof value.answer !== 'string' || value.answer.length < 1 || value.answer.length > 5000 || value.provider !== 'codex' || !Number.isInteger(value.version) || !Array.isArray(value.steps) || value.steps.length > 8 || !Array.isArray(value.citations) || value.citations.length > 8) throw new Error('The assistant returned an invalid response. Please try again.');
-  for (const step of value.steps) if (!record(step) || !validId(step.targetId) || typeof step.text !== 'string' || step.text.length < 1 || step.text.length > 600) throw new Error('The assistant returned invalid guidance.');
+  for (const step of value.steps) if (!record(step) || !validId(step.targetId) || typeof step.text !== 'string' || step.text.length < 1 || step.text.length > 600 || (step.annotation !== undefined && !['target', 'ring', 'frame', 'arrow', 'underline', 'number'].includes(String(step.annotation)))) throw new Error('The assistant returned invalid guidance.');
   for (const citation of value.citations) if (!record(citation) || !validId(citation.documentId) || typeof citation.title !== 'string' || citation.title.length > 500 || typeof citation.excerpt !== 'string' || citation.excerpt.length > 5000) throw new Error('The assistant returned an invalid source.');
   if (value.knowledge !== undefined) {
     const knowledge = value.knowledge;

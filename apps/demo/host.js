@@ -53,9 +53,11 @@
     document.querySelector('#contact-form').addEventListener('submit', event => {
       event.preventDefault(); const data = Object.fromEntries(new FormData(event.currentTarget));
       const outcome = createContact(data, crypto.randomUUID()); result(outcome.message); if (outcome.success) event.currentTarget.reset();
+      window.GuideKit?.reportStepResult?.('create-contact', outcome);
     });
   } else document.querySelector('#ticket-form').addEventListener('submit', event => {
     event.preventDefault(); const outcome = createTicket(Object.fromEntries(new FormData(event.currentTarget)), crypto.randomUUID()); result(outcome.message); if (outcome.success) event.currentTarget.reset();
+    window.GuideKit?.reportStepResult?.('create-ticket', outcome);
   });
   render();
   const params = new URL(location.href).searchParams;

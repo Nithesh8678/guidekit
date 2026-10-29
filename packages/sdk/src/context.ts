@@ -49,9 +49,12 @@ export class ContextCollector {
   private ids = new WeakMap<HTMLElement, string>();
   private targets = new Map<string, HTMLElement>();
   private explicit = new Set<string>();
+  private identities = new Map<string, string>();
+  private documentPath = '';
+  private identity(target: HTMLElement): string { return `${roleFor(target)}:${publicLabel(labelFor(target))}`; }
   collect(actions: Map<string, CompiledAction>, allowedActions: string[], context: unknown): PageContext {
     const targets: PageTarget[] = [];
-    this.targets.clear(); this.explicit.clear();
+    this.targets.clear(); this.explicit.clear(); this.identities.clear(); this.documentPath = `${location.origin}${location.pathname}`;
     const candidates = Array.from(document.querySelectorAll('[data-guidekit-id],button,a[href],input,textarea,select,summary,[role="button"],[role="link"],[role="tab"],[role="menuitem"],[role="checkbox"],[role="switch"]')).slice(0, 2000);
     const explicitCounts = new Map<string, number>();
     for (const element of candidates) {
@@ -68,6 +71,7 @@ export class ContextCollector {
       if (!id) { do { id = `gk_${++this.sequence}`; } while (explicitCounts.has(id)); this.ids.set(element, id); }
       if (this.targets.has(id)) continue;
       this.targets.set(id, element); if (explicit) this.explicit.add(id);
+      this.identities.set(id, this.identity(element));
       const rawDescription = element.getAttribute('data-guidekit-description');
       const description = rawDescription ? publicLabel(rawDescription).slice(0, 250) : undefined;
       targets.push({ id, label, role: roleFor(element), ...(description ? { description } : {}) });
@@ -80,11 +84,11 @@ export class ContextCollector {
     };
   }
   resolve(id: string): HTMLElement | null {
+    if (this.documentPath !== `${location.origin}${location.pathname}`) return null;
     const target = this.targets.get(id);
-    if (target && isSafeTarget(target)) return target;
-    if (!this.explicit.has(id)) return null;
+    if (!this.explicit.has(id)) return target && isSafeTarget(target) && this.identity(target) === this.identities.get(id) ? target : null;
     const matches = Array.from(document.querySelectorAll('[data-guidekit-id]')).filter(element => element.getAttribute('data-guidekit-id') === id);
-    if (matches.length !== 1 || !isSafeTarget(matches[0]!)) return null;
+    if (matches.length !== 1 || !isSafeTarget(matches[0]!) || this.identity(matches[0]!) !== this.identities.get(id)) return null;
     this.targets.set(id, matches[0]!); return matches[0]!;
   }
 }

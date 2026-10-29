@@ -1,5 +1,5 @@
 import type { PageContext, PublicAgent, RunResult } from '../../contracts/src/index';
-import type { GuideKitInstance, MountOptions, RegisteredAction } from './types';
+import type { GuideKitInstance, GuideStepResult, MountOptions, RegisteredAction } from './types';
 import { compileAction, endpointOrigin, parsePublicAgent, parseRun, record, safeContext, validId, type CompiledAction } from './security';
 import { ContextCollector } from './context';
 import { View, type ActionCard } from './view';
@@ -26,7 +26,6 @@ export class Assistant implements GuideKitInstance {
   readonly ready: Promise<PublicAgent>;
   private readonly endpoint: string;
   private readonly actions = new Map<string, CompiledAction>();
-  private readonly contextCollector = new ContextCollector();
   private readonly view: View;
   private readonly voice: Voice;
   private readonly lifetime = new AbortController();
@@ -45,10 +44,14 @@ export class Assistant implements GuideKitInstance {
     if (!validId(options.agentId)) throw new Error('GuideKit needs a valid published agent ID.');
     this.endpoint = endpointOrigin(options.endpoint);
     for (const [name, action] of Object.entries(options.actions ?? {})) this.registerAction(name, action);
-    this.view = new View({ open: () => this.open(), close: () => this.close(), submit: message => { void this.ask(message); }, cancel: () => { void this.cancel(); }, mic: () => this.toggleVoice(false), speaker: () => this.voice.toggleOutput() });
+    this.view = new View({ open: () => this.open(), close: () => this.close(), submit: message => { void this.ask(message); }, cancel: () => { void this.cancel(); }, mic: () => this.toggleVoice(false), speaker: () => this.voice.toggleOutput(), guideStep: (text, events) => this.voice.speak(text, events), guidePause: () => this.voice.stopSpeaking(), guideFinish: result => {
+      const message = result.message || (result.verified ? 'The website confirmed this step. Your guide is complete.' : 'Guide finished. Check the website for confirmation of any changes.');
+      this.view.message('assistant', message); this.voice.speak(message); this.emit('guide-finished', { verified: result.verified });
+    } });
     this.voice = new Voice(this.view, options.voice ?? {}, message => { void this.ask(message); });
     const parts = (options.hotkey ?? 'mod+shift+k').toLowerCase().split('+'); const key = parts.at(-1);
     this.keyboard = event => {
+      if (event.key === 'Escape' && this.view.guiding && !this.voice.active) { event.preventDefault(); this.view.stopGuide(); this.voice.stopSpeaking(); return; }
       if (event.key === 'Escape' && (this.view.opened || this.voice.active)) { event.preventDefault(); this.close(); return; }
       const mod = parts.includes('mod');
       if (event.key.toLowerCase() !== key || event.repeat || (mod ? !(event.metaKey || event.ctrlKey) : event.metaKey !== parts.includes('meta') || event.ctrlKey !== parts.includes('ctrl')) || event.altKey !== parts.includes('alt') || event.shiftKey !== parts.includes('shift')) return;
@@ -69,6 +72,10 @@ export class Assistant implements GuideKitInstance {
   open(): void { if (!this.destroyed) this.view.open(); }
   startVoice(): void { if (!this.destroyed) { this.open(); if (!this.voice.active) { void this.cancel(false); this.voice.start(true); } } }
   stopVoice(): void { if (!this.destroyed) this.voice.finishInput(); }
+  reportStepResult(targetId: string, result: GuideStepResult): void {
+    if (this.destroyed || !validId(targetId) || !record(result) || typeof result.success !== 'boolean' || (result.message !== undefined && (typeof result.message !== 'string' || result.message.length > 1000))) return;
+    this.view.reportStepResult(targetId, result);
+  }
   private toggleVoice(voiceFlow: boolean): void {
     if (this.voice.active) this.voice.finishInput();
     else { void this.cancel(false); this.voice.start(voiceFlow); }
@@ -79,9 +86,14 @@ export class Assistant implements GuideKitInstance {
     void this.cancel(); this.destroyed = true; this.lifetime.abort(); this.voice.destroy(); this.view.destroy(); document.removeEventListener('keydown', this.keyboard);
   }
   async getPageContext(): Promise<PageContext> {
+    return this.collectPageContext(new ContextCollector());
+  }
+  private async collectPageContext(collector: ContextCollector, signal?: AbortSignal): Promise<PageContext> {
     const session = await this.ensureSession();
+    signal?.throwIfAborted();
     const context = this.options.getContext ? await this.options.getContext() : {};
-    return this.contextCollector.collect(this.actions, session.agent.allowedActions, { ...this.explicitContext, ...safeContext(context) });
+    signal?.throwIfAborted();
+    return collector.collect(this.actions, session.agent.allowedActions, { ...this.explicitContext, ...safeContext(context) });
   }
   async ask(message: string): Promise<RunResult | null> {
     if (this.destroyed) return null;
@@ -94,22 +106,27 @@ export class Assistant implements GuideKitInstance {
     try {
       const session = await this.ensureSession();
       if (controller.signal.aborted) return null;
-      const page = await this.getPageContext();
+      const collector = new ContextCollector();
+      const page = await this.collectPageContext(collector, controller.signal);
       if (controller.signal.aborted) return null;
+      const documentPath = `${location.origin}${location.pathname}`;
       const result = parseRun(await this.json('/api/embed/session/ask', { message: text, page, requestId: crypto.randomUUID() }, session.token, controller.signal, 150_000));
       if (this.destroyed || generation !== this.generation || controller.signal.aborted) return null;
+      if (`${location.origin}${location.pathname}` !== documentPath) throw new Error('The page changed while the assistant was thinking. Ask again for the current page.');
       if (result.version !== session.agent.version) throw new Error('The assistant version changed unexpectedly. Reload this page to reconnect.');
       const knownTargets = new Set(page.targets.map(target => target.id));
       if (result.steps.some(step => !knownTargets.has(step.targetId))) throw new Error('The assistant referred to a control that was not shared. Ask again for the current page.');
       const container = this.view.message('assistant', result.answer, result.citations);
       this.view.knowledgeEvidence(container, result.knowledge, result.citations);
       if (result.steps.length) {
-        const resolve = (id: string) => this.contextCollector.resolve(id);
-        const missing = () => { this.view.status('That control changed or is no longer visible. Ask again to refresh the guide.', true); this.emit('target-missing', { runId: result.runId }); };
-        this.view.guideButton(container, result.steps, resolve, missing); this.view.guide(result.steps, resolve, missing);
+        const resolve = (id: string) => collector.resolve(id);
+        const missing = () => { this.view.status('That control changed or is no longer visible. Ask again to refresh the guide.', true); this.view.recoveryButton(container, () => { void this.ask(text); }); this.emit('target-missing', { runId: result.runId }); };
+        this.view.guideButton(container, result.steps, resolve, missing, result.action ? () => { void this.cancel(false); } : undefined);
+        if (!result.action) this.view.guide(result.steps, resolve, missing);
       }
       if (result.action) this.propose(result, container, session);
-      this.voice.speak(result.answer); this.view.status(result.action ? 'Review the proposed action before approving it.' : 'Ready for your next question.');
+      if (!result.steps.length || result.action) this.voice.speak(result.answer);
+      this.view.status(result.action ? 'Review the proposed action before approving it.' : this.view.guiding ? 'Guidance is following your progress on the page.' : 'Ready for your next question.');
       this.emit('response', { runId: result.runId, version: result.version }); return result;
     } catch (error) {
       if (!this.destroyed && generation === this.generation && !controller.signal.aborted) { this.view.message('error', messageOf(error)); this.view.status('Your request did not finish. You can try again.', true); this.emit('error', { message: messageOf(error) }); }

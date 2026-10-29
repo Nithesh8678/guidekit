@@ -38,7 +38,8 @@ export const pageContextSchema = z.object({
 export type PageContext = z.infer<typeof pageContextSchema>;
 export type PageTarget = z.infer<typeof pageTargetSchema>;
 
-export const guideStepSchema = z.object({ targetId: idSchema, text: z.string().min(1).max(600) }).strict();
+export const annotationKindSchema = z.enum(['target', 'ring', 'frame', 'arrow', 'underline', 'number']);
+export const guideStepSchema = z.object({ targetId: idSchema, text: z.string().min(1).max(600), annotation: annotationKindSchema.optional() }).strict();
 export const proposedActionSchema = z.object({ name: idSchema, arguments: z.record(z.string(), z.unknown()), reason: z.string().max(600) }).strict();
 export const modelPlanSchema = z.object({
   answer: z.string().min(1).max(5000),

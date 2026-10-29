@@ -20,7 +20,7 @@ class Recognition {
   abort() { this.aborted++; }
   result(text: string, final: boolean, index = 0) { this.onresult?.({ resultIndex: index, results: { length: index + 1, [index]: { isFinal: final, 0: { transcript: text } } } }); }
 }
-class Utterance { onend: (() => void) | null = null; onerror: (() => void) | null = null; lang = ''; rate = 1; constructor(readonly text: string) {} }
+class Utterance { onstart: (() => void) | null = null; onend: (() => void) | null = null; onerror: (() => void) | null = null; lang = ''; rate = 1; constructor(readonly text: string) {} }
 function environment(options: { supported?: boolean; secure?: boolean; gesture?: boolean } = {}) {
   Recognition.instances = []; Recognition.throwOnStart = false;
   const statuses: string[] = []; const submissions: string[] = []; const attributes = new Map<string, string>(); const spoken: Utterance[] = []; let speechCancelled = 0;
@@ -111,6 +111,18 @@ test('speaking another answer detaches old callbacks and cancel/destroy stop bro
     voice.toggleOutput(); voice.speak('First answer'); const first = state.spoken[0]!; const oldEnd = first.onend;
     voice.speak('Second answer'); assert.equal(first.onend, null); oldEnd?.(); voice.stopSpeaking(); assert.equal(state.speechCancelled(), 2);
     voice.speak('Third answer'); voice.destroy(); assert.equal(state.speechCancelled(), 3); assert.equal(state.spoken[2]!.onerror, null);
+  } finally { voice.destroy(); state.restore(); }
+});
+
+test('narration callbacks follow actual playback and reject cancelled speech', () => {
+  const state = environment(); const voice = new Voice(state.view, {}, state.submit); const events: string[] = [];
+  const callbacks = { onStart: () => events.push('start'), onEnd: () => events.push('end'), onError: () => events.push('error') };
+  try {
+    assert.equal(voice.speak('Muted', callbacks), false); voice.toggleOutput();
+    assert.equal(voice.speak('Step one', callbacks), true); assert.deepEqual(events, []);
+    const first = state.spoken[0]!; first.onstart?.(); assert.deepEqual(events, ['start']); const late = first.onend;
+    voice.stopSpeaking(); late?.(); assert.equal(first.onstart, null); assert.deepEqual(events, ['start']);
+    voice.speak('Step two', callbacks); state.spoken[1]!.onstart?.(); state.spoken[1]!.onend?.(); assert.deepEqual(events, ['start', 'start', 'end']);
   } finally { voice.destroy(); state.restore(); }
 });
 

@@ -1,7 +1,7 @@
 import { Assistant } from './controller';
 import { compileAction, safeContext } from './security';
 import type { GuideKitAPI, GuideKitInstance, MountOptions, RegisteredAction } from './types';
-export type { ActionResult, GuideKitAPI, GuideKitInstance, MountOptions, RegisteredAction, VoiceOptions } from './types';
+export type { ActionResult, GuideKitAPI, GuideKitInstance, GuideStepResult, MountOptions, RegisteredAction, VoiceOptions } from './types';
 
 let instance: GuideKitInstance | null = null;
 const registered = new Map<string, RegisteredAction>();
@@ -24,9 +24,10 @@ export function open(): void { instance?.open(); }
 export function close(): void { instance?.close(); }
 export function startVoice(): void { instance?.startVoice(); }
 export function stopVoice(): void { instance?.stopVoice(); }
+export function reportStepResult(targetId: string, result: import('./types').GuideStepResult): void { instance?.reportStepResult(targetId, result); }
 export function destroy(): void { instance?.destroy(); instance = null; }
 
-export const GuideKit: GuideKitAPI = { mount, registerAction, setContext, open, close, startVoice, stopVoice, destroy };
+export const GuideKit: GuideKitAPI = { mount, registerAction, setContext, open, close, startVoice, stopVoice, reportStepResult, destroy };
 
 if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   const script = document.currentScript instanceof HTMLScriptElement ? document.currentScript : null;
