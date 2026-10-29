@@ -58,10 +58,7 @@
     event.preventDefault(); const outcome = createTicket(Object.fromEntries(new FormData(event.currentTarget)), crypto.randomUUID()); result(outcome.message); if (outcome.success) event.currentTarget.reset();
   });
   render();
-  const agentId = new URL(location.href).searchParams.get('agentId');
-  if (!agentId || !/^agt_[a-zA-Z0-9_-]{1,150}$/.test(agentId)) {
-    const state = document.querySelector('#install-state'); state.append(document.createTextNode('Publish an agent in GuideKit, then open this website from its installation page. ')); const link = text('a', 'Open GuideKit'); link.href = endpoint; state.append(link); return;
-  }
+  const params = new URL(location.href).searchParams;
   const contactSchema = { type: 'object', additionalProperties: false, required: ['name', 'company', 'status'], properties: { name: { type: 'string', minLength: 1, maxLength: 100 }, company: { type: 'string', minLength: 1, maxLength: 100 }, status: { type: 'string', enum: ['New', 'Qualified', 'Customer'] } } };
   const actions = kind === 'crm' ? {
     create_contact: { description: 'Create a new contact in this CRM. The host saves it and verifies persistence. Fields: name, company, status (New, Qualified, Customer).', inputSchema: contactSchema, requiresConfirmation: true, execute: async (args, ctx) => { if (ctx.signal.aborted) return { success: false, message: 'Action was stopped.' }; const outcome = createContact(args, ctx.idempotencyKey); result(outcome.message); return outcome; } },
@@ -72,7 +69,103 @@
       return { success, message: success ? `${record.name} is now ${record.status}, verified in Contacts.` : 'The update could not be verified.' };
     } }
   } : { create_ticket: { description: 'Create a local support request; this does not send an email. Fields: subject, description, priority (Normal or High).', inputSchema: { type: 'object', additionalProperties: false, required: ['subject', 'description', 'priority'], properties: { subject: { type: 'string', minLength: 1, maxLength: 160 }, description: { type: 'string', minLength: 1, maxLength: 3000 }, priority: { type: 'string', enum: ['Normal', 'High'] } } }, requiresConfirmation: true, execute: async (args, ctx) => { if (ctx.signal.aborted) return { success: false, message: 'Action was stopped.' }; const outcome = createTicket(args, ctx.idempotencyKey); result(outcome.message); return outcome; } } };
-  const script = document.createElement('script'); script.src = `${endpoint}/sdk/guidekit.js`;
-  script.addEventListener('load', () => { const widget = window.GuideKit.mount({ agentId, endpoint, actions }); render(); widget.ready?.catch(error => { document.querySelector('#install-state').textContent = error.message || 'Could not connect the agent. Check allowed origins and publishing.'; }); });
-  script.addEventListener('error', () => { document.querySelector('#install-state').textContent = 'The GuideKit SDK could not load. Start the GuideKit server on port 4410.'; }); document.head.append(script);
+  const state = document.querySelector('#install-state');
+  let installedScript = null, widget = null, installation = 0;
+  const disconnect = () => {
+    ++installation;
+    widget?.destroy(); widget = null;
+    installedScript?.remove(); installedScript = null;
+  };
+  const connect = (config, onReady, onError) => {
+    disconnect(); const generation = installation;
+    // Only the validated URL is injected. Copying data-agent-id would trigger the
+    // SDK's auto-mount and lose this host's registered actions.
+    const script = document.createElement('script'); script.src = config.src; installedScript = script;
+    script.addEventListener('load', async () => {
+      if (generation !== installation) return;
+      try {
+        if (typeof window.GuideKit?.mount !== 'function') throw new Error('The script loaded, but the GuideKit SDK was not available.');
+        widget = window.GuideKit.mount({ agentId: config.agentId, endpoint, actions, voice: config.voice }); render();
+        const agent = await widget.ready;
+        if (generation === installation) onReady(agent);
+      } catch (error) {
+        if (generation !== installation) return;
+        disconnect(); onError(error instanceof Error ? error.message : 'Could not connect the agent. Check allowed origins and publishing.');
+      }
+    }, { once: true });
+    script.addEventListener('error', () => {
+      if (generation !== installation) return;
+      disconnect(); onError('The GuideKit SDK could not load. Check that the GuideKit server is running.');
+    }, { once: true });
+    document.head.append(script);
+  };
+  if (params.get('install') === 'manual') {
+    const panel = text('section', '', 'installation-lab'); panel.setAttribute('aria-labelledby', 'installation-title');
+    const heading = text('h2', 'Install your GuideKit SDK'); heading.id = 'installation-title';
+    const intro = text('p', 'This page starts without the SDK. Publish your agent, copy its script snippet from Dashboard → Install, and paste it below.');
+    const dashboard = text('a', 'Open GuideKit dashboard'); dashboard.href = endpoint; dashboard.target = '_blank'; dashboard.rel = 'noopener';
+    const form = document.createElement('form'); form.dataset.guidekitPrivate = '';
+    const label = text('label', 'SDK script snippet'); label.htmlFor = 'sdk-snippet';
+    const snippet = document.createElement('textarea'); snippet.id = 'sdk-snippet'; snippet.rows = 6; snippet.maxLength = 8000; snippet.spellcheck = false; snippet.autocomplete = 'off'; snippet.placeholder = '<script src="…/sdk/guidekit.js" data-agent-id="agt_…" data-endpoint="…" defer></script>';
+    const controls = text('div', '', 'installation-controls');
+    const install = text('button', 'Install SDK', 'primary'); install.type = 'submit';
+    const remove = text('button', 'Remove assistant', 'secondary'); remove.type = 'button'; remove.disabled = true;
+    controls.append(install, remove); form.append(label, snippet, controls);
+    const status = text('p', 'SDK not loaded. No assistant is mounted.', 'installation-status'); status.id = 'manual-install-status'; status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite'); status.dataset.state = 'not-loaded';
+    const instructions = document.createElement('ol');
+    for (const instruction of [
+      `Allow this exact website origin in your agent before publishing: ${location.origin}`,
+      'After connection, press ⌘⇧K on Mac or Ctrl+Shift+K on Windows. Allow the microphone when your browser asks, then speak your question.',
+      'Press the shortcut again to finish and send your speech, or press Escape to cancel. The chat microphone and typing remain available.',
+      'Try “How do I add a contact?” for visual guidance, then “Create a contact named Jamie Rivera at Acme Studio.” Review the proposed change and approve it to save a browser demo record.'
+    ]) instructions.append(text('li', kind === 'support' ? instruction.replace('How do I add a contact?', 'Where can I find invoices?').replace('Create a contact named Jamie Rivera at Acme Studio.', 'Create a support request about a missing invoice.') : instruction));
+    const note = text('p', 'Voice uses your browser’s speech service, which may process audio online. Browser support and microphone permission are required. Chrome or Edge is recommended for voice testing. Speech output uses your browser’s voices.', 'fine');
+    panel.append(heading, intro, dashboard, form, status, instructions, note); state.before(panel);
+    const setState = (name, message) => { status.dataset.state = name; status.textContent = message; };
+    const reset = () => { install.disabled = false; snippet.disabled = false; remove.disabled = true; form.removeAttribute('aria-busy'); };
+    remove.addEventListener('click', () => { disconnect(); reset(); setState('removed', 'Assistant removed. No assistant is mounted. Install again to reconnect.'); });
+    form.addEventListener('submit', event => {
+      event.preventDefault();
+      let config;
+      try { config = parseSnippet(snippet.value); }
+      catch (error) { setState('error', error instanceof Error ? error.message : 'Paste the script snippet from GuideKit.'); return; }
+      install.disabled = true; snippet.disabled = true; remove.disabled = false; form.setAttribute('aria-busy', 'true'); setState('loading', 'Loading the real SDK and connecting to your published agent…');
+      connect(config, agent => {
+        form.removeAttribute('aria-busy');
+        const permitted = Object.keys(actions).filter(name => agent.allowedActions.includes(name)).length;
+        setState('ready', `Connected to ${agent.name} · published version ${agent.version}. ${permitted} host ${permitted === 1 ? 'action is' : 'actions are'} available with approval.`);
+      }, message => { reset(); setState('error', `Connection failed: ${message}`); });
+    });
+    return;
+  }
+  const agentId = params.get('agentId');
+  if (!agentId || !/^agt_[a-zA-Z0-9_-]{1,150}$/.test(agentId)) {
+    state.append(document.createTextNode('Publish an agent in GuideKit, then open this website from its installation page. ')); const link = text('a', 'Open GuideKit'); link.href = endpoint; state.append(link); return;
+  }
+  connect({ agentId, src: `${endpoint}/sdk/guidekit.js`, voice: { provider: 'browser', hotkeyStartsListening: true, autoSubmit: true } }, () => {}, message => { state.textContent = message; });
+
+  function parseSnippet(value) {
+    // Limit the input to a single empty script before creating an inert document.
+    // Arbitrary HTML, event handlers, inline code and alternative URLs never reach
+    // the live DOM, even if their text resembles a valid GuideKit installation.
+    if (!value.trim() || value.length > 8000 || !/^\s*<script\b[^>]*>\s*<\/script>\s*$/i.test(value)) throw new Error('Paste one complete, empty GuideKit script tag from Dashboard → Install.');
+    const parsed = new DOMParser().parseFromString(value, 'text/html');
+    const scripts = parsed.querySelectorAll('script');
+    if (scripts.length !== 1 || parsed.body.children.length > 0 || scripts[0].textContent.trim()) throw new Error('The snippet must contain only one GuideKit script tag, with no inline code.');
+    const script = scripts[0];
+    const allowed = new Set(['src', 'data-agent-id', 'data-endpoint', 'defer', 'data-voice-provider', 'data-voice-hotkey', 'data-voice-auto-submit']);
+    if ([...script.attributes].some(attribute => !allowed.has(attribute.name))) throw new Error('The snippet contains unsupported attributes. Copy it again from Dashboard → Install.');
+    const expected = new URL(endpoint).origin;
+    let source, configured;
+    try { source = new URL(script.getAttribute('src')); configured = new URL(script.getAttribute('data-endpoint') || expected); }
+    catch { throw new Error('The SDK source and endpoint must be complete GuideKit URLs.'); }
+    if (source.href !== `${expected}/sdk/guidekit.js` || configured.origin !== expected || configured.href !== `${expected}/`) throw new Error(`Use the GuideKit SDK served by ${expected}/sdk/guidekit.js. Other script sources and endpoints are not installed here.`);
+    const agentId = script.getAttribute('data-agent-id');
+    if (!agentId || !/^agt_[a-zA-Z0-9_-]{1,150}$/.test(agentId)) throw new Error('The snippet needs a valid published data-agent-id. Copy it again from Dashboard → Install.');
+    const provider = script.getAttribute('data-voice-provider') || 'browser';
+    const hotkey = script.getAttribute('data-voice-hotkey') || 'true';
+    const autoSubmit = script.getAttribute('data-voice-auto-submit') || 'true';
+    if (!['browser', 'disabled'].includes(provider) || !['true', 'false'].includes(hotkey) || !['true', 'false'].includes(autoSubmit)) throw new Error('Use browser voice settings from the current GuideKit installation snippet.');
+    return { agentId, src: source.href, voice: { provider, hotkeyStartsListening: hotkey === 'true', autoSubmit: autoSubmit === 'true' } };
+  }
 })();
