@@ -1,4 +1,24 @@
-# Core status
+# GuideKit status
+
+## Current platform completion checkpoint — 2026-10-29
+
+Work is on `feat/platform-completion`, stacked on the unmerged `feat/heyclicky-guidance` branch. [Draft PR10](https://github.com/Nithesh8678/guidekit/pull/10) is reviewable; no main merge was performed. See [delivery-plan.md](delivery-plan.md) for scope and acceptance gates.
+
+Implemented: bounded adaptive journeys, explicit private-host targets/public labels, opt-in reload resume, immutable prepare-before-activate publication with retry/rollback/unpublish, draft document editing/deduplication, retrieval preview/evaluation, installation diagnostics, content-hash/SRI script releases and a packed ESM/TypeScript SDK candidate. Account/team UI and APIs include profile/password, invitations, live roles, one-time local recovery/verification, workspace switching, audit and session revocation. Operations include consistent private backup, guarded restore, migrations, readiness, capacity and safe aggregate telemetry/retention. The local subscription runtime remains default; the optional hosted provider is explicitly selected, disabled by default and has no fallback.
+
+Verification: the combined check passed 177 tests before the final generic-English voice preference adjustment; all 96 SDK/package tests and eight affected browser voice cases passed after that adjustment. The combined Chromium suite passed 43 cases, plus 13 dashboard contract cases and two real dashboard/API integrations. These automated model/speech paths use explicit fixtures. Typecheck and production build pass. CI must be tied to the exact remote SHA reported at release.
+
+Live proof: fresh real subscription inference, cited published knowledge, validated action proposal and disposable host persistence passed. Actual TigerGraph sync, relationship retrieval, idempotency, tenant and version isolation passed. A new Cutroom company agent was published through the actual dashboard; its immutable v1 became active only after TigerGraph preparation. In the isolated real Cutroom editor, a real model rename proposal required approval, the authenticated command saved/read back the new project name, the SDK recorded `action_succeeded`, and normal Undo restored the original name. All three Cutroom host actions also passed real HTTP/SQLite/Chromium tests with fixture planning. Existing personal projects/media were not opened. Cutroom remains on its separate local branch; packaged Electron and hosted execution are unverified.
+
+Recovery proof: before upgrading the running database from schema1 to3, took an online backup. Original row counts were preserved on upgrade. Restored that actual backup to a separate private directory, compared every original column/value across ten tables, verified the signing secret, migrated the copy successfully and removed only the owned drill copy. The running database was untouched by restore.
+
+Security review found and fixed three concrete races, each regression-tested: old-password login completing during reset, revoked identity accepting an invitation, and delayed session touch undoing logout. No further concrete tenant/publication/knowledge issue was found in that focused review; this is not a certification.
+
+Human voice status: the user confirmed real transcription works. Added voice selection, Preview/Stop preview, speed and remembered device preferences. The user still found browser output robotic and explicitly deferred voice quality. No premium/cloud TTS or paid model traffic was enabled. Physical mobile/packaged Electron, a genuinely elapsed long session, external mail delivery and public hosting remain acceptance gates.
+
+## Historical checkpoints
+
+The records below describe earlier verified checkpoints; their smaller test counts and planned items are superseded by the current checkpoint above.
 
 ## Implemented core
 
