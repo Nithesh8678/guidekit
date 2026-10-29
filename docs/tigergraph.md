@@ -1,6 +1,6 @@
 # TigerGraph knowledge relationships
 
-TigerGraph is GuideKit's optional server-side relationship retrieval provider. It augments the planner's document evidence: a question matches concepts in source chunks; those chunks expose other concepts; shared concepts lead to additional documents. For example, asking about an **invoice** can retrieve a **statement export** document via their shared **billing** concept even when that second document never says “invoice.” The returned paths explain the connection. The original excerpts remain the evidence for facts; a relationship is not proof of a policy.
+TigerGraph is GuideKit's server-side relationship retrieval integration, selected for the sponsor demonstration. It augments the planner's document evidence: a question matches concepts in source chunks; those chunks expose other concepts; shared concepts lead to additional documents. For example, asking about an **invoice** can retrieve a **statement export** document via their shared **billing** concept even when that second document never says “invoice.” The returned paths explain the connection. The original excerpts remain the evidence for facts; a relationship is not proof of a policy.
 
 The implementation is in `packages/graph/src/index.ts`; the schema and installed queries are in `packages/graph/gsql/`. There are no additional runtime dependencies. Import this package only from the Node server. The browser SDK must never receive the TigerGraph token.
 
@@ -20,13 +20,17 @@ Concepts are deterministic, normalized lexical terms, with stop words removed; t
 
 ## Cluster setup
 
-No TigerGraph cluster, account, token or paid service is provisioned automatically. An administrator needs access to a compatible TigerGraph deployment and GSQL/GraphStudio schema/query installation. The supplied files target the documented GSQL v2 syntax and RESTPP interfaces. They have **not yet been compiled or executed on a live cluster**; deployment-specific compatibility must be verified before claiming live support.
+No TigerGraph cluster, account, token or paid service is provisioned automatically. An administrator needs access to a compatible TigerGraph deployment and GSQL/GraphStudio schema/query installation. The supplied files target the documented GSQL v2 syntax and RESTPP interfaces. The schema and all three queries were compiled and installed successfully on TigerGraph Savanna 4.2.5 on 2026-10-29. Live synthetic sync and retrieval verified the invoice → billing → statement-export relationship, idempotent sync, tenant isolation and published-version isolation. Other deployment versions still need compatibility verification.
 
-1. Use a dedicated development database/cluster or a new graph namespace. Inspect existing vertex and edge type names first: the schema creates `GK*` types. If those names or `GuideKit` already exist, stop and inspect the existing schema. The files deliberately contain no `DROP` or replacement commands.
+1. Use a dedicated development database/cluster or a new graph namespace. Inspect existing vertex and edge type names first: the schema creates `GK*` types. If those names or `GuideKit` already exist, stop and inspect the existing schema. The schema contains no `DROP` or replacement commands. Query installation uses `CREATE OR REPLACE QUERY`; inspect any existing `guidekit_*` queries before replacing them.
 2. Review `packages/graph/gsql/schema.gsql`, then execute it through your deployment's GSQL client or schema editor. The default graph name is `GuideKit`. If a different name is required, replace the graph identifier consistently in both GSQL files and in server configuration. Do not replace tenant or agent IDs in the schema.
 3. Execute `packages/graph/gsql/queries.gsql` in GSQL. It creates and installs `guidekit_status`, `guidekit_version` and `guidekit_retrieve`. Query installation must report success; merely pasting the source does not install the REST endpoints. The status query returns schema marker `1`.
 4. Create a dedicated runtime identity/token with only the privileges needed to execute these installed queries and upsert data in this graph. The schema administrator's credentials should not be the application's runtime identity. Follow the deployment's authentication procedure and keep its token in server-only configuration.
 5. Configure the server origin, graph name, token and RESTPP prefix. For the standard HTTPS gateway use `/restpp`; for a direct local RESTPP listener at port 9000 use an empty prefix. Verify the URL in the deployment's documented/copyable query endpoint. Do not guess by adding prefixes repeatedly.
+
+The local server loads `.env` with `npm start` and `npm run dev`. Set `TIGERGRAPH_BASE_URL` and exactly one of `TIGERGRAPH_SECRET` (Savanna) or `TIGERGRAPH_TOKEN` (bearer token). The former uses the documented `Authorization: GSQL-Secret` header; credentials remain server-only. A Savanna database secret does not expire and has its user's workspace privileges; use a restricted identity for hosted deployments.
+
+Dashboard → Install shows actual connection status and an explicit **Sync published version to TigerGraph** button. Sync after every publication. The server reads the immutable saved version, and new questions use graph evidence exclusively while configured. An unavailable or unsynced configured graph produces an error instead of silently switching retrieval providers. The SDK displays returned relationship paths.
 
 The provider configuration is explicit:
 
@@ -36,7 +40,8 @@ import { createTigerGraphProvider } from '../packages/graph/src/index.js';
 const graph = createTigerGraphProvider({
   baseUrl: process.env.TIGERGRAPH_BASE_URL!, // origin only: https://cluster.example
   graphName: process.env.TIGERGRAPH_GRAPH_NAME ?? 'GuideKit',
-  token: process.env.TIGERGRAPH_TOKEN!,
+  secret: process.env.TIGERGRAPH_SECRET, // Savanna database secret
+  // Alternatively token: process.env.TIGERGRAPH_TOKEN (set exactly one credential)
   restppPrefix: process.env.TIGERGRAPH_RESTPP_PREFIX ?? '/restpp'
 });
 const status = await graph.status();
@@ -77,8 +82,12 @@ node --import tsx --test packages/graph/tests/*.test.ts
 npm run typecheck
 ```
 
-These tests use an explicit in-memory REST fixture. They exercise graph upsert shape, shared-concept traversal to a document lacking the question token, tenant/agent/version isolation, immutable snapshot conflict, retry after incomplete sync, exact gateway/direct paths, response scope checks and sanitized failures. They do not prove GSQL compilation, cluster availability, token authorization or live retrieval.
+These unit tests use an explicit in-memory REST fixture. They exercise graph upsert shape, shared-concept traversal to a document lacking the question token, tenant/agent/version isolation, immutable snapshot conflict, retry after incomplete sync, exact gateway/direct paths, response scope checks and sanitized failures. They do not prove GSQL compilation, cluster availability, token authorization or live retrieval.
 
 After installing the queries and configuring real credentials, first check `status().connected`. Then publish a synthetic two-document snapshot containing the invoice/billing/export example and call `retrieve` for `invoice`; verify both source excerpts and the `invoice → billing → export` document/concept/document path. Repeat against a second tenant and a later version and confirm their sources never appear in the first scope. Finally verify those returned excerpts and paths reach a real planner request and its answer cites the correct published source. Only then mark the provider live connected and end-to-end verified.
 
 Official references used for the implementation: [REST upsert and acknowledgement](https://www.tigergraph.com/docs/tigergraph-server/4.2/api/upsert-rest), [installed RESTPP query endpoints](https://www.tigergraph.com/docs/tigergraph-server/4.2/api/built-in-endpoints), [GSQL v2 traversal](https://www.tigergraph.com/docs/gsql-ref/4.2/querying/select-statement/from-clause-v2), [accumulators](https://www.tigergraph.com/docs/gsql-ref/3.10/querying/accumulators), [output projections](https://www.tigergraph.com/docs/gsql-ref/4.1/querying/output-statements-and-file-objects), and [REST time and response limits](https://www.tigergraph.com/docs/tigergraph-server/3.10/api/).
+
+Opt-in live verification: `npm run test:graph` uses only synthetic documents and the configured workspace. It retains its uniquely scoped proof vertices so evidence can be inspected; it never drops application data.
+
+Savanna references: [data-plane authentication and workspace endpoints](https://www.tigergraph.com/docs/savanna/main/rest-api/data-plane-apis), [query creation and replacement](https://www.tigergraph.com/docs/gsql-ref/4.1/querying/query-operations).

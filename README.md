@@ -93,8 +93,10 @@ Core: authenticated developer workspaces, company-scoped knowledge, publishing, 
 
 Cutroom is a separate demonstration host. Its integration must use its command/revision and permission boundary; no editor runtime data or media belongs in this repository. A dedicated adapter is a next integration checkpoint after the core proof.
 
-TigerGraph workflow relationships and Wispr's approved embedded voice API remain optional follow-on work. Billing, teams/SSO, native apps, arbitrary-site automation, and a hosted commercial inference service are outside this local core. The SDK cannot bypass a host's permissions or access cross-origin iframe/canvas semantics automatically.
+TigerGraph document relationships are implemented through server-side sync and scoped retrieval; see [setup and verification](docs/tigergraph.md). Browser speech recognition and synthesis are the selected voice approach; no Wispr key is required. Billing, teams/SSO, native apps, arbitrary-site automation, and a hosted commercial inference service are outside this local core. The SDK cannot bypass a host's permissions or access cross-origin iframe/canvas semantics automatically.
 
 [viaSocket](https://viasocket.com/developers/docs) is a suitable optional provider for company-connected app actions. Its API can sit behind an approved GuideKit action and an authenticated host backend. It is not connected or live-tested in this release; see the [integration assessment](docs/viasocket.md).
 
 See [product](docs/product.md), [architecture](docs/architecture.md), [API contracts](docs/contracts.md), [security](docs/security.md), and [runtime details](packages/runtime/README.md). MIT licensed.
+
+For the manual SDK installation, hotkey voice, confirmed action and graph walkthrough, follow [the hands-on test guide](docs/testing-guide.md).

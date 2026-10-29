@@ -5,7 +5,9 @@ export interface TigerGraphConfig {
   /** Origin only, e.g. https://example.i.tgcloud.io. */
   baseUrl: string;
   graphName: string;
-  token: string;
+  token?: string;
+  /** Savanna database secret, sent only to its configured workspace. Use exactly one credential. */
+  secret?: string;
   /** '/restpp' for the HTTPS gateway; '' for a direct RESTPP listener. */
   restppPrefix?: string;
   fetch?: typeof fetch;
@@ -122,7 +124,9 @@ export function createTigerGraphProvider(config?: TigerGraphConfig): TigerGraphP
   try { base = new URL(config.baseUrl); } catch { return fail('invalid_config', 'TigerGraph baseUrl must be an absolute HTTP(S) origin.'); }
   if (!['https:', 'http:'].includes(base.protocol) || base.username || base.password || base.pathname !== '/' || base.search || base.hash || (base.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(base.hostname))) fail('invalid_config', 'TigerGraph baseUrl must be an HTTPS origin, or HTTP loopback for a local cluster.');
   if (!/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(config.graphName)) fail('invalid_config', 'TigerGraph graphName must be a GSQL identifier.');
-  if (typeof config.token !== 'string' || !config.token.trim() || config.token.length > 8192 || /[\r\n]/.test(config.token)) fail('invalid_config', 'A valid server-side TigerGraph token is required.');
+  const credential = config.secret ?? config.token;
+  if ((!!config.secret === !!config.token) || typeof credential !== 'string' || !credential.trim() || credential.length > 8192 || /[\r\n]/.test(credential)) fail('invalid_config', 'Supply exactly one valid server-side TigerGraph token or database secret.');
+  const authorization = `${config.secret ? 'GSQL-Secret' : 'Bearer'} ${credential}`;
   const prefix = config.restppPrefix ?? '/restpp';
   if (prefix !== '' && !/^\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*$/.test(prefix)) fail('invalid_config', 'TigerGraph restppPrefix must be an absolute path without a trailing slash.');
   const fetcher = config.fetch ?? globalThis.fetch;
@@ -131,7 +135,7 @@ export function createTigerGraphProvider(config?: TigerGraphConfig): TigerGraphP
   async function request(path: string, body: unknown): Promise<JsonObject[]> {
     const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 8_000);
     try {
-      const response = await fetcher(`${root}${path}`, { method: 'POST', headers: { Authorization: `Bearer ${config!.token}`, 'Content-Type': 'application/json', 'GSQL-TIMEOUT': '6000', 'RESPONSE-LIMIT': String(MAX_RESPONSE) }, body: JSON.stringify(body), signal: controller.signal, redirect: 'error' });
+      const response = await fetcher(`${root}${path}`, { method: 'POST', headers: { Authorization: authorization, 'Content-Type': 'application/json', 'GSQL-TIMEOUT': '6000', 'RESPONSE-LIMIT': String(MAX_RESPONSE) }, body: JSON.stringify(body), signal: controller.signal, redirect: 'error' });
       if (!response.ok) fail('request_failed', `TigerGraph request failed (HTTP ${response.status}). Check the cluster, token privileges and installed queries.`);
       const reader = response.body?.getReader();
       if (!reader) fail('invalid_response', 'TigerGraph returned an empty response.');
@@ -214,7 +218,6 @@ export function createTigerGraphProvider(config?: TigerGraphConfig): TigerGraphP
       const limit = input.limit ?? 8;
       if (!Number.isInteger(limit) || limit < 1 || limit > 16) fail('invalid_input', 'Retrieval limit must be between 1 and 16.');
       const terms = conceptTerms(input.question, 12);
-      if (!terms.length) return { citations: [], paths: [], source: 'tigergraph' };
       const result = await query('guidekit_retrieve', { ...params, terms, max_results: limit });
       if (!result.some(row => row.version_ready === true)) fail('request_failed', 'This published version has not completed TigerGraph sync. Retry publishing or repair the connection.');
       const rows = result.flatMap(row => Array.isArray(row.evidence) ? row.evidence : []);
@@ -229,9 +232,9 @@ export function createTigerGraphProvider(config?: TigerGraphConfig): TigerGraphP
         identifier(attrs.document_id, 'returned document ID');
         if (!seen.has(attrs.document_id) && citations.length < limit) { citations.push({ documentId: attrs.document_id, title: attrs.title, excerpt: attrs.excerpt }); seen.add(attrs.document_id); }
         for (const path of attrs.paths.slice(0, 16)) {
-          if (!object(path) || typeof path.seed_document_id !== 'string' || typeof path.concept !== 'string' || path.concept.length > 64) fail('invalid_response', 'TigerGraph returned an invalid explanation path.');
+          if (!object(path) || typeof path.seed_document_id !== 'string' || typeof path.bridge_term !== 'string' || path.bridge_term.length > 64) fail('invalid_response', 'TigerGraph returned an invalid explanation path.');
           identifier(path.seed_document_id, 'path document ID');
-          const nodes = [path.seed_document_id, path.concept, attrs.document_id], key = JSON.stringify(nodes);
+          const nodes = [path.seed_document_id, path.bridge_term, attrs.document_id], key = JSON.stringify(nodes);
           if (!seenPaths.has(key) && paths.length < limit * 4) { paths.push({ nodes, relation: path.seed_document_id === attrs.document_id ? 'question-matched document contains this connected concept' : 'documents share a concept through their source chunks' }); seenPaths.add(key); }
         }
       }

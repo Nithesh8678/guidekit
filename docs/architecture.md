@@ -9,6 +9,10 @@ flowchart LR
   Visitor --> SDK[Shared web SDK / shadow DOM]
   SDK -->|origin-bound expiring session| API
   SDK -->|bounded page context| API
+  Versions -->|explicit sync| Graph[(TigerGraph knowledge relationships)]
+  API -->|scoped evidence and paths| Graph
+  Visitor -->|browser speech recognition| SDK
+  SDK -->|browser speech synthesis| Visitor
   API --> Runtime[Official Codex app-server / stdio]
   Runtime --> Plan[Validated answer + guidance + action proposal]
   Plan --> SDK

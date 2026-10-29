@@ -6,6 +6,14 @@ type V = { v_id: string; v_type: string; attributes: Record<string, unknown> };
 type E = { from: string; type: string; to: string };
 const ok = (results: unknown[]) => new Response(JSON.stringify({ error: false, results }), { headers: { 'Content-Type': 'application/json' } });
 
+test('Savanna database secret uses its documented auth scheme and rejects ambiguous credentials', async () => {
+  let authorization = '';
+  const provider = createTigerGraphProvider({ baseUrl: 'https://workspace.example', graphName: 'GuideKit', secret: 'synthetic-secret', fetch: async (_url, init) => { authorization = new Headers(init?.headers).get('Authorization') ?? ''; return ok([{ schema_version: 1 }]); } });
+  assert.equal((await provider.status()).connected, true);
+  assert.equal(authorization, 'GSQL-Secret synthetic-secret');
+  assert.throws(() => createTigerGraphProvider({ baseUrl: 'https://workspace.example', graphName: 'GuideKit', secret: 'secret', token: 'token' }), /exactly one/);
+});
+
 /** Explicit REST contract fixture, not a TigerGraph server or GSQL compiler. */
 class GraphFixture {
   vertices = new Map<string, V>(); edges: E[] = []; calls: { url: string; body: any; init: RequestInit }[] = [];
@@ -42,7 +50,7 @@ class GraphFixture {
       const bridge = concepts.filter(concept => seeds.some(seed => mentions(seed, concept))).slice(0, 256);
       const evidence = chunks.map(chunk => {
         const related = bridge.filter(c => mentions(chunk, c));
-        const paths = related.flatMap(c => seeds.filter(seed => mentions(seed, c)).map(seed => ({ seed_document_id: seed.attributes.document_id, concept: c.attributes.term }))).slice(0, 8);
+        const paths = related.flatMap(c => seeds.filter(seed => mentions(seed, c)).map(seed => ({ seed_document_id: seed.attributes.document_id, bridge_term: c.attributes.term }))).slice(0, 8);
         return { ...chunk, attributes: { ...chunk.attributes, score: related.length, paths } };
       }).filter(v => v.attributes.score > 0).sort((a, b) => b.attributes.score - a.attributes.score).slice(0, body.max_results);
       return ok([{ version_ready: true }, { evidence }]);

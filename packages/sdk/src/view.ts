@@ -120,15 +120,17 @@ export class View {
   }
   knowledgeEvidence(container: HTMLElement, knowledge: RunResult['knowledge'], citations: Citation[]): void {
     if (knowledge?.source !== 'tigergraph') return;
-    if (!knowledge.paths.length) {
+    const titles = new Map(citations.map(citation => [citation.documentId, citation.title]));
+    // Show useful connections between cited sources, without self loops or internal IDs.
+    const paths = knowledge.paths.filter(path => path.nodes[0] !== path.nodes[2] && titles.has(path.nodes[0]!) && titles.has(path.nodes[2]!)).slice(0, 6);
+    if (!paths.length) {
       container.append(element('div', 'sources', 'Knowledge retrieved with TigerGraph')); this.scroll(); return;
     }
-    const titles = new Map(citations.map(citation => [citation.documentId, citation.title]));
     const details = element('details', 'sources'); details.append(element('summary', '', 'TigerGraph relationships'));
-    for (const path of knowledge.paths) {
+    for (const path of paths) {
       const [from, concept, to] = path.nodes;
       const source = element('div', 'source');
-      source.append(element('strong', '', `${titles.get(from!) ?? from} → ${concept} → ${titles.get(to!) ?? to}`), element('div', '', path.relation));
+      source.append(element('strong', '', `${titles.get(from!)} → ${concept} → ${titles.get(to!)}`), element('div', '', path.relation));
       details.append(source);
     }
     container.append(details); this.scroll();

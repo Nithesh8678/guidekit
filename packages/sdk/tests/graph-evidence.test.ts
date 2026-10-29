@@ -51,7 +51,7 @@ test('view maps citation titles and renders graph paths as safe text with a trut
     view.knowledgeEvidence(container as unknown as HTMLElement, knowledge, run.citations);
     assert.match(container.allText, /TigerGraph relationships/);
     assert.ok(container.allText.includes('Invoice help → <script>alert(1)</script> → Statement export'));
-    assert.ok(container.allText.includes('unknown_doc → billing → Statement export'));
+    assert.ok(!container.allText.includes('unknown_doc'), 'Internal IDs from uncited sources must not appear in the visitor interface.');
     assert.ok(container.allText.includes('<img src=x onerror=alert(1)>'));
     assert.ok(tags.every(tag => ['details', 'summary', 'div', 'strong'].includes(tag)));
     const empty = new TextElement('div'); view.knowledgeEvidence(empty as unknown as HTMLElement, { source: 'tigergraph', paths: [] }, []);

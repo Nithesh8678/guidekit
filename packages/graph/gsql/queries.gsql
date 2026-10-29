@@ -1,10 +1,10 @@
 USE GRAPH GuideKit
 
-CREATE QUERY guidekit_status() FOR GRAPH GuideKit SYNTAX v2 {
+CREATE OR REPLACE QUERY guidekit_status() FOR GRAPH GuideKit SYNTAX v2 {
   PRINT 1 AS schema_version;
 }
 
-CREATE QUERY guidekit_version(
+CREATE OR REPLACE QUERY guidekit_version(
   STRING scope, STRING tenant_id, STRING agent_id, INT version
 ) FOR GRAPH GuideKit SYNTAX v2 {
   Versions = SELECT v FROM GKVersion:v
@@ -13,17 +13,17 @@ CREATE QUERY guidekit_version(
   PRINT Versions AS versions;
 }
 
-CREATE QUERY guidekit_retrieve(
+CREATE OR REPLACE QUERY guidekit_retrieve(
   STRING scope, STRING tenant_id, STRING agent_id, INT version,
   SET<STRING> terms, INT max_results = 8
 ) FOR GRAPH GuideKit SYNTAX v2 {
-  TYPEDEF TUPLE<STRING seed_document_id, STRING concept> Path;
+  TYPEDEF TUPLE<STRING seed_document_id, STRING bridge_term> Path;
   OrAccum @@version_ready;
   SumAccum<INT> @direct_matches;
   SumAccum<INT> @score;
   MinAccum<INT> @first_candidate_ordinal;
   SetAccum<STRING> @seed_document_ids;
-  HeapAccum<Path>(8, seed_document_id ASC, concept ASC) @paths;
+  HeapAccum<Path>(8, seed_document_id ASC, bridge_term ASC) @paths;
   INT result_limit = max_results;
 
   IF result_limit < 1 THEN result_limit = 1; END;

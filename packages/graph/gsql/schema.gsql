@@ -1,6 +1,8 @@
 // Install on a dedicated TigerGraph database. These statements deliberately do
 // not drop or replace existing schema. See docs/tigergraph.md for setup.
 // Vertex IDs are SHA-256 hashes containing tenant, agent and published version.
+USE GLOBAL
+
 CREATE VERTEX GKVersion (
   PRIMARY_ID id STRING,
   scope STRING,
@@ -8,7 +10,7 @@ CREATE VERTEX GKVersion (
   agent_id STRING,
   version INT,
   manifest STRING,
-  ready BOOL DEFAULT false,
+  ready BOOL,
   vertex_count INT,
   edge_count INT
 )
