@@ -28,6 +28,8 @@ export interface MountOptions {
   getContext?(): Record<string, unknown> | Promise<Record<string, unknown>>;
   hotkey?: string;
   voice?: VoiceOptions;
+  /** Adaptive SPA/modal guidance is enabled by default. Session resume is off unless opted in. */
+  journey?: { enabled?: boolean; resume?: 'disabled' | 'session' };
 }
 export interface GuideKitInstance {
   readonly ready: Promise<PublicAgent>;

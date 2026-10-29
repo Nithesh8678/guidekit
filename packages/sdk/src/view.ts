@@ -50,6 +50,11 @@ export interface ActionCard {
   finished(message: string, success: boolean): void;
   retry(message: string, handler: () => void): void;
 }
+export interface GuideHooks {
+  state?(state: GuidanceState): void;
+  progress?(index: number, step: ModelPlan['steps'][number], evidence: 'observed' | 'manual' | 'host_verified'): void;
+  finish?(result: GuidanceResult): boolean;
+}
 export class View {
   readonly host = element('div');
   readonly shadow: ShadowRoot;
@@ -81,12 +86,14 @@ export class View {
   private guideVisibility: ((visible: boolean) => void) | null = null;
   private guideFocus: (() => void) | null = null;
   private guideChatOpen = false;
+  private transitionCleanup: (() => void) | null = null;
+  private transitionStop: (() => void) | null = null;
   private readonly resumeGuide: HTMLButtonElement;
   private readonly recoveries = new WeakSet<HTMLElement>();
   private isOpen = false;
   private readonly voiceLabel = element('div', 'footer');
   get opened(): boolean { return this.isOpen && !this.panel.hidden; }
-  get guiding(): boolean { return this.guideSession?.active ?? false; }
+  get guiding(): boolean { return (this.guideSession?.active ?? false) || this.transitionStop !== null; }
   voiceProvider(provider: 'browser' | 'disabled'): void {
     this.voiceLabel.textContent = provider === 'browser' ? 'Browser voice · Chrome/Edge · Microphone permission required' : 'Voice input disabled';
   }
@@ -177,15 +184,31 @@ export class View {
     }
     container.append(details); this.scroll();
   }
-  guideButton(container: HTMLElement, steps: ModelPlan['steps'], resolve: (id: string) => HTMLElement | null, onMissing: () => void, beforeStart?: () => void): void {
-    const start = button('', 'secondary guide-start', () => { beforeStart?.(); this.guide(steps, resolve, onMissing); }); start.append(icon('guide'), document.createTextNode(`Show me · ${steps.length} step${steps.length === 1 ? '' : 's'}`)); container.append(start);
+  guideButton(container: HTMLElement, steps: ModelPlan['steps'], resolve: (id: string) => HTMLElement | null, onMissing: () => void, beforeStart?: () => void, hooks?: GuideHooks): void {
+    const start = button('', 'secondary guide-start', () => { beforeStart?.(); this.guide(steps, resolve, onMissing, hooks); }); start.append(icon('guide'), document.createTextNode(`Show me · ${steps.length} step${steps.length === 1 ? '' : 's'}`)); container.append(start);
   }
   recoveryButton(container: HTMLElement, refresh: () => void): void {
     if (this.recoveries.has(container)) return;
     this.recoveries.add(container); container.append(button('Refresh guide', 'secondary guide-start', refresh));
   }
   reportStepResult(targetId: string, result: GuideStepResult): void { this.guideSession?.reportResult(targetId, result); }
-  stopGuide(): void { this.guideSession?.stop(); }
+  stopGuide(): void { if (this.transitionStop) this.transitionStop(); else this.guideSession?.stop(); }
+  journeyTransition(stop: () => void): void {
+    this.clearGuide(false); this.departDock(); this.motion.setPaused(false); this.motion.element.style.opacity = '1'; this.motion.setActivity('waiting'); this.motion.setVisible(true);
+    this.panel.hidden = true; this.launcher.hidden = true;
+    const card = element('section', 'guide'); card.setAttribute('aria-label', 'Continuing your task'); card.style.right = '16px'; card.style.bottom = '16px';
+    card.append(element('div', 'guide-label', 'Continuing your task'), element('p', '', 'Reading the next part of this page…'), button('Open chat', 'secondary', this.handlers.open), button('Stop guidance', 'secondary', stop));
+    this.shadow.append(card); this.transitionStop = stop; this.transitionCleanup = () => card.remove();
+  }
+  offerJourneyResume(goal: string, resume: () => void, dismiss: () => void): void {
+    const card = this.message('assistant', `Continue your previous task? ${goal}`), controls = element('div', 'action-foot');
+    controls.append(button('Resume previous task', 'primary', () => { controls.remove(); resume(); }), button('Dismiss', 'secondary', () => { controls.remove(); dismiss(); })); card.append(controls);
+    this.status('A previous task is available. Open the assistant to resume it.');
+  }
+  offerJourneyMemory(allow: () => void): void {
+    const card = this.message('assistant', 'Allow task resume in this tab? Your task goal and completed control IDs will stay here for up to 30 minutes. Form values, audio and session credentials are excluded.'), controls = element('div', 'action-foot');
+    controls.append(button('Allow task resume', 'primary', () => { controls.remove(); allow(); }), button('Not now', 'secondary', () => controls.remove())); card.append(controls);
+  }
   action(container: HTMLElement, name: string, reason: string, args: Record<string, unknown>, approve: () => void, decline: () => void): ActionCard {
     const card = element('div', 'action'); const main = element('div', 'action-main');
     main.append(element('div', 'action-title', `Approval required · ${name}`), element('p', 'action-reason', reason));
@@ -199,7 +222,7 @@ export class View {
       retry: (text, retry) => { state.textContent = text; foot.replaceChildren(state, button('Retry recording result', 'secondary', retry)); this.scroll(); }
     };
   }
-  guide(steps: ModelPlan['steps'], resolve: (id: string) => HTMLElement | null, onMissing: () => void): void {
+  guide(steps: ModelPlan['steps'], resolve: (id: string) => HTMLElement | null, onMissing: () => void, hooks?: GuideHooks): void {
     if (this.opened && this.cursorDocked && this.motion.location !== 'flight') this.alignDock(false, true);
     this.clearGuide(false); if (!steps.length) return;
     this.departDock(); this.motion.setPaused(false); this.motion.setVisible(true);
@@ -290,6 +313,7 @@ export class View {
     const session = new GuidanceSession(steps, resolve, {
       onUpdate: update => {
         if (disposed) return;
+        hooks?.state?.(update);
         const changedStep = lastIndex !== update.index; state = update;
         const ownsMotion = !this.guideChatOpen && !this.cursorDocked;
         if (changedStep || update.waiting) { ++narration; markReady = false; lastPresented = -1; beats.cancel(); if (ownsMotion) motion.erase({ animate: false, preserveCursor: true }); this.handlers.guidePause?.(); if (update.waiting) lastNarrated = -1; }
@@ -327,11 +351,14 @@ export class View {
       },
       onFinish: result => {
         if (disposed) return;
-        this.clearGuide(true); this.handlers.guidePause?.();
+        this.clearGuide(false); this.handlers.guidePause?.();
+        if (hooks?.finish?.(result)) return;
+        this.restoreChat();
         if (result.reason === 'missing') onMissing();
         else if (result.reason === 'completed') { this.status(result.verified ? 'The website confirmed the result. Guidance finished.' : 'Guidance finished. Check the website for confirmation.'); this.handlers.guideFinish?.(result); }
         else this.status('Guidance stopped. You can keep chatting.');
-      }
+      },
+      onComplete: (index, step, evidence) => hooks?.progress?.(index, step, evidence)
     });
     this.guideSession = session; this.guideChatOpen = false; this.resumeGuide.hidden = true;
     this.guideVisibility = visible => { card.hidden = !visible; if (!this.cursorDocked) motion.setVisible(visible); if (!visible) { fromChat = true; beats.cancel(); } else schedulePosition(); };
@@ -350,15 +377,17 @@ export class View {
     session.start();
   }
   clearGuide(restoreChat = true): void {
-    const hadGuide = !!this.guideSession; this.guideSession = null;
+    const hadGuide = !!this.guideSession || !!this.transitionCleanup; this.guideSession = null;
+    this.transitionCleanup?.(); this.transitionCleanup = null; this.transitionStop = null;
     const cleanup = this.guideCleanup; this.guideCleanup = null; cleanup?.(); this.guideVisibility = null; this.guideFocus = null; this.guideChatOpen = false; this.resumeGuide.hidden = true;
-    if (hadGuide && restoreChat) { this.isOpen = true; this.panel.hidden = false; this.launcher.hidden = true; this.scroll(); this.dockCursor(true); }
+    if (hadGuide && restoreChat) this.restoreChat();
   }
   destroy(): void {
     this.destroyed = true; this.clearGuide(false); this.departDock(); this.motion.destroy(); this.dockResize.disconnect();
     window.removeEventListener('resize', this.dockLayout); window.visualViewport?.removeEventListener('resize', this.dockLayout); window.visualViewport?.removeEventListener('scroll', this.dockLayout); document.removeEventListener('visibilitychange', this.dockLayout); this.host.remove();
   }
   private cursorActivity(): void { if (this.cursorDocked && !this.destroyed) this.motion.setActivity(this.recording || this.speaking ? 'speaking' : this.isBusy ? 'waiting' : 'pointing'); }
+  private restoreChat(): void { this.isOpen = true; this.panel.hidden = false; this.launcher.hidden = true; this.scroll(); this.dockCursor(true); }
   private departDock(): void { this.cursorDocked = false; this.lastDock = null; cancelAnimationFrame(this.dockFrame); this.dockFrame = 0; }
   private dockCursor(animate: boolean): void {
     if (this.destroyed || !this.opened) return;

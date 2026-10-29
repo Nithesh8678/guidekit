@@ -1,6 +1,7 @@
 import type { PageContext, PageTarget } from '../../contracts/src/index';
 import type { CompiledAction } from './security';
 import { publicLabel, safeContext, validId } from './security';
+import { routeKey } from './scene';
 
 const privateSelector = '[data-guidekit-private], [data-guidekit-root], [aria-hidden="true"], [inert]';
 const sensitiveAutocomplete = /(?:password|cc-|credit|transaction|one-time-code|webauthn)/i;
@@ -51,10 +52,12 @@ export class ContextCollector {
   private explicit = new Set<string>();
   private identities = new Map<string, string>();
   private documentPath = '';
+  private documentRoute = '';
   private identity(target: HTMLElement): string { return `${roleFor(target)}:${publicLabel(labelFor(target))}`; }
   collect(actions: Map<string, CompiledAction>, allowedActions: string[], context: unknown): PageContext {
     const targets: PageTarget[] = [];
     this.targets.clear(); this.explicit.clear(); this.identities.clear(); this.documentPath = `${location.origin}${location.pathname}`;
+    this.documentRoute = routeKey();
     const candidates = Array.from(document.querySelectorAll('[data-guidekit-id],button,a[href],input,textarea,select,summary,[role="button"],[role="link"],[role="tab"],[role="menuitem"],[role="checkbox"],[role="switch"]')).slice(0, 2000);
     const explicitCounts = new Map<string, number>();
     for (const element of candidates) {
@@ -84,7 +87,7 @@ export class ContextCollector {
     };
   }
   resolve(id: string): HTMLElement | null {
-    if (this.documentPath !== `${location.origin}${location.pathname}`) return null;
+    if (this.documentPath !== `${location.origin}${location.pathname}` || this.documentRoute !== routeKey()) return null;
     const target = this.targets.get(id);
     if (!this.explicit.has(id)) return target && isSafeTarget(target) && this.identity(target) === this.identities.get(id) ? target : null;
     const matches = Array.from(document.querySelectorAll('[data-guidekit-id]')).filter(element => element.getAttribute('data-guidekit-id') === id);

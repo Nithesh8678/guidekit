@@ -42,3 +42,9 @@ test('malformed runtime output fails closed before any UI or action execution', 
   assert.throws(() => parseRun({ ...plan, action: { name: 'run', receiptId: 'receipt_1', reason: 'Do it', arguments: {}, requiresConfirmation: false } }));
   assert.throws(() => parsePublicAgent({ id: 'agent_1', version: 1, name: 'Agent', companyName: 'Company', greeting: 'Hello', accentColor: 'red;position:fixed', allowedActions: [] }));
 });
+test('known model providers and strict journey echoes are accepted without coercing malformed metadata', () => {
+  const result = { runId: 'run_1', answer: 'Continue', steps: [], action: null, citations: [], provider: 'openai', version: 1, journey: { id: 'journey_1', revision: 2, disposition: 'continue' } };
+  assert.equal(parseRun(result).provider, 'openai'); assert.equal(parseRun({ ...result, provider: 'codex' }).journey?.revision, 2);
+  for (const journey of [{ ...result.journey, revision: -1 }, { ...result.journey, disposition: ['done'] }, { ...result.journey, fieldValue: 'private' }, { ...result.journey, id: 'bad id' }]) assert.throws(() => parseRun({ ...result, journey }));
+  assert.throws(() => parseRun({ ...result, provider: 'unknown' })); assert.throws(() => parseRun({ ...result, provider: ['codex'] }));
+});

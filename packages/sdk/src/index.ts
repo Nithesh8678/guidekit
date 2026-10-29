@@ -44,7 +44,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
           ...(provider ? { provider: provider as 'browser' | 'disabled' } : {}),
           ...(script?.dataset.voiceHotkey ? { hotkeyStartsListening: script.dataset.voiceHotkey !== 'false' } : {}),
           ...(script?.dataset.voiceAutoSubmit ? { autoSubmit: script.dataset.voiceAutoSubmit !== 'false' } : {})
-        } });
+        }, journey: { enabled: script?.dataset.adaptive !== 'false', resume: script?.dataset.journeyResume === 'session' ? 'session' : 'disabled' } });
       }
       catch (error) { document.dispatchEvent(new CustomEvent('guidekit:error', { detail: { message: error instanceof Error ? error.message : 'GuideKit could not start.' } })); }
     };

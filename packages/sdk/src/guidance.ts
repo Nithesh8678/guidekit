@@ -12,9 +12,10 @@ export interface GuidanceState {
   automatic: boolean;
   paused: boolean;
   waiting: boolean;
+  confirmationPending: boolean;
 }
 export interface GuidanceResult { reason: 'completed' | 'stopped' | 'missing'; verified: boolean; message?: string; }
-interface Callbacks { onUpdate(state: GuidanceState): void; onFinish(result: GuidanceResult): void; }
+interface Callbacks { onUpdate(state: GuidanceState): void; onFinish(result: GuidanceResult): void; onComplete?(index: number, step: Step, evidence: 'observed' | 'manual' | 'host_verified'): void; }
 interface HostResult { success: boolean; message?: string; }
 interface Observation { target: HTMLElement; kind: 'text' | 'textarea' | 'choice'; ready: boolean; timer: ReturnType<typeof setTimeout> | null; }
 const quietMs = 1200;
@@ -94,7 +95,7 @@ export class GuidanceSession {
     if (!this.running) return;
     this.forgetObservation(this.index);
     this.edited.delete(this.index);
-    this.completed.add(this.index);
+    this.recordCompletion(this.index, 'manual');
     if (this.index === this.steps.length - 1) { this.finish({ reason: 'completed', verified: false, message: 'Guide ended without a confirmed website result.' }); return; }
     this.move(this.index + 1);
   }
@@ -127,8 +128,8 @@ export class GuidanceSession {
       this.failure = result.message?.trim().slice(0, 240) || 'The website could not complete that action. Try again.';
       this.refresh(); return;
     }
-    if (index === this.steps.length - 1) { this.finish({ reason: 'completed', verified: true, message: 'The website confirmed the result.' }); return; }
-    this.complete();
+    if (index === this.steps.length - 1) { this.recordCompletion(index, 'host_verified'); this.finish({ reason: 'completed', verified: true, message: 'The website confirmed the result.' }); return; }
+    this.complete('host_verified');
   }
 
   refresh(): void {
@@ -173,11 +174,15 @@ export class GuidanceSession {
     this.refresh();
     if (consume) this.resumeObservation();
   }
-  private complete(): void {
+  private recordCompletion(index: number, evidence: 'observed' | 'manual' | 'host_verified'): void {
+    const fresh = !this.completed.has(index); this.completed.add(index);
+    if (fresh || evidence === 'host_verified') this.callbacks.onComplete?.(index, { ...this.steps[index]! }, evidence);
+  }
+  private complete(evidence: 'observed' | 'manual' | 'host_verified' = 'observed'): void {
     if (!this.running || this.paused || !this.automatic) return;
     this.forgetObservation(this.index);
     this.edited.delete(this.index);
-    this.completed.add(this.index);
+    this.recordCompletion(this.index, evidence);
     let next = this.steps.findIndex((_, index) => index > this.index && !this.completed.has(index));
     if (next < 0) next = this.steps.findIndex((_, index) => !this.completed.has(index));
     if (next < 0) this.finish({ reason: 'completed', verified: false, message: 'All guidance steps were followed. No website result was independently confirmed.' });
@@ -250,7 +255,7 @@ export class GuidanceSession {
     if (!target && !this.waitingForResult) hint = 'This control changed. Waiting for the page…';
     if (!this.automatic) hint = 'Automatic progress is off. Follow this step, then choose Next.';
     if (this.paused) hint = 'Guidance is paused. Resume when you’re ready.';
-    const state: GuidanceState = { index: this.index, total: this.steps.length, completed: this.completed.size, step: { ...this.steps[this.index]! }, target, hint, automatic: this.automatic, paused: this.paused, waiting: this.waitingForResult || !target };
+    const state: GuidanceState = { index: this.index, total: this.steps.length, completed: this.completed.size, step: { ...this.steps[this.index]! }, target, hint, automatic: this.automatic, paused: this.paused, waiting: this.waitingForResult || !target, confirmationPending: this.waitingForResult };
     if (this.lastState && Object.entries(state).every(([key, value]) => key === 'step' || this.lastState?.[key as keyof GuidanceState] === value)) return;
     this.lastState = state; this.callbacks.onUpdate(state);
   }
