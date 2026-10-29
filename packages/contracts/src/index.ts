@@ -47,7 +47,8 @@ export const modelPlanSchema = z.object({
   citationIds: z.array(idSchema).max(8)
 }).strict();
 export type ModelPlan = z.infer<typeof modelPlanSchema>;
-export interface RunResult { runId: string; answer: string; steps: ModelPlan['steps']; action: (NonNullable<ModelPlan['action']> & { receiptId: string; requiresConfirmation: true }) | null; citations: Citation[]; provider: 'codex'; version: number; }
+export interface KnowledgePath { nodes: string[]; relation: string; }
+export interface RunResult { runId: string; answer: string; steps: ModelPlan['steps']; action: (NonNullable<ModelPlan['action']> & { receiptId: string; requiresConfirmation: true }) | null; citations: Citation[]; provider: 'codex'; version: number; knowledge?: { source: 'tigergraph' | 'local'; paths: KnowledgePath[] }; }
 export interface RunSummary { id: string; question: string; answer: string; status: string; createdAt: string; actionName: string | null; }
 export interface AgentDetail { agent: Agent; documents: KnowledgeDocument[]; versions: AgentVersion[]; sessions: RunSummary[]; }
 export interface Workspace { user: { id: string; email: string; name: string }; tenant: { id: string; name: string }; }
