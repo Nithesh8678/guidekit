@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { Loader2 } from 'lucide-react';
+import { Layers3, Loader2 } from 'lucide-react';
 import type { AgentConfig, AgentDetail, KnowledgeDocument } from '@guidekit/contracts';
 
 export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
@@ -12,6 +12,8 @@ export function errorMessage(error: unknown) { return error instanceof Error ? e
 export function date(value: string) { return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value)); }
 export function Spinner() { return <Loader2 size={16} className="spin" aria-hidden="true" />; }
 export function Notice({ children, kind = 'error' }: { children: ReactNode; kind?: 'error' | 'success' | 'info' }) { return <div className={`notice notice-${kind}`} role={kind === 'error' ? 'alert' : 'status'}>{children}</div>; }
+export function Brand({ light = false }: { light?: boolean }) { return <div className={`brand ${light ? 'brand-light' : ''}`}><span className="brand-mark"><Layers3 size={22} strokeWidth={2.2} /></span><span>GuideKit</span></div>; }
+export function DeliveryNotice({ generic = false }: { generic?: boolean }) { return <Notice kind="info">{generic ? 'If the account exists, its link uses this instance’s private account outbox. No email is sent by this local delivery mode.' : 'No email was sent. A link was queued in this instance’s private account outbox. Ask the local operator to deliver it securely.'} Links expire and work once.</Notice>; }
 
 export type PublicationStatus = 'preparing' | 'syncing' | 'ready' | 'failed';
 // Missing lifecycle fields are accepted for snapshots created before readiness tracking.

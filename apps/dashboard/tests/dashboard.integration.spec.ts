@@ -45,3 +45,22 @@ test('real dashboard and local API preserve immutable releases, roll back safely
   await page.getByRole('tab', { name: 'Agent setup', exact: true }).click(); await expect(page.getByLabel(/^Instructions/)).toHaveValue('Unsaved configuration preserved through rollback and unpublish.');
   expect(browserErrors).toEqual([]);
 });
+
+test('real account controls update profile, preserve failed password entry, revoke other sessions and manage local invitations', async ({ page, playwright }) => {
+  const email = `account-${crypto.randomUUID()}@example.test`, current = 'Synthetic-account-current-42', next = 'Synthetic-account-updated-42';
+  const errors: string[] = []; page.on('pageerror', error => errors.push(error.message)); page.on('dialog', dialog => dialog.accept());
+  await page.goto('/'); await page.getByLabel('Your name', { exact: true }).fill('Account Browser Tester'); await page.getByLabel('Company name', { exact: true }).fill('Synthetic Account Workspace'); await page.getByLabel('Email address').fill(email); await page.getByLabel('Password').fill(current); await page.getByRole('button', { name: 'Create workspace', exact: true }).click();
+  await page.getByRole('button', { name: 'Account & team', exact: true }).click(); const dialog = page.getByRole('dialog', { name: 'Account & team', exact: true });
+  await dialog.getByLabel('Your name', { exact: true }).fill('Updated Browser Tester'); await dialog.getByRole('button', { name: 'Save profile', exact: true }).click(); await expect(dialog.getByText('Profile updated.', { exact: true })).toBeVisible();
+  await dialog.getByLabel('Current password', { exact: true }).fill('wrong-password'); await dialog.getByLabel('New password', { exact: true }).fill(next); await dialog.getByLabel('Confirm new password', { exact: true }).fill(next); await dialog.getByRole('button', { name: 'Change password', exact: true }).click(); await expect(dialog.getByText('Current password is incorrect.', { exact: false })).toBeVisible(); await expect(dialog.getByLabel('New password', { exact: true })).toHaveValue(next);
+  await dialog.getByLabel('Current password', { exact: true }).fill(current); await dialog.getByRole('button', { name: 'Change password', exact: true }).click(); await expect(dialog.getByLabel('New password', { exact: true })).toHaveValue('');
+  const other = await playwright.request.newContext({ baseURL: 'http://127.0.0.1:4510', extraHTTPHeaders: { Origin: 'http://127.0.0.1:4510' } });
+  try {
+    expect((await other.post('/api/auth/login', { data: { email, password: next } })).status()).toBe(200);
+    await dialog.getByRole('button', { name: 'Sign out other sessions', exact: true }).click(); await expect(dialog.getByText('Other dashboard sessions were signed out.', { exact: true })).toBeVisible(); expect((await (await other.get('/api/auth/me')).json()).workspace).toBeNull();
+    await dialog.getByRole('button', { name: 'Request verification link', exact: true }).click(); await expect(dialog.getByText('No email was sent.', { exact: false })).toBeVisible();
+    await dialog.getByRole('tab', { name: 'Team members', exact: true }).click(); const inviteEmail = `invite-${crypto.randomUUID()}@example.test`; await dialog.getByLabel('Teammate email', { exact: true }).fill(inviteEmail); await dialog.getByLabel('Invitation role', { exact: true }).selectOption('viewer'); await dialog.getByRole('button', { name: 'Send invitation', exact: true }).click(); await expect(dialog.getByText(inviteEmail, { exact: true })).toBeVisible();
+    await dialog.getByRole('button', { name: `Revoke invitation for ${inviteEmail}`, exact: true }).click(); await expect(dialog.getByText(inviteEmail, { exact: true })).toHaveCount(0); await dialog.getByRole('tab', { name: 'Security activity', exact: true }).click(); await expect(dialog.getByText('workspace invited', { exact: true })).toBeVisible(); await expect(dialog.getByText('workspace invitation revoked', { exact: true })).toBeVisible();
+    await page.setViewportSize({ width: 390, height: 844 }); expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true); await dialog.getByRole('button', { name: 'Close account', exact: true }).click(); await expect(page.locator('.sidebar-user')).toContainText('Updated Browser Tester'); expect(errors).toEqual([]);
+  } finally { await other.dispose(); }
+});
