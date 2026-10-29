@@ -57,6 +57,11 @@ export function parseRun(value: unknown): RunResult {
   if (!record(value) || !validId(value.runId) || typeof value.answer !== 'string' || value.answer.length < 1 || value.answer.length > 5000 || value.provider !== 'codex' || !Number.isInteger(value.version) || !Array.isArray(value.steps) || value.steps.length > 8 || !Array.isArray(value.citations) || value.citations.length > 8) throw new Error('The assistant returned an invalid response. Please try again.');
   for (const step of value.steps) if (!record(step) || !validId(step.targetId) || typeof step.text !== 'string' || step.text.length < 1 || step.text.length > 600) throw new Error('The assistant returned invalid guidance.');
   for (const citation of value.citations) if (!record(citation) || !validId(citation.documentId) || typeof citation.title !== 'string' || citation.title.length > 500 || typeof citation.excerpt !== 'string' || citation.excerpt.length > 5000) throw new Error('The assistant returned an invalid source.');
+  if (value.knowledge !== undefined) {
+    const knowledge = value.knowledge;
+    if (!record(knowledge) || !Object.keys(knowledge).every(key => key === 'source' || key === 'paths') || (knowledge.source !== 'local' && knowledge.source !== 'tigergraph') || !Array.isArray(knowledge.paths) || knowledge.paths.length > 32) throw new Error('The assistant returned invalid knowledge evidence.');
+    for (const path of knowledge.paths) if (!record(path) || !Object.keys(path).every(key => key === 'nodes' || key === 'relation') || !Array.isArray(path.nodes) || path.nodes.length !== 3 || !validId(path.nodes[0]) || !validId(path.nodes[2]) || typeof path.nodes[1] !== 'string' || path.nodes[1].length < 1 || path.nodes[1].length > 64 || typeof path.relation !== 'string' || path.relation.length > 300) throw new Error('The assistant returned an invalid knowledge relationship.');
+  }
   if (value.action !== null && (!record(value.action) || !validId(value.action.name) || !validId(value.action.receiptId) || value.action.requiresConfirmation !== true || typeof value.action.reason !== 'string' || value.action.reason.length > 600 || !record(value.action.arguments) || JSON.stringify(value.action.arguments).length > 20_000)) throw new Error('The assistant returned an invalid action.');
   return value as unknown as RunResult;
 }

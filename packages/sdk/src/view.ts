@@ -1,4 +1,4 @@
-import type { Citation, ModelPlan, PublicAgent } from '../../contracts/src/index';
+import type { Citation, ModelPlan, PublicAgent, RunResult } from '../../contracts/src/index';
 
 const styles = `
 :host{all:initial;position:fixed;inset:0;z-index:2147483000;pointer-events:none;font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#17213b;font-size:14px;line-height:1.5;color-scheme:light;--gk-accent:#365cf5}
@@ -117,6 +117,21 @@ export class View {
       message.append(details);
     }
     this.messages.append(message); this.scroll(); return message;
+  }
+  knowledgeEvidence(container: HTMLElement, knowledge: RunResult['knowledge'], citations: Citation[]): void {
+    if (knowledge?.source !== 'tigergraph') return;
+    if (!knowledge.paths.length) {
+      container.append(element('div', 'sources', 'Knowledge retrieved with TigerGraph')); this.scroll(); return;
+    }
+    const titles = new Map(citations.map(citation => [citation.documentId, citation.title]));
+    const details = element('details', 'sources'); details.append(element('summary', '', 'TigerGraph relationships'));
+    for (const path of knowledge.paths) {
+      const [from, concept, to] = path.nodes;
+      const source = element('div', 'source');
+      source.append(element('strong', '', `${titles.get(from!) ?? from} → ${concept} → ${titles.get(to!) ?? to}`), element('div', '', path.relation));
+      details.append(source);
+    }
+    container.append(details); this.scroll();
   }
   guideButton(container: HTMLElement, steps: ModelPlan['steps'], resolve: (id: string) => HTMLElement | null, onMissing: () => void): void {
     const start = button('', 'secondary guide-start', () => this.guide(steps, resolve, onMissing)); start.append(icon('guide'), document.createTextNode(`Show me · ${steps.length} step${steps.length === 1 ? '' : 's'}`)); container.append(start);

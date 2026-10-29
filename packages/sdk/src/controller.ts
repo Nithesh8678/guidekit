@@ -102,6 +102,7 @@ export class Assistant implements GuideKitInstance {
       const knownTargets = new Set(page.targets.map(target => target.id));
       if (result.steps.some(step => !knownTargets.has(step.targetId))) throw new Error('The assistant referred to a control that was not shared. Ask again for the current page.');
       const container = this.view.message('assistant', result.answer, result.citations);
+      this.view.knowledgeEvidence(container, result.knowledge, result.citations);
       if (result.steps.length) {
         const resolve = (id: string) => this.contextCollector.resolve(id);
         const missing = () => { this.view.status('That control changed or is no longer visible. Ask again to refresh the guide.', true); this.emit('target-missing', { runId: result.runId }); };
