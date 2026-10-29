@@ -11,9 +11,10 @@ import type { AccountDeliveryMessage } from '../apps/server/src/accounts.js';
 
 async function fixture() {
   const dir = await mkdtemp(join(tmpdir(), 'guidekit-account-races-')), origins = new Set<string>(), messages: AccountDeliveryMessage[] = [];
+  let statusGate: (() => Promise<void>) | undefined;
   const core = createApp({ dataDir: dir, adminOrigins: origins, testing: true,
     delivery: { mode: 'local', async deliver(message) { messages.push(message); } },
-    provider: { async status() { return { provider: 'codex', available: true, authenticated: true, message: 'Explicit account race fixture' }; }, async infer() { throw new Error('Account race tests never call inference.'); }, async close() {} }
+    provider: { async status() { await statusGate?.(); return { provider: 'codex', available: true, authenticated: true, message: 'Explicit account race fixture' }; }, async infer() { throw new Error('Account race tests never call inference.'); }, async close() {} }
   });
   const server = createServer(core.app); await new Promise<void>(accept => server.listen(0, '127.0.0.1', accept));
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`; origins.add(base);
@@ -30,7 +31,7 @@ async function fixture() {
     return `gk.sid=${encodeURIComponent(`s:${id}.${signature}`)}`;
   }
   async function close() { await core.close(); server.closeAllConnections(); await new Promise<void>(accept => server.close(() => accept())); await rm(dir, { recursive: true, force: true }); }
-  return { core, request, staleSession, messages, close };
+  return { core, request, staleSession, messages, close, holdStatus: (gate: () => Promise<void>) => { statusGate = gate; } };
 }
 const passwordHash = (value: string) => hash(value, { memoryCost: 19456, timeCost: 2, parallelism: 1 });
 
@@ -79,4 +80,21 @@ test('a revoked session cannot accept an existing-account invitation or refresh 
     assert.equal(accepted.status, 200); assert.equal(accepted.data.workspace.tenant.id, owner.tenant.id);
     assert.equal((await state.request('/api/account', accepted.cookie)).status, 200);
   } finally { await state.close(); }
+});
+
+test('an authenticated response already in flight cannot restore a session deleted by logout', async () => {
+  const state = await fixture(); let entered!: () => void, release!: () => void;
+  const started = new Promise<void>(accept => { entered = accept; }), gate = new Promise<void>(accept => { release = accept; });
+  try {
+    const registered = await state.request('/api/auth/register', '', { email: 'logout-race@example.invalid', name: 'Logout user', companyName: 'Logout', password: 'synthetic-logout-password' });
+    assert.equal(registered.status, 201); const oldCookie = registered.cookie;
+    state.holdStatus(async () => { entered(); await gate; });
+    const pending = state.request('/api/runtime/status', oldCookie); await started;
+    assert.equal((await state.request('/api/auth/logout', oldCookie, {})).status, 200);
+    assert.equal((await state.request('/api/account', oldCookie)).status, 401);
+    release(); assert.equal((await pending).status, 200);
+    // express-session touches the still-running request on response completion.
+    // That touch may extend an existing session, but must never recreate a deleted one.
+    assert.equal((await state.request('/api/account', oldCookie)).status, 401);
+  } finally { release(); await state.close(); }
 });
