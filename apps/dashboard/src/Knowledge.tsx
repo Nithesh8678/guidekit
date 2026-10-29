@@ -1,16 +1,18 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { BookOpen, FileText, Layers3, Pencil, Plus, Save, Trash2, Upload, X } from 'lucide-react';
 import type { AgentDetail, KnowledgeDocument } from '@guidekit/contracts';
+import { RetrievalTools } from './RetrievalTools';
 import { api, emptyDocumentDraft, errorMessage, Notice, Spinner, type DocumentDraft } from './shared';
 
 const MAX_DOCUMENT_BYTES = 256 * 1024;
 interface Props {
-  detail: AgentDetail; busy: boolean; draft: DocumentDraft; dirty: boolean;
+  detail: AgentDetail; busy: boolean; readOnly?: boolean; draft: DocumentDraft; dirty: boolean;
   examples: { title: string; content: string; label: string }[];
   onDraftChange(draft: DocumentDraft): void; onBusyChange(busy: boolean): void;
   onChanged(message: string): Promise<void>; onError(message: string): void;
 }
-export function Knowledge({ detail, busy, draft, dirty, examples, onDraftChange, onBusyChange, onChanged, onError }: Props) {
+export function Knowledge({ detail, busy: mutationBusy, readOnly = false, draft, dirty, examples, onDraftChange, onBusyChange, onChanged, onError }: Props) {
+  const busy = mutationBusy || readOnly;
   const [working, setWorking] = useState(''), [dragging, setDragging] = useState(false), [error, setError] = useState(''), [expanded, setExpanded] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null), titleRef = useRef<HTMLInputElement>(null), workingRef = useRef(false), mountedRef = useRef(true);
   useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
@@ -57,7 +59,7 @@ export function Knowledge({ detail, busy, draft, dirty, examples, onDraftChange,
     finally { end(); }
   }
   const bytes = new TextEncoder().encode(draft.content).length;
-  return <div className="knowledge-layout"><div>
+  return <><div className="knowledge-layout"><div>
     <div className="section-intro"><h2>{draft.id ? 'Edit draft document' : 'Give your guide the right context'}</h2><p>{draft.id ? 'Save a new draft revision. Published snapshots keep their original text.' : 'Add product documentation, company policies, and task instructions. Answers can cite these sources.'}</p></div>
     <form onSubmit={save} className="knowledge-form" aria-busy={!!working}>
       <div className={`upload-zone ${dragging ? 'dragging' : ''}`} onDragOver={event => { event.preventDefault(); if (!busy) setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={event => { event.preventDefault(); setDragging(false); void readFile(event.dataTransfer.files[0]); }}><Upload size={24} /><strong>{draft.id ? 'Replace document text from a file' : 'Drop a document here'}</strong><span>Plain text or Markdown, up to 256 KB</span><button className="button secondary small" type="button" disabled={busy} onClick={() => fileRef.current?.click()}>Choose file</button><input ref={fileRef} type="file" disabled={busy} aria-label="Upload knowledge document" accept=".txt,.md,text/plain,text/markdown" className="sr-only" onChange={event => void readFile(event.target.files?.[0])} /></div>
@@ -72,5 +74,5 @@ export function Knowledge({ detail, busy, draft, dirty, examples, onDraftChange,
   </div><aside className="knowledge-library"><div className="library-heading"><h3>Draft knowledge</h3><span className="badge badge-neutral">{detail.documents.length}</span></div>
     {!detail.documents.length ? <div className="empty-state"><div className="empty-icon"><BookOpen size={23} /></div><h3>A clean starting point</h3><p>Add your first document. Published agents use a snapshot of this library.</p></div> : <div className="document-list">{detail.documents.map(document => <article className="document-item" key={document.id}><div className="document-row"><FileText size={19} /><button className="document-title" aria-expanded={expanded === document.id} onClick={() => setExpanded(current => current === document.id ? null : document.id)}><strong>{document.title}</strong><small>{Math.max(1, Math.ceil(new TextEncoder().encode(document.content).length / 1024))} KB · {new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }).format(new Date(document.createdAt))}</small></button><button className="icon-button document-edit" aria-label={`Edit ${document.title}`} disabled={busy} onClick={() => replace({ id: document.id, title: document.title, content: document.content })}><Pencil size={16} /></button><button className="icon-button delete-button" aria-label={`Delete ${document.title}`} disabled={busy} onClick={() => void remove(document)}>{working === document.id ? <Spinner /> : <Trash2 size={16} />}</button></div>{expanded === document.id && <pre className="document-preview">{document.content}</pre>}</article>)}</div>}
     <p className="library-note"><Layers3 size={16} />Publishing freezes the current documents into a version. Editing this library changes the draft.</p>
-  </aside></div>;
+  </aside></div><RetrievalTools detail={detail} disabled={mutationBusy} /></>;
 }

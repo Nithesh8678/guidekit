@@ -21,13 +21,17 @@ test('real dashboard and local API preserve immutable releases, roll back safely
   await page.getByRole('button', { name: 'Add document', exact: true }).click();
   await expect(page.getByRole('button', { name: /^Release knowledge/ })).toBeVisible();
   await page.getByRole('button', { name: 'Publish agent', exact: true }).click(); await expect(page.getByText('Live v1', { exact: true })).toBeVisible();
+  await page.getByLabel('Retrieval test question', { exact: true }).fill('What is the invoice policy?'); await page.getByRole('button', { name: 'Preview retrieved sources', exact: true }).click(); await expect(page.locator('.retrieval-source')).toContainText('ORIGINAL-RELEASE-MARKER');
+  await page.getByText('Evaluate a temporary question set', { exact: true }).click(); await page.getByRole('checkbox', { name: 'Release knowledge', exact: true }).check(); await page.getByRole('button', { name: 'Add evaluation case', exact: true }).click(); await page.getByRole('button', { name: 'Evaluate 1 case', exact: true }).click(); await expect(page.getByText('Version 1: mean recall 100% · mean reciprocal rank 1.00', { exact: true })).toBeVisible();
   const bootstrap = await page.request.post(`/api/embed/${agent.id}/session`, { headers: { Origin: 'http://127.0.0.1:4511' }, data: {} });
   expect(bootstrap.status()).toBe(200); const pinned = await bootstrap.json() as { token: string; agent: { version: number } }; expect(pinned.agent.version).toBe(1);
 
   await page.getByRole('button', { name: 'Edit Release knowledge', exact: true }).click();
   await page.getByLabel('Document text', { exact: true }).fill('Updated published invoice policy: UPDATED-RELEASE-MARKER.');
   await page.getByRole('tab', { name: 'Install', exact: true }).click();
-  await expect(page.locator('pre code')).toContainText('http://127.0.0.1:4510/sdk/guidekit.js');
+  await expect(page.locator('pre code')).toContainText('data-endpoint="http://127.0.0.1:4510"'); await expect(page.locator('pre code')).toContainText('src="http://127.0.0.1:4510/sdk/');
+  const manifestResponse = await page.request.get('/sdk/manifest.json'); expect(manifestResponse.status()).toBe(200); const manifest = await manifestResponse.json() as { version: string; script: { path: string; integrity: string } };
+  await expect(page.getByText(`Pinned SDK ${manifest.version}`, { exact: false })).toBeVisible(); await expect(page.locator('pre code')).toContainText(`http://127.0.0.1:4510${manifest.script.path}`); await expect(page.locator('pre code')).toContainText(`integrity="${manifest.script.integrity}"`); await expect(page.locator('pre code')).toContainText('crossorigin="anonymous"');
   await page.getByRole('button', { name: 'Inspect version 1', exact: true }).click();
   const first = page.getByRole('dialog', { name: 'Version 1 snapshot', exact: true }); await first.getByText('Release knowledge', { exact: true }).click();
   await expect(first).toContainText('ORIGINAL-RELEASE-MARKER'); await expect(first).not.toContainText('UPDATED-RELEASE-MARKER'); await first.getByRole('button', { name: 'Close snapshot', exact: true }).click();

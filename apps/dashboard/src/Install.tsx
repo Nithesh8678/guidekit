@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { AlertCircle, Check, CheckCircle2, Circle, Code2, Copy, ExternalLink, Eye, FolderOpen, MessageSquare, RefreshCw, ShieldCheck, Upload, X } from 'lucide-react';
 import type { Agent } from '@guidekit/contracts';
 import { api, date, errorMessage, Notice, Spinner, versionStatus, type PublicationResult, type PublicationVersion, type SetupDiagnostics, type VersionSnapshot } from './shared';
+import { useSDKRelease } from './sdk-release';
 
 interface Props {
   agent: Agent; versions: PublicationVersion[]; dirty: boolean; busy: boolean; readOnly?: boolean;
@@ -31,9 +32,10 @@ export function Install({ agent, versions, dirty, busy, readOnly = false, onBusy
   useEffect(() => { void check(); return () => { diagnosticGeneration.current++; }; }, [agent.publishedVersion, readinessKey, check]);
   useEffect(() => () => { if (copyTimer.current) clearTimeout(copyTimer.current); }, []);
   const endpoint = diagnostics?.endpointOrigin;
-  const snippet = endpoint ? `<script\n  src="${endpoint}/sdk/guidekit.js"\n  data-agent-id="${agent.id}"\n  data-endpoint="${endpoint}"\n  data-voice-provider="browser"\n  defer\n></script>` : '';
+  const release = useSDKRelease(endpoint);
+  const snippet = endpoint ? `<script\n  src="${endpoint}${release.manifest?.script.path ?? '/sdk/guidekit.js'}"${release.manifest ? `\n  integrity="${release.manifest.script.integrity}"\n  crossorigin="anonymous"` : ''}\n  data-agent-id="${agent.id}"\n  data-endpoint="${endpoint}"\n  data-voice-provider="browser"\n  defer\n></script>` : '';
   async function copy() {
-    setCopyError(''); if (!snippet) return;
+    setCopyError(''); if (!snippet || release.status === 'loading') return;
     try { await navigator.clipboard.writeText(snippet); setCopied(true); if (copyTimer.current) clearTimeout(copyTimer.current); copyTimer.current = setTimeout(() => setCopied(false), 2000); }
     catch { setCopyError('Clipboard access is unavailable. Select and copy the snippet below.'); }
   }
@@ -65,7 +67,7 @@ export function Install({ agent, versions, dirty, busy, readOnly = false, onBusy
       {!diagnostics && !diagnosticError && <p className="muted"><Spinner /> Checking your setup…</p>}
       {diagnostics && <><p className={`diagnostic-summary ${diagnostics.ready ? 'ready' : ''}`} role="status">{diagnostics.ready ? <CheckCircle2 size={17} /> : <AlertCircle size={17} />}{diagnostics.ready ? 'Setup checks passed. Test a question on your website to verify the full outcome.' : 'Review the checks below before opening a new website session.'}</p><ul className="diagnostic-checks">{diagnostics.checks.map(check => <li key={check.id} data-check-id={check.id}><span className={`badge ${check.status === 'pass' ? 'badge-green' : check.status === 'error' ? 'badge-red' : 'badge-neutral'}`}>{check.status === 'pass' ? 'Passed' : check.status === 'error' ? 'Needs attention' : 'Review'}</span><p>{check.message}</p></li>)}</ul></>}
     </section>
-    {endpoint && <div className="code-block"><div><span><Code2 size={16} /> Website installation</span><button className="copy-button" onClick={() => void copy()}>{copied ? <Check size={15} /> : <Copy size={15} />}{copied ? 'Copied' : 'Copy snippet'}</button></div><pre tabIndex={0}><code>{snippet}</code></pre></div>}
+    {endpoint && <><p className="sdk-release" role="status">{release.status === 'loading' ? 'Checking SDK release…' : release.manifest ? `Pinned SDK ${release.manifest.version} · release ${release.manifest.release}` : 'Development alias: unversioned SDK. The release manifest is unavailable or incompatible; this installation is not pinned.'}<button className="text-button" disabled={release.status === 'loading'} onClick={release.refresh}>Refresh SDK release</button></p><div className="code-block"><div><span><Code2 size={16} /> Website installation</span><button className="copy-button" disabled={release.status === 'loading'} onClick={() => void copy()}>{copied ? <Check size={15} /> : <Copy size={15} />}{copied ? 'Copied' : 'Copy snippet'}</button></div><pre tabIndex={0}><code>{snippet}</code></pre></div></>}
     {copyError && <Notice>{copyError}</Notice>}
     <div className="install-details"><div><strong>Agent ID</strong><code>{agent.id}</code></div><div><strong>Draft allowed origins</strong>{agent.allowedOrigins.map(value => <code key={value}>{value}</code>)}</div>{endpoint && <div><strong>Server endpoint</strong><code>{endpoint}</code></div>}</div>
     {!!demos.length && <><div className="section-intro section-divider"><h2>Try it on a real page</h2><p>Use either independent demo website with this same agent. Add the matching knowledge, origin and permitted actions first.</p></div><div className="demo-links">{demos.map(demo => <a key={demo.kind} className={`demo-link ${!agent.publishedVersion ? 'disabled-link' : ''}`} href={`${demo.origin}/?agentId=${encodeURIComponent(agent.id)}`} target="_blank" rel="noreferrer" aria-disabled={!agent.publishedVersion} onClick={event => { if (!agent.publishedVersion) event.preventDefault(); }}><span className="demo-link-icon">{demo.kind === 'crm' ? <FolderOpen size={23} /> : <MessageSquare size={23} />}</span><span><strong>Open {demo.name}</strong><small>{demo.description}</small></span><ExternalLink size={17} /></a>)}</div></>}

@@ -9,6 +9,7 @@ async function setup(page: Page, options: { anonymous?: boolean; role?: Workspac
   const members = [{ id: 'usr_owner', name: 'Synthetic Owner', email: 'owner@example.test', role: 'owner' }, { id: 'usr_editor', name: 'Synthetic Editor', email: 'editor@example.test', role: 'editor' }];
   let invitations: { id: string; email: string; role: string; expiresAt: string }[] = [];
   const agent = (): Agent => ({ id: workspace?.tenant.id === 'org_second' ? 'agt_second' : 'agt_first', tenantId: workspace?.tenant.id ?? 'org_first', name: workspace?.tenant.id === 'org_second' ? 'Second Workspace Guide' : 'First Workspace Guide', companyName: workspace?.tenant.name ?? 'First Workspace', description: '', instructions: 'Saved instructions', greeting: 'Hello', accentColor: '#365cf5', allowedOrigins: ['http://127.0.0.1:4641'], allowedActions: [], publishedVersion: 1, createdAt: '2026-10-29T10:00:00Z', updatedAt: '2026-10-29T10:00:00Z' });
+  await page.route('**/sdk/manifest.json', route => route.fulfill({ status: 404, contentType: 'application/json', body: '{}' }));
   await page.route('**/api/**', async route => {
     const path = new URL(route.request().url()).pathname, method = route.request().method(), body = route.request().postData() ? route.request().postDataJSON() as Record<string, unknown> : null; calls.push({ path, method, body }); let value: unknown, status = 200;
     if (path === '/api/auth/me') value = { workspace };
