@@ -18,7 +18,7 @@ export class SceneObserver {
   private destroyed = false;
   constructor(private readonly read: () => PageContext, private readonly notify: (page: PageContext, route: string) => void, private readonly enabled: () => boolean = () => true) {
     this.observer = new MutationObserver(records => { if (records.some(record => !owned(record.target))) this.refresh(); });
-    this.observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['hidden', 'open', 'class', 'style', 'aria-hidden', 'aria-label', 'aria-labelledby', 'role', 'title', 'data-guidekit-id', 'data-guidekit-private'] });
+    this.observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['hidden', 'open', 'class', 'style', 'aria-hidden', 'aria-label', 'aria-labelledby', 'role', 'title', 'data-guidekit-id', 'data-guidekit-label', 'data-guidekit-private'] });
     window.addEventListener('popstate', this.refresh); window.addEventListener('hashchange', this.refresh);
     document.addEventListener('visibilitychange', this.refresh);
     // pushState/replaceState have no native event. Check only the small local route key.

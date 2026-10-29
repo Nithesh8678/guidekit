@@ -22,6 +22,11 @@ function publicText(element: Element): string {
   return text.replace(/\s+/g, ' ').trim().slice(0, 160);
 }
 function labelFor(element: HTMLElement): string {
+  // A host-authored public label avoids reading personal accessible text (such as filenames).
+  if (validId(element.getAttribute('data-guidekit-id'))) {
+    const authored = element.getAttribute('data-guidekit-label')?.trim();
+    if (authored) return authored.slice(0, 160);
+  }
   const aria = element.getAttribute('aria-label')?.trim();
   if (aria) return aria.slice(0, 160);
   const ids = element.getAttribute('aria-labelledby')?.split(/\s+/).slice(0, 4) ?? [];
@@ -46,6 +51,9 @@ function roleFor(element: HTMLElement): string {
 }
 
 export class ContextCollector {
+  constructor(private readonly targetMode: 'auto' | 'explicit' = 'auto') {
+    if (!['auto', 'explicit'].includes(targetMode)) throw new Error('GuideKit targetMode must be auto or explicit.');
+  }
   private sequence = 0;
   private ids = new WeakMap<HTMLElement, string>();
   private targets = new Map<string, HTMLElement>();
@@ -58,7 +66,7 @@ export class ContextCollector {
     const targets: PageTarget[] = [];
     this.targets.clear(); this.explicit.clear(); this.identities.clear(); this.documentPath = `${location.origin}${location.pathname}`;
     this.documentRoute = routeKey();
-    const candidates = Array.from(document.querySelectorAll('[data-guidekit-id],button,a[href],input,textarea,select,summary,[role="button"],[role="link"],[role="tab"],[role="menuitem"],[role="checkbox"],[role="switch"]')).slice(0, 2000);
+    const candidates = Array.from(document.querySelectorAll(this.targetMode === 'explicit' ? '[data-guidekit-id]' : '[data-guidekit-id],button,a[href],input,textarea,select,summary,[role="button"],[role="link"],[role="tab"],[role="menuitem"],[role="checkbox"],[role="switch"]')).slice(0, 2000);
     const explicitCounts = new Map<string, number>();
     for (const element of candidates) {
       const id = element.getAttribute('data-guidekit-id');
@@ -89,7 +97,7 @@ export class ContextCollector {
   resolve(id: string): HTMLElement | null {
     if (this.documentPath !== `${location.origin}${location.pathname}` || this.documentRoute !== routeKey()) return null;
     const target = this.targets.get(id);
-    if (!this.explicit.has(id)) return target && isSafeTarget(target) && this.identity(target) === this.identities.get(id) ? target : null;
+    if (!this.explicit.has(id)) return this.targetMode !== 'explicit' && target && isSafeTarget(target) && this.identity(target) === this.identities.get(id) ? target : null;
     const matches = Array.from(document.querySelectorAll('[data-guidekit-id]')).filter(element => element.getAttribute('data-guidekit-id') === id);
     if (matches.length !== 1 || !isSafeTarget(matches[0]!) || this.identity(matches[0]!) !== this.identities.get(id)) return null;
     this.targets.set(id, matches[0]!); return matches[0]!;

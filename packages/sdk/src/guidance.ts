@@ -87,7 +87,7 @@ export class GuidanceSession {
     this.observer = new MutationObserver(records => {
       if (records.some(record => !guideControl(record.target))) this.refresh();
     });
-    this.observer.observe(this.document.documentElement, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['disabled', 'readonly', 'aria-invalid', 'aria-disabled', 'aria-hidden', 'inert', 'hidden', 'style', 'class', 'data-guidekit-private', 'data-guidekit-id', 'aria-label', 'aria-labelledby', 'role', 'title', 'placeholder', 'name', 'id', 'autocomplete', 'type'] });
+    this.observer.observe(this.document.documentElement, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['disabled', 'readonly', 'aria-invalid', 'aria-disabled', 'aria-hidden', 'inert', 'hidden', 'style', 'class', 'data-guidekit-private', 'data-guidekit-id', 'data-guidekit-label', 'aria-label', 'aria-labelledby', 'role', 'title', 'placeholder', 'name', 'id', 'autocomplete', 'type'] });
     this.refresh();
   }
 

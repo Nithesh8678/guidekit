@@ -41,7 +41,7 @@ function review() {
  });
 }
 function initial() {
- surface.innerHTML = '<h1>Journey CRM</h1><button data-guidekit-id="open-dialog">Open contact form</button>';
+ surface.innerHTML = '<h1>Journey CRM</h1><button data-guidekit-id="open-dialog">Open contact form</button><aside><button aria-label="private-filename-marker.mov">Unannotated private filename</button><input aria-label="Unannotated personal name" value="private-value-marker"></aside><div data-guidekit-private><button data-guidekit-id="private-control">Private annotated control</button></div>';
  document.querySelector('[data-guidekit-id="open-dialog"]').addEventListener('click', () => {
   surface.innerHTML = '<h1>Create contact</h1><form id="details"><label>Full name<input data-guidekit-id="contact-name" required></label><label>Company<input data-guidekit-id="contact-company" required></label>' + privateFields + '<button data-guidekit-id="next-page" type="button">Review contact</button></form>';
   document.querySelector('[data-guidekit-id="next-page"]').addEventListener('click', () => {
@@ -52,7 +52,7 @@ function initial() {
  });
 }
 if (location.pathname === '/review') review(); else initial();
-const script = document.createElement('script'); script.src = '${endpoint}/sdk/guidekit.js'; script.dataset.agentId = agentId; script.dataset.endpoint = '${endpoint}'; if (resume) script.dataset.journeyResume = 'session'; document.body.append(script);
+const script = document.createElement('script'); script.src = '${endpoint}/sdk/guidekit.js'; script.dataset.agentId = agentId; script.dataset.endpoint = '${endpoint}'; if (resume) script.dataset.journeyResume = 'session'; const targetMode = new URL(location.href).searchParams.get('targetMode'); if (targetMode !== null) script.dataset.targetMode = targetMode; document.body.append(script);
 `;
 
 test.beforeAll(async () => {
@@ -74,8 +74,8 @@ test.afterAll(async () => { await Promise.all(servers.map(server => new Promise<
 test.beforeEach(() => { requests.length = 0; continuationDelay = 0; finalContinues = false; });
 const guide = (page: Page) => page.getByRole('region', { name: 'Visual guidance' });
 const chat = (page: Page) => page.getByRole('dialog', { name: 'Website assistant', includeHidden: true });
-async function start(page: Page, resume = false, saveDelay = 0) {
-  await page.goto(`${website}/?agentId=${agentId}${resume ? '&resume=session' : ''}${saveDelay ? `&saveDelay=${saveDelay}` : ''}`); await page.getByRole('button', { name: 'Open Journey guide', exact: true }).click();
+async function start(page: Page, resume = false, saveDelay = 0, targetMode?: 'auto' | 'explicit') {
+  await page.goto(`${website}/?agentId=${agentId}${resume ? '&resume=session' : ''}${saveDelay ? `&saveDelay=${saveDelay}` : ''}${targetMode ? `&targetMode=${targetMode}` : ''}`); await page.getByRole('button', { name: 'Open Journey guide', exact: true }).click();
   await page.getByRole('textbox', { name: 'Your question' }).fill('Show me how to create a contact'); await page.getByRole('button', { name: 'Send question', exact: true }).click();
   await expect(guide(page).getByText('Step 1 of 1', { exact: true })).toBeVisible();
 }
@@ -136,4 +136,34 @@ test('closing chat while reload Resume awaits host context prevents the obsolete
   await expect.poll(() => page.evaluate(() => typeof (window as unknown as { releaseJourneyContext: unknown }).releaseJourneyContext)).toBe('function');
   await page.keyboard.press('Escape'); await page.evaluate(() => (window as unknown as { releaseJourneyContext: () => void }).releaseJourneyContext());
   await page.waitForTimeout(1300); expect(requests).toHaveLength(0); await expect(guide(page)).toHaveCount(0); await expect(page.getByRole('region', { name: 'Continuing your task' })).toHaveCount(0);
+});
+
+test('explicit target mode excludes unannotated personal controls and bounds both adaptive snapshots and live resolution', async ({ page }) => {
+  await start(page, false, 0, 'explicit'); expect(requests[0]!.page.targets.map(target => target.id)).toEqual(['open-dialog']);
+  expect(await page.evaluate(() => window.GuideKit.capabilities)).toEqual({ apiVersion: 1, explicitTargets: true, adaptiveJourneys: true });
+  expect(await page.evaluate(() => Object.isFrozen(window.GuideKit.capabilities))).toBe(true);
+  expect(await page.evaluate(({ agentId, endpoint }) => { try { window.GuideKit.mount({ agentId, endpoint, targetMode: 'everything' as 'explicit' }); return ''; } catch (error) { return error instanceof Error ? error.message : ''; } }, { agentId, endpoint })).toMatch(/targetMode must be auto or explicit/);
+  await expect(guide(page)).toBeVisible();
+  await page.locator('[data-guidekit-id="open-dialog"]').evaluate(element => element.removeAttribute('data-guidekit-id'));
+  await expect(chat(page)).toBeVisible(); await expect(guide(page)).toHaveCount(0); expect(requests).toHaveLength(2); expect(requests[1]!.page.targets).toEqual([]);
+  expect(JSON.stringify(requests)).not.toMatch(/private-filename-marker|private-value-marker|Unannotated personal name|Private annotated control/);
+});
+
+test('explicit mode remains active through modal and route continuations; malformed script mode fails closed', async ({ page }) => {
+  await start(page, false, 0, 'explicit'); await openDetails(page); await reviewDetails(page); expect(requests).toHaveLength(3);
+  expect(requests.flatMap(request => request.page.targets).every(target => ['open-dialog', 'contact-name', 'contact-company', 'next-page', 'confirm-save'].includes(target.id))).toBe(true);
+  await page.addInitScript(() => document.addEventListener('guidekit:error', event => { (window as unknown as { targetModeError: string }).targetModeError = (event as CustomEvent<{ message: string }>).detail.message; }));
+  await page.goto(`${website}/?agentId=${agentId}&targetMode=everything`);
+  await expect.poll(() => page.evaluate(() => (window as unknown as { targetModeError: string }).targetModeError)).toMatch(/data-target-mode must be auto or explicit/);
+  await expect(page.getByRole('button', { name: 'Open Journey guide', exact: true })).toHaveCount(0);
+});
+
+test('host public labels hide personal accessible filenames and consistently ground semantic replacements', async ({ page }) => {
+  await page.goto(`${website}/?agentId=${agentId}&targetMode=explicit`);
+  const control = page.locator('[data-guidekit-id="open-dialog"]'); await control.evaluate(element => { element.setAttribute('aria-label', 'private-original-filename.mov'); element.setAttribute('data-guidekit-label', 'Selected timeline clip'); });
+  await page.getByRole('button', { name: 'Open Journey guide', exact: true }).click(); await page.getByRole('textbox', { name: 'Your question' }).fill('Explain this selected control'); await page.getByRole('button', { name: 'Send question', exact: true }).click();
+  await expect(guide(page)).toContainText('Selected timeline clip'); expect(requests[0]!.page.targets[0]!.label).toBe('Selected timeline clip');
+  await control.evaluate(element => element.setAttribute('aria-label', 'private-replacement-filename.mov')); await page.waitForTimeout(1100); expect(requests).toHaveLength(1);
+  await control.evaluate(element => element.setAttribute('data-guidekit-label', 'Selected media item')); await expect(guide(page)).toContainText('Selected media item'); expect(requests).toHaveLength(2);
+  expect(requests[1]!.page.targets[0]!.label).toBe('Selected media item'); expect(JSON.stringify(requests)).not.toMatch(/private-original-filename|private-replacement-filename|private-filename-marker/);
 });

@@ -23,6 +23,8 @@ export interface VoiceOptions {
 export interface MountOptions {
   agentId: string;
   endpoint: string;
+  /** Explicit mode shares only host-authored data-guidekit-id controls. Defaults to auto. */
+  targetMode?: 'auto' | 'explicit';
   actions?: Record<string, RegisteredAction>;
   /** Supply deliberately public, small application context. Never include secrets. */
   getContext?(): Record<string, unknown> | Promise<Record<string, unknown>>;
@@ -47,6 +49,7 @@ export interface GuideKitInstance {
   getPageContext(): Promise<PageContext>;
 }
 export interface GuideKitAPI {
+  readonly capabilities: Readonly<{ apiVersion: 1; explicitTargets: true; adaptiveJourneys: true }>;
   mount(options: MountOptions): GuideKitInstance;
   registerAction(name: string, action: RegisteredAction): void;
   setContext(context: Record<string, unknown>): void;

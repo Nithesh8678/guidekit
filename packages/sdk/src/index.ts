@@ -27,7 +27,8 @@ export function stopVoice(): void { instance?.stopVoice(); }
 export function reportStepResult(targetId: string, result: import('./types').GuideStepResult): void { instance?.reportStepResult(targetId, result); }
 export function destroy(): void { instance?.destroy(); instance = null; }
 
-export const GuideKit: GuideKitAPI = { mount, registerAction, setContext, open, close, startVoice, stopVoice, reportStepResult, destroy };
+export const SDK_CAPABILITIES: GuideKitAPI['capabilities'] = Object.freeze({ apiVersion: 1, explicitTargets: true, adaptiveJourneys: true });
+export const GuideKit: GuideKitAPI = { capabilities: SDK_CAPABILITIES, mount, registerAction, setContext, open, close, startVoice, stopVoice, reportStepResult, destroy };
 
 if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   const script = document.currentScript instanceof HTMLScriptElement ? document.currentScript : null;
@@ -39,8 +40,10 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     const start = () => {
       try {
         const provider = script?.dataset.voiceProvider;
+        const targetMode = script?.dataset.targetMode;
         if (provider && !['browser', 'disabled'].includes(provider)) throw new Error('GuideKit data-voice-provider must be browser or disabled.');
-        mount({ agentId, endpoint, ...(script?.dataset.hotkey ? { hotkey: script.dataset.hotkey } : {}), voice: {
+        if (targetMode !== undefined && !['auto', 'explicit'].includes(targetMode)) throw new Error('GuideKit data-target-mode must be auto or explicit.');
+        mount({ agentId, endpoint, ...(targetMode ? { targetMode: targetMode as 'auto' | 'explicit' } : {}), ...(script?.dataset.hotkey ? { hotkey: script.dataset.hotkey } : {}), voice: {
           ...(provider ? { provider: provider as 'browser' | 'disabled' } : {}),
           ...(script?.dataset.voiceHotkey ? { hotkeyStartsListening: script.dataset.voiceHotkey !== 'false' } : {}),
           ...(script?.dataset.voiceAutoSubmit ? { autoSubmit: script.dataset.voiceAutoSubmit !== 'false' } : {})

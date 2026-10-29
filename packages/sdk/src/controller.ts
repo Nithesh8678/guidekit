@@ -49,6 +49,7 @@ export class Assistant implements GuideKitInstance {
 
   constructor(private readonly options: MountOptions) {
     if (!validId(options.agentId)) throw new Error('GuideKit needs a valid published agent ID.');
+    if (options.targetMode !== undefined && !['auto', 'explicit'].includes(options.targetMode)) throw new Error('GuideKit targetMode must be auto or explicit.');
     this.endpoint = endpointOrigin(options.endpoint);
     for (const [name, action] of Object.entries(options.actions ?? {})) this.registerAction(name, action);
     this.view = new View({ open: () => this.open(), close: () => this.close(), submit: message => { void this.ask(message); }, cancel: () => { void this.cancel(); }, mic: () => this.toggleVoice(false), speaker: () => this.voice.toggleOutput(), guideStep: (text, events) => this.voice.speak(text, events), guidePause: () => this.voice.stopSpeaking(), guideFinish: result => {
@@ -103,8 +104,9 @@ export class Assistant implements GuideKitInstance {
     void this.cancel(); this.destroyed = true; this.lifetime.abort(); this.voice.destroy(); this.view.destroy(); document.removeEventListener('keydown', this.keyboard); window.removeEventListener('pagehide', this.pageHide);
   }
   async getPageContext(): Promise<PageContext> {
-    return this.collectPageContext(new ContextCollector());
+    return this.collectPageContext(this.collector());
   }
+  private collector(): ContextCollector { return new ContextCollector(this.options.targetMode); }
   private async collectPageContext(collector: ContextCollector, signal?: AbortSignal): Promise<PageContext> {
     const session = await this.ensureSession();
     signal?.throwIfAborted();
@@ -123,7 +125,7 @@ export class Assistant implements GuideKitInstance {
     try {
       const session = await this.ensureSession();
       if (controller.signal.aborted) return null;
-      const collector = new ContextCollector();
+      const collector = this.collector();
       const page = await this.collectPageContext(collector, controller.signal);
       if (controller.signal.aborted) return null;
       const journey = this.options.journey?.enabled === false ? null : this.createJourney(text);
@@ -183,14 +185,14 @@ export class Assistant implements GuideKitInstance {
   private watchJourney(journey: JourneyCoordinator | null): void {
     this.sceneObserver?.destroy(); this.sceneObserver = null;
     if (!journey?.active || !this.session) return;
-    this.sceneObserver = new SceneObserver(() => new ContextCollector().collect(this.actions, this.session!.agent.allowedActions, this.explicitContext), (page, route) => { if (this.journey === journey) journey.observe(page, route); }, () => journey.active && !journey.suspended);
+    this.sceneObserver = new SceneObserver(() => this.collector().collect(this.actions, this.session!.agent.allowedActions, this.explicitContext), (page, route) => { if (this.journey === journey) journey.observe(page, route); }, () => journey.active && !journey.suspended);
   }
   private async replanJourney(request: JourneyRequest, signal: AbortSignal): Promise<JourneyPlan> {
     const session = await this.ensureSession(); signal.throwIfAborted();
-    const collector = new ContextCollector(), page = await this.collectPageContext(collector, signal), route = routeKey();
+    const collector = this.collector(), page = await this.collectPageContext(collector, signal), route = routeKey();
     const run = parseRun(await this.json('/api/embed/session/ask', { message: request.goal, page, requestId: crypto.randomUUID(), journey: request }, session.token, signal, 150_000));
     signal.throwIfAborted();
-    if (route !== routeKey()) { this.journey?.observe(new ContextCollector().collect(this.actions, session.agent.allowedActions, this.explicitContext), routeKey()); throw new DOMException('The scene changed.', 'AbortError'); }
+    if (route !== routeKey()) { this.journey?.observe(this.collector().collect(this.actions, session.agent.allowedActions, this.explicitContext), routeKey()); throw new DOMException('The scene changed.', 'AbortError'); }
     if (run.version !== session.agent.version || run.steps.some(step => !page.targets.some(target => target.id === step.targetId))) throw new Error('The next guide did not match this page or published assistant.');
     return { run, page, routeKey: route, resolve: id => collector.resolve(id) };
   }
@@ -240,7 +242,7 @@ export class Assistant implements GuideKitInstance {
     await this.cancel(false, true); if (this.destroyed || intent !== this.intent) return;
     const controller = new AbortController(); this.active = controller;
     try {
-      const page = await this.collectPageContext(new ContextCollector(), controller.signal);
+      const page = await this.collectPageContext(this.collector(), controller.signal);
       if (this.destroyed || intent !== this.intent || controller.signal.aborted) return;
       const journey = this.createJourney(memory.goal, memory, page); journey.seed(page, routeKey()); this.watchJourney(journey); this.view.journeyTransition(() => { void this.cancel(); }); journey.resume();
     } catch (error) { if (!this.destroyed && intent === this.intent && !controller.signal.aborted) { this.view.clearGuide(true); this.view.message('error', messageOf(error)); } }
