@@ -13,12 +13,17 @@
     "typecheck": "tsc --noEmit",
     "build": "npm run typecheck && node --import tsx scripts/build.ts",
     "start": "node --env-file-if-exists=.env --import tsx apps/server/src/index.ts",
-    "test": "node --import tsx --test tests/*.test.ts packages/sdk/tests/*.test.ts packages/graph/tests/*.test.ts packages/runtime/src/index.test.ts",
+    "test": "node --import tsx --test tests/*.test.ts packages/sdk/tests/*.test.ts packages/graph/tests/*.test.ts packages/runtime/src/*.test.ts",
     "test:e2e": "playwright test",
     "test:live": "node --import tsx scripts/live-proof.ts",
     "test:graph": "node --env-file-if-exists=.env --import tsx scripts/graph-proof.ts",
     "check": "npm run typecheck && npm test && npm run build",
-    "audit:secrets": "node scripts/check-secrets.mjs"
+    "audit:secrets": "node scripts/check-secrets.mjs",
+    "backup": "node --import tsx scripts/backup.ts",
+    "restore": "node --import tsx scripts/restore.ts",
+    "retention": "node --env-file-if-exists=.env --import tsx scripts/retention.ts",
+    "test:dashboard": "playwright test --config apps/dashboard/playwright.config.ts",
+    "test:dashboard:integration": "playwright test --config apps/dashboard/playwright.integration.config.ts"
   },
   "dependencies": {
     "@node-rs/argon2": "2.0.2",
@@ -39,6 +44,7 @@
     "@types/react": "19.2.7",
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "5.1.2",
+    "aria-hidden": "1.2.6",
     "esbuild": "0.28.2",
     "tsx": "4.21.0",
     "typescript": "5.9.3",

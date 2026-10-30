@@ -1,6 +1,7 @@
 import type { View } from './view';
 import type { VoiceOptions } from './types';
 import type { SpeechEvents } from './beats';
+import { languageTag, orderedVoices, readVoicePreference, recommendedVoice, speechRate, voiceId, voicePreferenceKey, type OutputPreference } from './voices';
 
 interface RecognitionResult { isFinal: boolean; [index: number]: { transcript: string }; }
 interface RecognitionEvent { resultIndex: number; results: { length: number; [index: number]: RecognitionResult }; }
@@ -26,14 +27,64 @@ export class Voice {
   private utterance: SpeechSynthesisUtterance | null = null;
   private enabled = false;
   private destroyed = false;
+  private previewing = false;
+  private voices: SpeechSynthesisVoice[] = [];
+  private readonly synthesis = 'speechSynthesis' in window ? window.speechSynthesis : null;
+  private readonly defaultLanguage: string;
+  private preference: OutputPreference;
+  private readonly voicesChanged = () => { if (!this.destroyed) this.refreshVoices(); };
   private readonly Constructor = (window as SpeechWindow).SpeechRecognition ?? (window as SpeechWindow).webkitSpeechRecognition;
   constructor(private readonly view: View, private readonly options: VoiceOptions, private readonly submit: (message: string) => void) {
+    const language = languageTag(options.output?.language) ?? languageTag(document.documentElement.lang) ?? languageTag(navigator.language) ?? 'en-US';
+    // A bare English page does not request the system's regional default voice.
+    // Prefer US English; explicit regions and a visitor's chosen voice still win.
+    this.defaultLanguage = language === 'en' ? 'en-US' : language;
+    this.preference = { voiceURI: voiceId(options.output?.voiceURI) ? options.output!.voiceURI! : '', language: this.defaultLanguage, rate: speechRate(options.output?.rate) ? options.output!.rate! : 0.98 };
+    if (options.output?.remember !== false) {
+      try { const raw = window.localStorage.getItem(voicePreferenceKey); if (raw && raw.length <= 1024) this.preference = readVoicePreference(JSON.parse(raw)) ?? this.preference; } catch { /* Optional origin-local preferences can be unavailable. */ }
+    }
+    if (!this.preference.voiceURI) this.preference.language = this.defaultLanguage;
+    else if (this.preference.language === 'en') this.preference.language = 'en-US';
     const unavailable = options.provider === 'disabled' ? 'Voice input is disabled for this assistant.' : !window.isSecureContext ? 'Voice input needs HTTPS or localhost. You can type instead.' : !this.Constructor ? 'Speech recognition is unavailable in this browser. Try Chrome or Edge with microphone access, or type your question.' : '';
     if (unavailable) { view.mic.disabled = true; view.mic.title = unavailable; view.mic.setAttribute('aria-label', unavailable); }
     else this.resetMic();
-    if (!('speechSynthesis' in window)) { view.speaker.disabled = true; view.speaker.title = 'Spoken answers are unavailable in this browser.'; }
+    if (!this.synthesis || typeof SpeechSynthesisUtterance === 'undefined') { view.speaker.disabled = true; view.speaker.title = 'Spoken answers are unavailable in this browser.'; }
     else { view.speaker.title = 'Read answers aloud using your browser'; view.speaker.setAttribute('aria-label', view.speaker.title); }
     view.voiceProvider(options.provider ?? 'browser');
+    this.synthesis?.addEventListener?.('voiceschanged', this.voicesChanged);
+    this.refreshVoices();
+  }
+  private chosenVoice(): SpeechSynthesisVoice | null { return this.voices.find(voice => voice.voiceURI === this.preference.voiceURI) ?? recommendedVoice(this.voices, this.preference.language); }
+  private playable(): boolean { return Boolean(this.synthesis && typeof SpeechSynthesisUtterance !== 'undefined' && (typeof this.synthesis.getVoices !== 'function' || this.chosenVoice())); }
+  private refreshVoices(): void {
+    try { this.voices = orderedVoices(this.synthesis?.getVoices?.() ?? [], this.preference.language); } catch { this.voices = []; }
+    this.settings();
+  }
+  private settings(): void {
+    const available = Boolean(this.synthesis && typeof SpeechSynthesisUtterance !== 'undefined'), recommended = recommendedVoice(this.voices, this.preference.language), selected = this.voices.find(voice => voice.voiceURI === this.preference.voiceURI);
+    const name = (voice: SpeechSynthesisVoice) => voice.name.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 120);
+    const message = !available ? 'Spoken answers are unavailable in this browser. Text chat still works.'
+      : typeof this.synthesis?.getVoices !== 'function' ? 'This browser uses its default voice and does not expose a voice list.'
+      : !this.voices.length ? 'Waiting for browser voices. Text guidance works while the voice list loads.'
+      : this.preference.voiceURI && !selected ? `Your saved voice is unavailable. ${recommended ? `Using ${name(recommended)}.` : 'Choose an available voice.'}`
+      : !selected && recommended ? `Automatic: ${name(recommended)}. Preview to find the voice you prefer.`
+      : 'Uses browser/device voices. Availability varies; some voices may use a browser online service.';
+    this.view.voiceSettings({ available, voices: this.voices.map(voice => ({ id: voice.voiceURI, label: `${name(voice)} · ${voice.lang}${voice.voiceURI === recommended?.voiceURI ? ' · recommended' : ''}` })), selected: selected?.voiceURI ?? '', rate: this.preference.rate, message, previewing: this.previewing, recording: this.active, playable: this.playable() }, {
+      choose: id => {
+        if (this.destroyed || this.active || !voiceId(id) || id && !this.voices.some(voice => voice.voiceURI === id)) return;
+        this.stopSpeaking(); const selected = this.voices.find(voice => voice.voiceURI === id);
+        this.preference.voiceURI = id; this.preference.language = languageTag(selected?.lang) ?? this.defaultLanguage; this.persist(); this.refreshVoices();
+      },
+      rate: rate => { if (this.destroyed || this.active || !speechRate(rate)) return; this.stopSpeaking(); this.preference.rate = rate; this.persist(); this.settings(); },
+      preview: () => this.preview()
+    });
+  }
+  private persist(): void { if (this.options.output?.remember !== false) { try { window.localStorage.setItem(voicePreferenceKey, JSON.stringify(this.preference)); } catch { /* Preferences never block speech. */ } } }
+  private preview(): void {
+    if (this.destroyed || this.active) return;
+    if (this.previewing) { this.stopSpeaking(); return; }
+    if (navigator.userActivation && !navigator.userActivation.isActive) { this.view.status('Click Preview to hear this browser voice.'); return; }
+    this.play('Hi, I’m your website guide. I’ll explain each step as you go.', undefined, true);
   }
   get active(): boolean { return this.capture !== null; }
   start(voiceFlow = true): void {
@@ -43,6 +94,7 @@ export class Voice {
     this.stopSpeaking(); if (voiceFlow && 'speechSynthesis' in window) this.setOutput(true);
     const capture: Capture = { generation: ++this.generation, phase: 'starting', original: this.view.input.value, autoSubmit: this.options.autoSubmit ?? voiceFlow, recognition: null, final: new Map() };
     this.capture = capture; this.view.input.readOnly = true; this.view.busy(true); this.view.voiceRecording(true);
+    this.settings();
     this.view.mic.setAttribute('aria-pressed', 'true');
     const finishLabel = capture.autoSubmit ? 'Finish voice input and send question' : 'Finish dictation and review transcript';
     this.view.mic.title = finishLabel; this.view.mic.setAttribute('aria-label', finishLabel);
@@ -112,6 +164,7 @@ export class Voice {
       this.view.input.readOnly = false; this.view.busy(false); this.view.voiceRecording(false);
     }
     if (!this.view.mic.disabled) this.resetMic();
+    this.settings();
   }
   private setOutput(enabled: boolean): void {
     this.enabled = enabled; this.view.speaker.setAttribute('aria-pressed', String(enabled));
@@ -124,21 +177,28 @@ export class Voice {
   }
   speak(text: string, events?: SpeechEvents): boolean {
     if (!this.enabled || this.destroyed || !('speechSynthesis' in window)) return false;
+    return this.play(text, events);
+  }
+  private play(text: string, events?: SpeechEvents, preview = false): boolean {
     this.stopSpeaking();
+    this.refreshVoices();
+    if (!this.playable()) { this.view.status('A browser voice is not ready. You can read the answer or choose a voice in Voice settings.'); return false; }
     try {
-      const utterance = new SpeechSynthesisUtterance(text.slice(0, 1800)); utterance.lang = document.documentElement.lang || navigator.language || 'en-US'; utterance.rate = 1;
-      this.utterance = utterance;
+      const utterance = new SpeechSynthesisUtterance(text.slice(0, 1800)), voice = this.chosenVoice();
+      utterance.lang = voice?.lang ?? this.preference.language; utterance.rate = this.preference.rate; if (voice) utterance.voice = voice;
+      this.utterance = utterance; this.previewing = preview; this.settings();
       utterance.onstart = () => { if (this.utterance === utterance && !this.destroyed) { this.view.voiceSpeaking(true); events?.onStart(); } };
-      utterance.onend = () => { if (this.utterance === utterance) { this.utterance = null; this.view.voiceSpeaking(false); events?.onEnd(); } };
-      utterance.onerror = () => { if (this.utterance === utterance) { this.utterance = null; this.view.voiceSpeaking(false); events?.onError(); this.view.status('Your browser could not play the spoken answer. You can read it above.', true); } };
-      window.speechSynthesis.speak(utterance); return true;
-    } catch { this.utterance = null; events?.onError(); this.view.status('Spoken answers are unavailable. You can read the answer above.', true); return false; }
+      utterance.onend = () => { if (this.utterance === utterance) { this.utterance = null; this.previewing = false; this.view.voiceSpeaking(false); this.settings(); events?.onEnd(); } };
+      utterance.onerror = () => { if (this.utterance === utterance) { this.utterance = null; this.previewing = false; this.view.voiceSpeaking(false); this.settings(); events?.onError(); this.view.status('Your browser could not play the spoken answer. You can read it above.', true); } };
+      this.synthesis!.speak(utterance); return true;
+    } catch { this.utterance = null; this.previewing = false; this.settings(); events?.onError(); this.view.status('Spoken answers are unavailable. You can read the answer above.', true); return false; }
   }
   stopSpeaking(): void {
     this.view.voiceSpeaking(false);
     const utterance = this.utterance; this.utterance = null;
     if (utterance) { utterance.onstart = null; utterance.onend = null; utterance.onerror = null; if ('speechSynthesis' in window) window.speechSynthesis.cancel(); }
+    this.previewing = false; this.settings();
   }
   stop(): void { this.stopInput(); this.stopSpeaking(); }
-  destroy(): void { this.stop(); this.destroyed = true; }
+  destroy(): void { if (this.destroyed) return; this.stop(); this.destroyed = true; this.synthesis?.removeEventListener?.('voiceschanged', this.voicesChanged); }
 }

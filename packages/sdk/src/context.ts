@@ -1,6 +1,7 @@
 import type { PageContext, PageTarget } from '../../contracts/src/index';
 import type { CompiledAction } from './security';
 import { publicLabel, safeContext, validId } from './security';
+import { routeKey } from './scene';
 
 const privateSelector = '[data-guidekit-private], [data-guidekit-root], [aria-hidden="true"], [inert]';
 const sensitiveAutocomplete = /(?:password|cc-|credit|transaction|one-time-code|webauthn)/i;
@@ -21,6 +22,11 @@ function publicText(element: Element): string {
   return text.replace(/\s+/g, ' ').trim().slice(0, 160);
 }
 function labelFor(element: HTMLElement): string {
+  // A host-authored public label avoids reading personal accessible text (such as filenames).
+  if (validId(element.getAttribute('data-guidekit-id'))) {
+    const authored = element.getAttribute('data-guidekit-label')?.trim();
+    if (authored) return authored.slice(0, 160);
+  }
   const aria = element.getAttribute('aria-label')?.trim();
   if (aria) return aria.slice(0, 160);
   const ids = element.getAttribute('aria-labelledby')?.split(/\s+/).slice(0, 4) ?? [];
@@ -45,24 +51,29 @@ function roleFor(element: HTMLElement): string {
 }
 
 export class ContextCollector {
+  constructor(private readonly targetMode: 'auto' | 'explicit' = 'auto') {
+    if (!['auto', 'explicit'].includes(targetMode)) throw new Error('GuideKit targetMode must be auto or explicit.');
+  }
   private sequence = 0;
   private ids = new WeakMap<HTMLElement, string>();
   private targets = new Map<string, HTMLElement>();
   private explicit = new Set<string>();
   private identities = new Map<string, string>();
   private documentPath = '';
+  private documentRoute = '';
   private identity(target: HTMLElement): string { return `${roleFor(target)}:${publicLabel(labelFor(target))}`; }
   collect(actions: Map<string, CompiledAction>, allowedActions: string[], context: unknown): PageContext {
     const targets: PageTarget[] = [];
     this.targets.clear(); this.explicit.clear(); this.identities.clear(); this.documentPath = `${location.origin}${location.pathname}`;
-    const candidates = Array.from(document.querySelectorAll('[data-guidekit-id],button,a[href],input,textarea,select,summary,[role="button"],[role="link"],[role="tab"],[role="menuitem"],[role="checkbox"],[role="switch"]')).slice(0, 2000);
+    this.documentRoute = routeKey();
+    const candidates = Array.from(document.querySelectorAll(this.targetMode === 'explicit' ? '[data-guidekit-id]' : '[data-guidekit-id],button,a[href],input,textarea,select,summary,[role="button"],[role="link"],[role="tab"],[role="menuitem"],[role="checkbox"],[role="switch"]')).slice(0, 2000);
     const explicitCounts = new Map<string, number>();
     for (const element of candidates) {
       const id = element.getAttribute('data-guidekit-id');
       if (id) explicitCounts.set(id, (explicitCounts.get(id) ?? 0) + 1);
     }
     for (const element of candidates) {
-      if (targets.length >= 80) break;
+      if (targets.length >= 160) break;
       if (!isSafeTarget(element)) continue;
       const label = publicLabel(labelFor(element)).slice(0, 160); if (!label) continue;
       const explicit = element.getAttribute('data-guidekit-id');
@@ -84,9 +95,9 @@ export class ContextCollector {
     };
   }
   resolve(id: string): HTMLElement | null {
-    if (this.documentPath !== `${location.origin}${location.pathname}`) return null;
+    if (this.documentPath !== `${location.origin}${location.pathname}` || this.documentRoute !== routeKey()) return null;
     const target = this.targets.get(id);
-    if (!this.explicit.has(id)) return target && isSafeTarget(target) && this.identity(target) === this.identities.get(id) ? target : null;
+    if (!this.explicit.has(id)) return this.targetMode !== 'explicit' && target && isSafeTarget(target) && this.identity(target) === this.identities.get(id) ? target : null;
     const matches = Array.from(document.querySelectorAll('[data-guidekit-id]')).filter(element => element.getAttribute('data-guidekit-id') === id);
     if (matches.length !== 1 || !isSafeTarget(matches[0]!) || this.identity(matches[0]!) !== this.identities.get(id)) return null;
     this.targets.set(id, matches[0]!); return matches[0]!;

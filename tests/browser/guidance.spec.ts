@@ -36,7 +36,13 @@ async function askForGuide(page: Page) {
   await expect(guide(page)).toBeVisible(); await step(page, 1); await expect(chat(page)).toBeHidden();
   return answered;
 }
-async function openFixture(page: Page) {
+async function openFixture(page: Page, adaptive = true) {
+  if (!adaptive) await page.addInitScript(() => {
+    document.addEventListener('guidekit:ready', event => {
+      const api = (event as CustomEvent).detail.api as Window['GuideKit'], mount = api.mount;
+      api.mount = options => mount({ ...options, journey: { enabled: false } });
+    }, { once: true });
+  });
   // This suite uses the existing explicit synthetic provider, not subscription inference.
   const auth = await page.request.post(`${endpoint}/api/auth/register`, { headers: { Origin: endpoint }, data: { email: `guidance-${crypto.randomUUID()}@example.test`, name: 'Guidance Tester', companyName: 'Observed Workspace', password: 'Synthetic-guidance-password-42' } });
   expect(auth.status()).toBe(201);
@@ -153,8 +159,8 @@ test('trusted IME composition stays pending, continued typing defers progress, a
   await nameField(page).fill('Revised Name'); await step(page, 3); await expect(nameField(page)).toBeFocused();
 });
 
-test('a stable target ID recovers across replacement and a lost target returns to chat after grace', async ({ page }) => {
-  await openFixture(page); await askForGuide(page);
+test('with adaptive guidance disabled a stable ID recovers, and a lost target returns to chat after grace', async ({ page }) => {
+  await openFixture(page, false); await askForGuide(page);
   await nameField(page).evaluate(input => {
     const parent = input.parentElement!, replacement = input.cloneNode(true); input.remove();
     setTimeout(() => parent.append(replacement), 350);
@@ -316,7 +322,7 @@ test('reduced motion draws settled marks immediately and cancellation leaves no 
 });
 
 for (const mutation of ['duplicate ID', 'changed label'] as const) test(`grounding rejects a ${mutation} instead of keeping a stale annotation`, async ({ page }) => {
-  await openFixture(page); await askForGuide(page); await expect(shape(page)).toBeVisible();
+  await openFixture(page, false); await askForGuide(page); await expect(shape(page)).toBeVisible();
   await nameField(page).evaluate((input, kind) => {
     if (kind === 'duplicate ID') input.parentElement!.append(input.cloneNode(true));
     else input.setAttribute('aria-label', 'Delete an unrelated project');
@@ -326,19 +332,21 @@ for (const mutation of ['duplicate ID', 'changed label'] as const) test(`groundi
   await noTargetMark(page);
 });
 
-test('a delayed answer cannot annotate controls after same-origin path navigation', async ({ page }) => {
+test('a delayed answer after path navigation waits for a fresh plan before annotating controls', async ({ page }) => {
   await openFixture(page);
-  let release!: () => void, fetched!: () => void;
+  let release!: () => void, fetched!: () => void, releaseFresh!: () => void, fetchedFresh!: () => void, calls = 0, freshUrl = '';
   const held = new Promise<void>(resolve => { release = resolve; }), ready = new Promise<void>(resolve => { fetched = resolve; });
-  await page.route('**/api/embed/session/ask', async route => { const response = await route.fetch(); fetched(); await held; await route.fulfill({ response }); });
+  const heldFresh = new Promise<void>(resolve => { releaseFresh = resolve; }), readyFresh = new Promise<void>(resolve => { fetchedFresh = resolve; });
+  await page.route('**/api/embed/session/ask', async route => { const call = ++calls, response = await route.fetch(); if (call === 1) { fetched(); await held; } else { freshUrl = route.request().postDataJSON().page.url; fetchedFresh(); await heldFresh; } await route.fulfill({ response }); });
   try {
     await page.getByRole('textbox', { name: 'Your question', exact: true }).fill('Show me how to create a contact');
     await page.getByRole('button', { name: 'Send question', exact: true }).click(); await ready;
     await page.evaluate(() => history.pushState({}, '', '/changed-scene'));
-    release();
-    await expect(page.getByText('The page changed while the assistant was thinking. Ask again for the current page.', { exact: true })).toBeVisible();
-    await expect(guide(page)).toHaveCount(0); await noTargetMark(page); await expect(chat(page)).toBeVisible();
-  } finally { release(); await page.unrouteAll({ behavior: 'wait' }); }
+    release(); await readyFresh; expect(new URL(freshUrl).pathname).toBe('/changed-scene');
+    await expect(shape(page)).toHaveCount(0);
+    releaseFresh(); await expect(guide(page)).toBeVisible(); await step(page, 1); await expect(shape(page)).toBeVisible();
+    expect(calls).toBe(2);
+  } finally { release(); releaseFresh(); await page.unrouteAll({ behavior: 'wait' }); }
 });
 
 interface BeatDouble { texts: string[]; cancelled: number; fire(index: number, event: 'start' | 'end' | 'error'): void; }

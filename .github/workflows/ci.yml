@@ -24,3 +24,5 @@ jobs:
       - name: Install Chromium for browser acceptance tests
         run: npx playwright install --with-deps chromium
       - run: npm run test:e2e
+      - run: npm run test:dashboard
+      - run: npm run test:dashboard:integration

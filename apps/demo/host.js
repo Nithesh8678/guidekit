@@ -83,11 +83,12 @@
     // Only the validated URL is injected. Copying data-agent-id would trigger the
     // SDK's auto-mount and lose this host's registered actions.
     const script = document.createElement('script'); script.src = config.src; installedScript = script;
+    if (config.integrity) { script.integrity = config.integrity; script.crossOrigin = 'anonymous'; }
     script.addEventListener('load', async () => {
       if (generation !== installation) return;
       try {
         if (typeof window.GuideKit?.mount !== 'function') throw new Error('The script loaded, but the GuideKit SDK was not available.');
-        widget = window.GuideKit.mount({ agentId: config.agentId, endpoint, actions, voice: config.voice }); render();
+        widget = window.GuideKit.mount({ agentId: config.agentId, endpoint, actions, voice: config.voice, journey: config.journey, targetMode: config.targetMode }); render();
         const agent = await widget.ready;
         if (generation === installation) onReady(agent);
       } catch (error) {
@@ -155,19 +156,24 @@
     const scripts = parsed.querySelectorAll('script');
     if (scripts.length !== 1 || parsed.body.children.length > 0 || scripts[0].textContent.trim()) throw new Error('The snippet must contain only one GuideKit script tag, with no inline code.');
     const script = scripts[0];
-    const allowed = new Set(['src', 'data-agent-id', 'data-endpoint', 'defer', 'data-voice-provider', 'data-voice-hotkey', 'data-voice-auto-submit']);
+    const allowed = new Set(['src', 'data-agent-id', 'data-endpoint', 'defer', 'data-voice-provider', 'data-voice-hotkey', 'data-voice-auto-submit', 'integrity', 'crossorigin', 'data-adaptive', 'data-target-mode', 'data-journey-resume']);
     if ([...script.attributes].some(attribute => !allowed.has(attribute.name))) throw new Error('The snippet contains unsupported attributes. Copy it again from Dashboard → Install.');
     const expected = new URL(endpoint).origin;
     let source, configured;
     try { source = new URL(script.getAttribute('src')); configured = new URL(script.getAttribute('data-endpoint') || expected); }
     catch { throw new Error('The SDK source and endpoint must be complete GuideKit URLs.'); }
-    if (source.href !== `${expected}/sdk/guidekit.js` || configured.origin !== expected || configured.href !== `${expected}/`) throw new Error(`Use the GuideKit SDK served by ${expected}/sdk/guidekit.js. Other script sources and endpoints are not installed here.`);
+    const pinned = /^\/sdk\/releases\/[a-f0-9]{24}\/guidekit\.js$/.test(source.pathname);
+    if (source.origin !== expected || source.username || source.password || source.search || source.hash || (!pinned && source.href !== `${expected}/sdk/guidekit.js`) || configured.origin !== expected || configured.href !== `${expected}/`) throw new Error(`Use a reviewed GuideKit SDK script served by ${expected}. Other script sources and endpoints are not installed here.`);
+    const integrity = script.getAttribute('integrity'), crossOrigin = script.getAttribute('crossorigin');
+    if ((integrity && !/^sha384-[A-Za-z0-9+/]{64}$/.test(integrity)) || (crossOrigin && crossOrigin !== 'anonymous') || (pinned && (!integrity || crossOrigin !== 'anonymous'))) throw new Error('Pinned SDK releases require the exact SHA-384 integrity and anonymous crossorigin attributes from the dashboard.');
     const agentId = script.getAttribute('data-agent-id');
     if (!agentId || !/^agt_[a-zA-Z0-9_-]{1,150}$/.test(agentId)) throw new Error('The snippet needs a valid published data-agent-id. Copy it again from Dashboard → Install.');
     const provider = script.getAttribute('data-voice-provider') || 'browser';
     const hotkey = script.getAttribute('data-voice-hotkey') || 'true';
     const autoSubmit = script.getAttribute('data-voice-auto-submit') || 'true';
     if (!['browser', 'disabled'].includes(provider) || !['true', 'false'].includes(hotkey) || !['true', 'false'].includes(autoSubmit)) throw new Error('Use browser voice settings from the current GuideKit installation snippet.');
-    return { agentId, src: source.href, voice: { provider, hotkeyStartsListening: hotkey === 'true', autoSubmit: autoSubmit === 'true' } };
+    const adaptive = script.getAttribute('data-adaptive') || 'true', targetMode = script.getAttribute('data-target-mode') || 'auto', resume = script.getAttribute('data-journey-resume') || 'disabled';
+    if (!['true', 'false'].includes(adaptive) || !['auto', 'explicit'].includes(targetMode) || !['disabled', 'session'].includes(resume)) throw new Error('Use supported GuideKit target and journey settings.');
+    return { agentId, src: source.href, integrity, targetMode, journey: { enabled: adaptive === 'true', resume }, voice: { provider, hotkeyStartsListening: hotkey === 'true', autoSubmit: autoSubmit === 'true' } };
   }
 })();

@@ -2,7 +2,7 @@
 
 Build the shared visual/voice agent platform. Cutroom is a host integration, never the product boundary. Core first. TigerGraph is the selected graph sponsor integration; browser speech recognition and synthesis are the selected voice approach. Motion polish follows verified behavior.
 
-Run locally on loopback. Use the owner's official Codex/ChatGPT login through app-server; no API key, credential extraction, shared hosted subscription relay, or paid fallback. Treat model success as unverified until a completed live request and website outcome have been observed.
+Run locally on loopback. Use the owner's official Codex/ChatGPT login through app-server; no credential extraction, shared hosted subscription relay, or paid fallback. The owner approved preparing a separately configured hosted OpenAI provider, disabled by default; it must require explicit selection and paid-call enablement, never reuse the personal subscription credentials, and never silently replace the local runtime. Live paid calls and public deployment remain separate gates. Treat model success as unverified until a completed live request and website outcome have been observed.
 
 The coordinator owns root manifests, lockfile, contracts, database, auth, server, shared docs and integration. SDK agent owns packages/sdk. Dashboard agent owns apps/dashboard. Runtime agent owns packages/runtime. Work in isolated branches/worktrees once the baseline is committed. Commit only owned files and report checks and SHA; propose contract changes to the coordinator. No agent edits another agent's files without handoff.
 

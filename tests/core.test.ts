@@ -92,6 +92,18 @@ test('real HTTP core: tenancy, publishing, retrieval, actions, and private runti
       nextPlan = { answer: 'I can propose a contact.', steps: [], action: { name: 'create_contact', argumentsJson: '{"name":42}', reason: 'Create contact.' }, citationIds: [] };
       assert.equal((await ask('Create a contact', 'bad_args')).status, 502);
     });
+    await t.test('journey continuations echo their generation, preserve the goal and cannot issue business receipts', async () => {
+      const journey = { id: 'journey_fixture', revision: 2, goal: 'Create a contact', reason: 'scene_changed', completed: [{ targetId: 'open-form', label: 'Open form', role: 'button', evidence: 'observed' }] };
+      nextPlan = { answer: 'Continue with the form.', steps: [{ targetId: 'create-contact', text: 'Review the form.' }], action: null, citationIds: [], journeyDisposition: 'continue' };
+      const continued = await request('/api/embed/session/ask', { token, origin: website, body: { message: journey.goal, page, requestId: 'continue_2', journey } });
+      assert.equal(continued.status, 200); assert.deepEqual(continued.data.journey, { id: journey.id, revision: 2, disposition: 'continue' });
+      assert.match(lastPrompt, /journey_fixture/); assert.match(lastPrompt, /Open form/);
+      const before = core.repo.rows('SELECT id FROM receipts').length;
+      nextPlan = { answer: 'Create it.', steps: [], action: { name: 'create_contact', argumentsJson: '{"name":"Jamie","company":"Test","status":"New"}', reason: 'Create a contact.' }, citationIds: [], journeyDisposition: 'done' };
+      const denied = await request('/api/embed/session/ask', { token, origin: website, body: { message: journey.goal, page, requestId: 'continue_action_denied', journey } });
+      assert.equal(denied.status, 502); assert.match(denied.data.error, /continuation cannot propose/); assert.equal(core.repo.rows('SELECT id FROM receipts').length, before);
+      assert.equal((await request('/api/embed/session/ask', { token, origin: website, body: { message: journey.goal, page, requestId: 'private_evidence_denied', journey: { ...journey, completed: [{ ...journey.completed[0], value: 'must not be accepted' }] } } })).status, 400);
+    });
     await t.test('proposes a validated action and records no success before confirmation', async () => {
       nextPlan = { answer: 'Review the contact before creating it.', steps: [], action: { name: 'create_contact', argumentsJson: JSON.stringify({ name: 'Jamie Rivera', company: 'Acme Studio', status: 'New' }), reason: 'You asked to add this contact.' }, citationIds: [docId] };
       const answer = await ask('Create Jamie Rivera at Acme Studio', 'create_1'); assert.equal(answer.status, 200); receiptId = answer.data.action.receiptId;

@@ -1,25 +1,32 @@
 import { Assistant } from './controller';
 import { compileAction, safeContext } from './security';
-import type { GuideKitAPI, GuideKitInstance, MountOptions, RegisteredAction } from './types';
-export type { ActionResult, GuideKitAPI, GuideKitInstance, GuideStepResult, MountOptions, RegisteredAction, VoiceOptions } from './types';
+import { semanticRevision } from './journey';
+import type { GuideContextOptions, GuideKitAPI, GuideKitInstance, MountOptions, RegisteredAction } from './types';
+export type { ActionResult, GuideContextOptions, GuideKitAPI, GuideKitInstance, GuideStepResult, MountOptions, RegisteredAction, VoiceOptions } from './types';
 
 let instance: GuideKitInstance | null = null;
 const registered = new Map<string, RegisteredAction>();
 let context: Record<string, unknown> = {};
+let contextOptions: GuideContextOptions | undefined;
 
 export function mount(options: MountOptions): GuideKitInstance {
   if (!document.body) throw new Error('Mount GuideKit after the document body exists, or use a defer script.');
   const actions = Object.fromEntries(registered);
   // Construct and validate the replacement before tearing down a working assistant.
   const next = new Assistant({ ...options, actions: { ...actions, ...options.actions } });
-  instance?.destroy(); instance = next; next.setContext(context); return next;
+  instance?.destroy(); instance = next; next.setContext(context, contextOptions); return next;
 }
 export function registerAction(name: string, action: RegisteredAction): void {
   compileAction(name, action);
   if (!registered.has(name) && registered.size >= 30) throw new Error('Register at most 30 GuideKit actions.');
   instance?.registerAction(name, action); registered.set(name, action);
 }
-export function setContext(value: Record<string, unknown>): void { context = safeContext(value); instance?.setContext(context); }
+export function setContext(value: Record<string, unknown>, options?: GuideContextOptions): void {
+  semanticRevision(options?.revision);
+  context = safeContext(value);
+  if (options?.revision !== undefined) contextOptions = { revision: options.revision };
+  instance?.setContext(context, contextOptions);
+}
 export function open(): void { instance?.open(); }
 export function close(): void { instance?.close(); }
 export function startVoice(): void { instance?.startVoice(); }
@@ -27,7 +34,8 @@ export function stopVoice(): void { instance?.stopVoice(); }
 export function reportStepResult(targetId: string, result: import('./types').GuideStepResult): void { instance?.reportStepResult(targetId, result); }
 export function destroy(): void { instance?.destroy(); instance = null; }
 
-export const GuideKit: GuideKitAPI = { mount, registerAction, setContext, open, close, startVoice, stopVoice, reportStepResult, destroy };
+export const SDK_CAPABILITIES: GuideKitAPI['capabilities'] = Object.freeze({ apiVersion: 1, explicitTargets: true, adaptiveJourneys: true, hostWorkflowProgress: true });
+export const GuideKit: GuideKitAPI = { capabilities: SDK_CAPABILITIES, mount, registerAction, setContext, open, close, startVoice, stopVoice, reportStepResult, destroy };
 
 if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   const script = document.currentScript instanceof HTMLScriptElement ? document.currentScript : null;
@@ -39,12 +47,14 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     const start = () => {
       try {
         const provider = script?.dataset.voiceProvider;
+        const targetMode = script?.dataset.targetMode;
         if (provider && !['browser', 'disabled'].includes(provider)) throw new Error('GuideKit data-voice-provider must be browser or disabled.');
-        mount({ agentId, endpoint, ...(script?.dataset.hotkey ? { hotkey: script.dataset.hotkey } : {}), voice: {
+        if (targetMode !== undefined && !['auto', 'explicit'].includes(targetMode)) throw new Error('GuideKit data-target-mode must be auto or explicit.');
+        mount({ agentId, endpoint, ...(targetMode ? { targetMode: targetMode as 'auto' | 'explicit' } : {}), ...(script?.dataset.hotkey ? { hotkey: script.dataset.hotkey } : {}), voice: {
           ...(provider ? { provider: provider as 'browser' | 'disabled' } : {}),
           ...(script?.dataset.voiceHotkey ? { hotkeyStartsListening: script.dataset.voiceHotkey !== 'false' } : {}),
           ...(script?.dataset.voiceAutoSubmit ? { autoSubmit: script.dataset.voiceAutoSubmit !== 'false' } : {})
-        } });
+        }, journey: { enabled: script?.dataset.adaptive !== 'false', resume: script?.dataset.journeyResume === 'session' ? 'session' : 'disabled' } });
       }
       catch (error) { document.dispatchEvent(new CustomEvent('guidekit:error', { detail: { message: error instanceof Error ? error.message : 'GuideKit could not start.' } })); }
     };

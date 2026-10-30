@@ -1,9 +1,11 @@
 import type { PageContext, PublicAgent, RunResult } from '../../contracts/src/index';
-import type { GuideKitInstance, GuideStepResult, MountOptions, RegisteredAction } from './types';
+import type { GuideContextOptions, GuideKitInstance, GuideStepResult, MountOptions, RegisteredAction } from './types';
 import { compileAction, endpointOrigin, parsePublicAgent, parseRun, record, safeContext, validId, type CompiledAction } from './security';
 import { ContextCollector } from './context';
-import { View, type ActionCard } from './view';
+import { View, type ActionCard, type GuideHooks } from './view';
 import { Voice } from './voice';
+import { continuationLimit, JourneyCoordinator, parseJourneyMemory, semanticRevision, type JourneyMemory, type JourneyPlan, type JourneyRequest } from './journey';
+import { SceneObserver, routeKey } from './scene';
 
 interface Session { token: string; expiresAt: number; agent: PublicAgent; }
 interface PendingAction {
@@ -32,16 +34,24 @@ export class Assistant implements GuideKitInstance {
   private session: Session | null = null;
   private connecting: Promise<Session> | null = null;
   private explicitContext: Record<string, unknown> = {};
+  private contextRevision: string | undefined;
   private active: AbortController | null = null;
   private pending: PendingAction | null = null;
   private generation = 0;
   private intent = 0;
   private destroyed = false;
   private configuredVersion: number | null = null;
+  private journey: JourneyCoordinator | null = null;
+  private sceneObserver: SceneObserver | null = null;
+  private readonly pageHide = () => this.saveJourney();
+  private resumeAllowed = false;
+  private resumeOffered = false;
   private readonly keyboard: (event: KeyboardEvent) => void;
 
   constructor(private readonly options: MountOptions) {
     if (!validId(options.agentId)) throw new Error('GuideKit needs a valid published agent ID.');
+    if (options.targetMode !== undefined && !['auto', 'explicit'].includes(options.targetMode)) throw new Error('GuideKit targetMode must be auto or explicit.');
+    continuationLimit(options.journey?.maxContinuations);
     this.endpoint = endpointOrigin(options.endpoint);
     for (const [name, action] of Object.entries(options.actions ?? {})) this.registerAction(name, action);
     this.view = new View({ open: () => this.open(), close: () => this.close(), submit: message => { void this.ask(message); }, cancel: () => { void this.cancel(); }, mic: () => this.toggleVoice(false), speaker: () => this.voice.toggleOutput(), guideStep: (text, events) => this.voice.speak(text, events), guidePause: () => this.voice.stopSpeaking(), guideFinish: result => {
@@ -59,8 +69,9 @@ export class Assistant implements GuideKitInstance {
       if (options.voice?.hotkeyStartsListening !== false) this.toggleVoice(true);
     };
     document.addEventListener('keydown', this.keyboard);
+    window.addEventListener('pagehide', this.pageHide);
     this.view.status('Connecting to your published assistant…');
-    this.ready = this.ensureSession().then(session => { if (!this.voice.active) this.view.status('Ready. Ask anything about this website.'); return session.agent; }).catch(error => { if (!this.destroyed) { this.view.status(messageOf(error), true); this.view.message('error', `${messageOf(error)} You can retry by sending a question.`); } throw error; });
+    this.ready = this.ensureSession().then(session => { if (!this.voice.active) this.view.status('Ready. Ask anything about this website.'); this.offerJourneyResume(); return session.agent; }).catch(error => { if (!this.destroyed) { this.view.status(messageOf(error), true); this.view.message('error', `${messageOf(error)} You can retry by sending a question.`); } throw error; });
     // Auto-install must not produce an unhandled rejection when a server is offline.
     void this.ready.catch(() => undefined);
   }
@@ -68,12 +79,31 @@ export class Assistant implements GuideKitInstance {
     if (!this.actions.has(name) && this.actions.size >= 30) throw new Error('Register at most 30 GuideKit actions.');
     this.actions.set(name, compileAction(name, action));
   }
-  setContext(context: Record<string, unknown>): void { this.explicitContext = safeContext(context); }
-  open(): void { if (!this.destroyed) this.view.open(); }
+  setContext(context: Record<string, unknown>, options?: GuideContextOptions): void {
+    const revision = semanticRevision(options?.revision);
+    this.explicitContext = safeContext(context);
+    if (revision !== undefined) this.contextRevision = revision;
+    this.sceneObserver?.refresh();
+  }
+  open(): void {
+    if (this.destroyed) return;
+    const journey = this.journey;
+    if (journey?.active && journey.planning) {
+      journey.setPaused(true); this.view.clearGuide(true); this.view.busy(false);
+      this.view.offerJourneyResume(journey.goal, () => { if (this.journey === journey && journey.active) { this.view.journeyTransition(() => { void this.cancel(); }); journey.setPaused(false); } }, () => journey.cancel());
+    }
+    this.view.open();
+  }
   startVoice(): void { if (!this.destroyed) { this.open(); if (!this.voice.active) { void this.cancel(false); this.voice.start(true); } } }
   stopVoice(): void { if (!this.destroyed) this.voice.finishInput(); }
   reportStepResult(targetId: string, result: GuideStepResult): void {
-    if (this.destroyed || !validId(targetId) || !record(result) || typeof result.success !== 'boolean' || (result.message !== undefined && (typeof result.message !== 'string' || result.message.length > 1000))) return;
+    if (this.destroyed || !validId(targetId) || !record(result) || (result.message !== undefined && (typeof result.message !== 'string' || result.message.length > 1000))) return;
+    if ('status' in result) {
+      if (result.status !== 'pending' || result.timeoutMs !== undefined && (!Number.isInteger(result.timeoutMs) || result.timeoutMs < 1000 || result.timeoutMs > 300000)) return;
+    } else {
+      if (typeof result.success !== 'boolean' || result.scope !== undefined && !['step', 'goal'].includes(result.scope)) return;
+      this.journey?.reportHostResult(targetId, result.success);
+    }
     this.view.reportStepResult(targetId, result);
   }
   private toggleVoice(voiceFlow: boolean): void {
@@ -83,11 +113,12 @@ export class Assistant implements GuideKitInstance {
   close(): void { if (this.destroyed) return; void this.cancel(); this.view.close(); }
   destroy(): void {
     if (this.destroyed) return;
-    void this.cancel(); this.destroyed = true; this.lifetime.abort(); this.voice.destroy(); this.view.destroy(); document.removeEventListener('keydown', this.keyboard);
+    void this.cancel(); this.destroyed = true; this.lifetime.abort(); this.voice.destroy(); this.view.destroy(); document.removeEventListener('keydown', this.keyboard); window.removeEventListener('pagehide', this.pageHide);
   }
   async getPageContext(): Promise<PageContext> {
-    return this.collectPageContext(new ContextCollector());
+    return this.collectPageContext(this.collector());
   }
+  private collector(): ContextCollector { return new ContextCollector(this.options.targetMode); }
   private async collectPageContext(collector: ContextCollector, signal?: AbortSignal): Promise<PageContext> {
     const session = await this.ensureSession();
     signal?.throwIfAborted();
@@ -106,30 +137,27 @@ export class Assistant implements GuideKitInstance {
     try {
       const session = await this.ensureSession();
       if (controller.signal.aborted) return null;
-      const collector = new ContextCollector();
+      const collector = this.collector();
+      const contextRevision = this.contextRevision, contextRoute = routeKey();
       const page = await this.collectPageContext(collector, controller.signal);
       if (controller.signal.aborted) return null;
+      if (contextRevision !== this.contextRevision || contextRoute !== routeKey()) throw new Error('The website workflow changed while reading its context. Ask again for the current state.');
+      const journey = this.options.journey?.enabled === false ? null : this.createJourney(text);
+      journey?.seed(page, routeKey(), contextRevision); this.watchJourney(journey);
       const documentPath = `${location.origin}${location.pathname}`;
-      const result = parseRun(await this.json('/api/embed/session/ask', { message: text, page, requestId: crypto.randomUUID() }, session.token, controller.signal, 150_000));
+      const documentRoute = routeKey();
+      const result = parseRun(await this.json('/api/embed/session/ask', { message: text, page, requestId: crypto.randomUUID(), ...(journey ? { journey: journey.initial() } : {}) }, session.token, controller.signal, 150_000));
       if (this.destroyed || generation !== this.generation || controller.signal.aborted) return null;
-      if (`${location.origin}${location.pathname}` !== documentPath) throw new Error('The page changed while the assistant was thinking. Ask again for the current page.');
+      if (`${location.origin}${location.pathname}` !== documentPath || routeKey() !== documentRoute) { if (journey?.active) { this.sceneObserver?.refresh(); return null; } throw new Error('The page changed while the assistant was thinking. Ask again for the current page.'); }
       if (result.version !== session.agent.version) throw new Error('The assistant version changed unexpectedly. Reload this page to reconnect.');
       const knownTargets = new Set(page.targets.map(target => target.id));
       if (result.steps.some(step => !knownTargets.has(step.targetId))) throw new Error('The assistant referred to a control that was not shared. Ask again for the current page.');
-      const container = this.view.message('assistant', result.answer, result.citations);
-      this.view.knowledgeEvidence(container, result.knowledge, result.citations);
-      if (result.steps.length) {
-        const resolve = (id: string) => collector.resolve(id);
-        const missing = () => { this.view.status('That control changed or is no longer visible. Ask again to refresh the guide.', true); this.view.recoveryButton(container, () => { void this.ask(text); }); this.emit('target-missing', { runId: result.runId }); };
-        this.view.guideButton(container, result.steps, resolve, missing, result.action ? () => { void this.cancel(false); } : undefined);
-        if (!result.action) this.view.guide(result.steps, resolve, missing);
-      }
-      if (result.action) this.propose(result, container, session);
-      if (!result.steps.length || result.action) this.voice.speak(result.answer);
-      this.view.status(result.action ? 'Review the proposed action before approving it.' : this.view.guiding ? 'Guidance is following your progress on the page.' : 'Ready for your next question.');
+      if (contextRevision !== this.contextRevision) throw new Error('The website workflow changed while the assistant was thinking. Ask again for the current state.');
+      const plan: JourneyPlan = { run: result, page, resolve: id => collector.resolve(id), routeKey: routeKey(), contextRevision };
+      journey?.adopt(plan); this.renderPlan(plan, journey);
       this.emit('response', { runId: result.runId, version: result.version }); return result;
     } catch (error) {
-      if (!this.destroyed && generation === this.generation && !controller.signal.aborted) { this.view.message('error', messageOf(error)); this.view.status('Your request did not finish. You can try again.', true); this.emit('error', { message: messageOf(error) }); }
+      if (!this.destroyed && generation === this.generation && !controller.signal.aborted) { this.journey?.cancel(); this.view.message('error', messageOf(error)); this.view.status('Your request did not finish. You can try again.', true); this.emit('error', { message: messageOf(error) }); }
       return null;
     } finally {
       if (generation === this.generation) { this.active = null; this.view.busy(false); }
@@ -138,6 +166,7 @@ export class Assistant implements GuideKitInstance {
   private async cancel(announce = true, preserveIntent = false): Promise<void> {
     if (!preserveIntent) ++this.intent;
     const wasActive = Boolean(this.active || this.pending);
+    this.journey?.cancel(); this.journey = null; this.sceneObserver?.destroy(); this.sceneObserver = null;
     ++this.generation; this.active?.abort(); this.active = null; this.view.clearGuide(); this.voice.stop(); this.view.busy(false);
     const pending = this.pending;
     if (pending && !pending.terminal) {
@@ -146,6 +175,113 @@ export class Assistant implements GuideKitInstance {
       await this.report(pending);
     }
     if (announce && wasActive && !this.destroyed) this.view.status('Stopped. No further action will be started.');
+  }
+  private createJourney(goal: string, memory?: JourneyMemory, page?: PageContext): JourneyCoordinator {
+    const completed = memory?.completed.map(entry => { const target = page?.targets.find(target => target.id === entry.targetId); return { ...entry, label: target?.label ?? 'Previously completed step', role: target?.role ?? 'region' }; });
+    const journey = new JourneyCoordinator(goal, {
+      replan: (request, signal) => this.replanJourney(request, signal),
+      onPending: () => {
+        if (this.destroyed || this.journey !== journey) return;
+        ++this.generation; this.active?.abort(); this.active = null; this.voice.stopSpeaking(); this.view.busy(true);
+        this.view.journeyTransition(() => { void this.cancel(); }); this.emit('journey-planning', { id: journey.id });
+      },
+      onPlan: plan => { if (!this.destroyed && this.journey === journey) { this.renderPlan(plan, journey); this.view.busy(false); this.emit('response', { runId: plan.run.runId, version: plan.run.version }); } },
+      onChange: () => this.saveJourney(),
+      onEnd: () => { if (this.journey === journey) { this.sceneObserver?.destroy(); this.sceneObserver = null; this.forgetJourney(); } },
+      onError: message => { if (!this.destroyed && this.journey === journey) { this.view.clearGuide(true); this.view.busy(false); this.view.message('error', message); this.view.status(message, true); this.emit('error', { message }); } }
+    }, { id: memory?.id, completed, maxContinuations: this.options.journey?.maxContinuations });
+    this.journey = journey;
+    if (this.options.journey?.resume === 'session' && !this.resumeAllowed && !this.resumeOffered) {
+      this.resumeOffered = true;
+      this.view.offerJourneyMemory(() => { this.resumeAllowed = true; try { sessionStorage.setItem(`${this.memoryKey()}:consent`, '1'); } catch { /* Storage may be blocked. */ } this.saveJourney(); });
+    }
+    return journey;
+  }
+  private watchJourney(journey: JourneyCoordinator | null): void {
+    this.sceneObserver?.destroy(); this.sceneObserver = null;
+    if (!journey?.active || !this.session) return;
+    this.sceneObserver = new SceneObserver(async signal => {
+      const revision = this.contextRevision;
+      const page = await this.collectPageContext(this.collector(), signal);
+      if (revision !== this.contextRevision) { this.sceneObserver?.refresh(); throw new DOMException('The host context changed.', 'AbortError'); }
+      return page;
+    }, (page, route) => { if (this.journey === journey && !this.destroyed) journey.observe(page, route, this.contextRevision); }, () => !this.destroyed && this.journey === journey && journey.active && !journey.suspended);
+  }
+  private async replanJourney(request: JourneyRequest, signal: AbortSignal): Promise<JourneyPlan> {
+    const session = await this.ensureSession(); signal.throwIfAborted();
+    const contextRevision = this.contextRevision, route = routeKey(), collector = this.collector(), page = await this.collectPageContext(collector, signal);
+    if (contextRevision !== this.contextRevision || route !== routeKey()) { this.sceneObserver?.refresh(); throw new DOMException('The scene changed.', 'AbortError'); }
+    const run = parseRun(await this.json('/api/embed/session/ask', { message: request.goal, page, requestId: crypto.randomUUID(), journey: request }, session.token, signal, 150_000));
+    signal.throwIfAborted();
+    if (route !== routeKey() || contextRevision !== this.contextRevision) {
+      const fresh = await this.collectPageContext(this.collector(), signal); signal.throwIfAborted();
+      this.journey?.observe(fresh, routeKey(), this.contextRevision); throw new DOMException('The scene changed.', 'AbortError');
+    }
+    if (run.version !== session.agent.version || run.steps.some(step => !page.targets.some(target => target.id === step.targetId))) throw new Error('The next guide did not match this page or published assistant.');
+    return { run, page, routeKey: route, contextRevision, resolve: id => collector.resolve(id) };
+  }
+  private renderPlan(plan: JourneyPlan, journey: JourneyCoordinator | null): void {
+    const { run, page, resolve } = plan;
+    const container = this.view.message('assistant', run.answer, run.citations); this.view.knowledgeEvidence(container, run.knowledge, run.citations);
+    const current = () => journey !== null && this.journey === journey && journey.active;
+    // Preserve the original safe control's native-submit boundary even if its
+    // result arrives while paused, without a captured click, or after removal.
+    const finalTarget = run.steps.length ? resolve(run.steps.at(-1)!.targetId) : null;
+    const finalNativeSubmit = Boolean(finalTarget && 'form' in finalTarget && (finalTarget as HTMLButtonElement).form && ['submit', 'image'].includes((finalTarget as HTMLButtonElement).type));
+    let submitting = false;
+    const progress: NonNullable<GuideHooks['progress']> = (index, step, evidence) => { if (!current()) return; const target = page.targets.find(target => target.id === step.targetId); if (target) { journey!.record(index, { targetId: target.id, label: target.label, role: target.role, evidence }); this.sceneObserver?.refresh(); } };
+    const hooks: GuideHooks | undefined = journey ? {
+      progress,
+      state: state => {
+        if (!current()) return;
+        if (!state.confirmationPending) submitting = false;
+        else if (state.target && 'form' in state.target && (state.target as HTMLButtonElement).form && ['submit', 'image'].includes((state.target as HTMLButtonElement).type)) submitting = true;
+        journey!.setPaused(state.paused); journey!.setAwaitingHost(state.hostPending || state.confirmationPending && (submitting || !journey!.canContinue));
+        if (state.confirmationPending && !state.hostPending && journey!.canContinue && !submitting) { progress(state.index, state.step, 'observed'); journey!.expectTransition(); }
+        if (!state.paused) this.sceneObserver?.refresh();
+      },
+      finish: result => {
+        if (!current()) return false;
+        // A deferred verified result finishes only after the visitor resumes
+        // local guidance. It may finish before emitting its unpaused state.
+        if (result.verified) journey!.setPaused(false);
+        const handled = journey!.segmentFinished(result, result.scope === 'goal' || (submitting || finalNativeSubmit) && result.scope !== 'step');
+        if (handled) { this.view.journeyTransition(() => { void this.cancel(); }); this.sceneObserver?.refresh(); } return handled;
+      }
+    } : undefined;
+    const missing = () => { this.view.status('That control changed or is no longer visible. Ask again to refresh the guide.', true); this.view.recoveryButton(container, () => { void this.ask(journey?.goal ?? run.answer); }); this.emit('target-missing', { runId: run.runId }); };
+    if (run.steps.length) {
+      this.view.guideButton(container, run.steps, resolve, missing, run.action ? () => { void this.cancel(false); } : undefined, hooks);
+      if (!run.action) this.view.guide(run.steps, resolve, missing, hooks);
+    } else this.view.clearGuide(true);
+    if (run.action && this.session) { journey?.setPaused(true); this.propose(run, container, this.session); }
+    if (!run.steps.length || run.action) this.voice.speak(run.answer);
+    this.view.status(run.action ? 'Review the proposed action before approving it.' : this.view.guiding ? 'Guidance is following your progress on the page.' : 'Ready for your next question.');
+  }
+  private memoryKey(): string { return `guidekit:journey:${this.endpoint}:${this.options.agentId}`; }
+  private forgetJourney(): void { if (this.options.journey?.resume === 'session') { try { sessionStorage.removeItem(this.memoryKey()); } catch { /* Storage may be blocked. */ } } }
+  private saveJourney(): void {
+    if (this.options.journey?.resume !== 'session' || !this.resumeAllowed || !this.journey?.active) return;
+    try { sessionStorage.setItem(this.memoryKey(), JSON.stringify(this.journey.memory())); } catch { /* Session-only resume is optional. */ }
+  }
+  private offerJourneyResume(): void {
+    if (this.destroyed || this.options.journey?.resume !== 'session') return;
+    let memory: JourneyMemory | null = null;
+    try { this.resumeAllowed = sessionStorage.getItem(`${this.memoryKey()}:consent`) === '1'; const raw = sessionStorage.getItem(this.memoryKey()); if (raw && this.resumeAllowed) memory = parseJourneyMemory(JSON.parse(raw)); } catch { /* Storage may be blocked. */ }
+    if (!memory) { this.forgetJourney(); return; }
+    const previous = memory;
+    this.view.offerJourneyResume(previous.goal, () => { void this.resumeJourney(previous); }, () => this.forgetJourney());
+  }
+  private async resumeJourney(memory: JourneyMemory): Promise<void> {
+    const intent = ++this.intent;
+    await this.cancel(false, true); if (this.destroyed || intent !== this.intent) return;
+    const controller = new AbortController(); this.active = controller;
+    try {
+      const page = await this.collectPageContext(this.collector(), controller.signal);
+      if (this.destroyed || intent !== this.intent || controller.signal.aborted) return;
+      const journey = this.createJourney(memory.goal, memory, page); journey.seed(page, routeKey(), this.contextRevision); this.watchJourney(journey); this.view.journeyTransition(() => { void this.cancel(); }); journey.resume();
+    } catch (error) { if (!this.destroyed && intent === this.intent && !controller.signal.aborted) { this.view.clearGuide(true); this.view.message('error', messageOf(error)); } }
+    finally { if (this.active === controller) this.active = null; }
   }
   private propose(run: RunResult, container: HTMLElement, session: Session): void {
     const action = run.action!; const registered = this.actions.get(action.name);
@@ -198,6 +334,7 @@ export class Assistant implements GuideKitInstance {
         // Deliberately independent of the inference/lifetime signal: cancellation is itself a terminal receipt.
         await this.json('/api/embed/session/action-result', { receiptId: pending.action.receiptId, ...outcome }, pending.token, undefined, 12_000);
         pending.terminal = true; pending.card.finished(outcome.message, outcome.status === 'succeeded');
+        if (this.journey?.id === pending.run.journey?.id) this.journey?.cancel();
         if (this.pending === pending) this.pending = null;
         if (!this.destroyed) { this.view.status(outcome.status === 'succeeded' ? 'The website verified that your action completed.' : outcome.message, outcome.status === 'failed'); this.emit('action-result', { runId: pending.run.runId, receiptId: pending.action.receiptId, status: outcome.status }); }
       } catch {

@@ -1,5 +1,6 @@
 import type { ModelPlan } from '../../contracts/src/index';
 import { isSafeTarget } from './context';
+import type { GuideStepResult } from './types';
 
 type Step = ModelPlan['steps'][number];
 export interface GuidanceState {
@@ -12,10 +13,12 @@ export interface GuidanceState {
   automatic: boolean;
   paused: boolean;
   waiting: boolean;
+  confirmationPending: boolean;
+  hostPending: boolean;
 }
-export interface GuidanceResult { reason: 'completed' | 'stopped' | 'missing'; verified: boolean; message?: string; }
-interface Callbacks { onUpdate(state: GuidanceState): void; onFinish(result: GuidanceResult): void; }
-interface HostResult { success: boolean; message?: string; }
+export interface GuidanceResult { reason: 'completed' | 'stopped' | 'missing'; verified: boolean; message?: string; scope?: 'step' | 'goal'; }
+interface Callbacks { onUpdate(state: GuidanceState): void; onFinish(result: GuidanceResult): void; onComplete?(index: number, step: Step, evidence: 'observed' | 'manual' | 'host_verified'): void; }
+type HostResult = GuideStepResult;
 interface Observation { target: HTMLElement; kind: 'text' | 'textarea' | 'choice'; ready: boolean; timer: ReturnType<typeof setTimeout> | null; }
 const quietMs = 1200;
 const recoveryMs = 1200;
@@ -42,9 +45,18 @@ function validForm(form: HTMLFormElement): boolean {
   // Inspect validity without dispatching the native invalid events from checkValidity().
   return Array.from(form.elements).every(element => !('willValidate' in element) || !(element as HTMLInputElement).willValidate || ((element as HTMLInputElement).validity.valid && element.getAttribute('aria-invalid') !== 'true'));
 }
+function htmlAncestor(target: EventTarget | null): HTMLElement | null {
+  // Icons often dispatch from SVG/path nodes. Resolve only their local ancestry,
+  // never a selector from the model, and retain the original known-control check.
+  let current: EventTarget | null = target;
+  for (let depth = 0; current && depth < 12; depth++) {
+    if (current instanceof HTMLElement) return current;
+    current = 'parentElement' in current ? current.parentElement as EventTarget | null : null;
+  }
+  return null;
+}
 function guideControl(target: EventTarget | null): boolean {
-  const element = target instanceof HTMLElement ? target : target && 'parentElement' in target && target.parentElement instanceof HTMLElement ? target.parentElement : null;
-  return Boolean(element?.closest('[data-guidekit-root]'));
+  return Boolean(htmlAncestor(target)?.closest('[data-guidekit-root]'));
 }
 function pageControl(target: EventTarget | null): target is HTMLElement { return target instanceof HTMLElement && !guideControl(target) && isSafeTarget(target) && enabled(target) && (input(target) || textarea(target) || choice(target) || clickable(target)); }
 
@@ -68,6 +80,9 @@ export class GuidanceSession {
   private confirmationTimer: ReturnType<typeof setTimeout> | null = null;
   private epoch = 0;
   private waitingForResult = false;
+  private hostPending = false;
+  private hostMessage = '';
+  private confirmationTimeout = confirmationMs;
   private failure = '';
   private submitted: { index: number; nextBefore: HTMLElement | null } | null = null;
   private clicked: { index: number; target: HTMLElement; nextBefore: HTMLElement | null } | null = null;
@@ -86,7 +101,7 @@ export class GuidanceSession {
     this.observer = new MutationObserver(records => {
       if (records.some(record => !guideControl(record.target))) this.refresh();
     });
-    this.observer.observe(this.document.documentElement, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['disabled', 'readonly', 'aria-invalid', 'aria-disabled', 'aria-hidden', 'inert', 'hidden', 'style', 'class', 'data-guidekit-private', 'data-guidekit-id', 'aria-label', 'aria-labelledby', 'role', 'title', 'placeholder', 'name', 'id', 'autocomplete', 'type'] });
+    this.observer.observe(this.document.documentElement, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['disabled', 'readonly', 'aria-invalid', 'aria-disabled', 'aria-hidden', 'inert', 'hidden', 'style', 'class', 'data-guidekit-private', 'data-guidekit-id', 'data-guidekit-label', 'aria-label', 'aria-labelledby', 'role', 'title', 'placeholder', 'name', 'id', 'autocomplete', 'type'] });
     this.refresh();
   }
 
@@ -94,7 +109,7 @@ export class GuidanceSession {
     if (!this.running) return;
     this.forgetObservation(this.index);
     this.edited.delete(this.index);
-    this.completed.add(this.index);
+    this.recordCompletion(this.index, 'manual');
     if (this.index === this.steps.length - 1) { this.finish({ reason: 'completed', verified: false, message: 'Guide ended without a confirmed website result.' }); return; }
     this.move(this.index + 1);
   }
@@ -118,17 +133,28 @@ export class GuidanceSession {
     if (!this.running) return;
     const index = this.steps[this.index]?.targetId === targetId ? this.index : this.steps.at(-1)?.targetId === targetId ? this.steps.length - 1 : -1;
     if (index < 0 || (index !== this.index && index !== this.steps.length - 1)) return;
+    if ('status' in result) {
+      if (index !== this.index || result.status !== 'pending' || result.timeoutMs !== undefined && (!Number.isInteger(result.timeoutMs) || result.timeoutMs < 1000 || result.timeoutMs > 300000)) return;
+      this.cancelStepTimer(); this.submitted = null; this.clicked = null; this.deferredResult = null;
+      this.forgetObservation(this.index);
+      if (!this.hostPending) { this.clearConfirmationTimer(); this.confirmationTimeout = result.timeoutMs ?? 120000; }
+      this.hostPending = true; this.waitingForResult = true; this.failure = '';
+      this.hostMessage = result.message?.trim().slice(0, 240) || 'The website is working. I’ll wait for its confirmation…';
+      this.refresh(); return;
+    }
     this.clearConfirmationTimer();
     if (this.paused || !this.automatic) { this.deferredResult = { id: targetId, atIndex: this.index, result: { ...result } }; return; }
     this.cancelStepTimer(); this.submitted = null; this.clicked = null;
     if (!result.success) {
       if (index !== this.index) return;
       this.waitingForResult = false;
+      this.hostPending = false; this.hostMessage = ''; this.confirmationTimeout = confirmationMs;
       this.failure = result.message?.trim().slice(0, 240) || 'The website could not complete that action. Try again.';
       this.refresh(); return;
     }
-    if (index === this.steps.length - 1) { this.finish({ reason: 'completed', verified: true, message: 'The website confirmed the result.' }); return; }
-    this.complete();
+    this.hostPending = false; this.hostMessage = ''; this.confirmationTimeout = confirmationMs;
+    if (index === this.steps.length - 1 || result.scope === 'goal') { this.recordCompletion(index, 'host_verified'); this.finish({ reason: 'completed', verified: true, message: result.scope && result.message?.trim().slice(0, 240) || 'The website confirmed the result.', ...(result.scope ? { scope: result.scope } : {}) }); return; }
+    this.complete('host_verified');
   }
 
   refresh(): void {
@@ -169,15 +195,19 @@ export class GuidanceSession {
     this.cancelStepTimer();
     this.clearConfirmationTimer();
     if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
-    this.recoveryTimer = null; this.index = index; this.target = null; this.waitingForResult = false; this.failure = ''; this.submitted = null; this.clicked = null; this.lastState = null;
+    this.recoveryTimer = null; this.index = index; this.target = null; this.waitingForResult = false; this.hostPending = false; this.hostMessage = ''; this.confirmationTimeout = confirmationMs; this.failure = ''; this.submitted = null; this.clicked = null; this.lastState = null;
     this.refresh();
     if (consume) this.resumeObservation();
   }
-  private complete(): void {
+  private recordCompletion(index: number, evidence: 'observed' | 'manual' | 'host_verified'): void {
+    const fresh = !this.completed.has(index); this.completed.add(index);
+    if (fresh || evidence === 'host_verified') this.callbacks.onComplete?.(index, { ...this.steps[index]! }, evidence);
+  }
+  private complete(evidence: 'observed' | 'manual' | 'host_verified' = 'observed'): void {
     if (!this.running || this.paused || !this.automatic) return;
     this.forgetObservation(this.index);
     this.edited.delete(this.index);
-    this.completed.add(this.index);
+    this.recordCompletion(this.index, evidence);
     let next = this.steps.findIndex((_, index) => index > this.index && !this.completed.has(index));
     if (next < 0) next = this.steps.findIndex((_, index) => !this.completed.has(index));
     if (next < 0) this.finish({ reason: 'completed', verified: false, message: 'All guidance steps were followed. No website result was independently confirmed.' });
@@ -191,7 +221,7 @@ export class GuidanceSession {
       this.confirmationTimer = null;
       if (!this.running || this.paused || !this.waitingForResult) return;
       this.finish({ reason: 'completed', verified: false, message: 'The website has not confirmed the result. Check the website before trying again.' });
-    }, confirmationMs);
+    }, this.confirmationTimeout);
   }
   private forgetObservation(index: number): void { const previous = this.observations.get(index); if (previous?.timer) clearTimeout(previous.timer); this.observations.delete(index); }
   private remember(index: number, target: HTMLElement, kind: Observation['kind'], ready: boolean): void {
@@ -246,20 +276,20 @@ export class GuidanceSession {
       else if (clickable(target)) hint = this.index === this.steps.length - 1 ? 'Click this control. I’ll wait for the website to confirm the result.' : 'Click this control to continue.';
     }
     if (this.waitingForResult) hint = 'Waiting for the website to confirm the result…';
+    if (this.hostPending) hint = this.hostMessage;
     if (this.failure) hint = this.failure;
     if (!target && !this.waitingForResult) hint = 'This control changed. Waiting for the page…';
     if (!this.automatic) hint = 'Automatic progress is off. Follow this step, then choose Next.';
     if (this.paused) hint = 'Guidance is paused. Resume when you’re ready.';
-    const state: GuidanceState = { index: this.index, total: this.steps.length, completed: this.completed.size, step: { ...this.steps[this.index]! }, target, hint, automatic: this.automatic, paused: this.paused, waiting: this.waitingForResult || !target };
+    const state: GuidanceState = { index: this.index, total: this.steps.length, completed: this.completed.size, step: { ...this.steps[this.index]! }, target, hint, automatic: this.automatic, paused: this.paused, waiting: this.waitingForResult || !target, confirmationPending: this.waitingForResult, hostPending: this.hostPending };
     if (this.lastState && Object.entries(state).every(([key, value]) => key === 'step' || this.lastState?.[key as keyof GuidanceState] === value)) return;
     this.lastState = state; this.callbacks.onUpdate(state);
   }
 
   private onEvent = (event: Event): void => {
-    if (!this.running || event.isTrusted === false || guideControl(event.target)) return;
+    if (!this.running || event.isTrusted === false || guideControl(event.target) || this.hostPending) return;
     if (event.type === 'submit') { this.onSubmit(event); return; }
-    if (!(event.target instanceof HTMLElement)) return;
-    const source = event.target;
+    const source = htmlAncestor(event.target); if (!source) return;
     const matches = this.steps.flatMap((_, index) => { const target = this.safeTarget(index); return target === source || (event.type === 'click' && Boolean(target && clickable(target) && target.contains(source))) ? [index] : []; });
     const index = matches.includes(this.index) ? this.index : matches.sort((left, right) => Math.abs(left - this.index) - Math.abs(right - this.index) || right - left)[0] ?? -1;
     if (index < 0) return;
