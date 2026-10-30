@@ -153,7 +153,7 @@ export class GuidanceSession {
       this.refresh(); return;
     }
     this.hostPending = false; this.hostMessage = ''; this.confirmationTimeout = confirmationMs;
-    if (index === this.steps.length - 1 || result.scope === 'goal') { this.recordCompletion(index, 'host_verified'); this.finish({ reason: 'completed', verified: true, message: result.message?.trim().slice(0, 240) || 'The website confirmed the result.', ...(result.scope ? { scope: result.scope } : {}) }); return; }
+    if (index === this.steps.length - 1 || result.scope === 'goal') { this.recordCompletion(index, 'host_verified'); this.finish({ reason: 'completed', verified: true, message: result.scope && result.message?.trim().slice(0, 240) || 'The website confirmed the result.', ...(result.scope ? { scope: result.scope } : {}) }); return; }
     this.complete('host_verified');
   }
 

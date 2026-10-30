@@ -224,6 +224,10 @@ export class Assistant implements GuideKitInstance {
     const { run, page, resolve } = plan;
     const container = this.view.message('assistant', run.answer, run.citations); this.view.knowledgeEvidence(container, run.knowledge, run.citations);
     const current = () => journey !== null && this.journey === journey && journey.active;
+    // Preserve the original safe control's native-submit boundary even if its
+    // result arrives while paused, without a captured click, or after removal.
+    const finalTarget = run.steps.length ? resolve(run.steps.at(-1)!.targetId) : null;
+    const finalNativeSubmit = Boolean(finalTarget && 'form' in finalTarget && (finalTarget as HTMLButtonElement).form && ['submit', 'image'].includes((finalTarget as HTMLButtonElement).type));
     let submitting = false;
     const progress: NonNullable<GuideHooks['progress']> = (index, step, evidence) => { if (!current()) return; const target = page.targets.find(target => target.id === step.targetId); if (target) { journey!.record(index, { targetId: target.id, label: target.label, role: target.role, evidence }); this.sceneObserver?.refresh(); } };
     const hooks: GuideHooks | undefined = journey ? {
@@ -236,7 +240,7 @@ export class Assistant implements GuideKitInstance {
         if (state.confirmationPending && !state.hostPending && journey!.canContinue && !submitting) { progress(state.index, state.step, 'observed'); journey!.expectTransition(); }
         if (!state.paused) this.sceneObserver?.refresh();
       },
-      finish: result => { if (!current()) return false; const handled = journey!.segmentFinished(result, result.scope === 'goal' || submitting && result.scope !== 'step'); if (handled) { this.view.journeyTransition(() => { void this.cancel(); }); this.sceneObserver?.refresh(); } return handled; }
+      finish: result => { if (!current()) return false; const handled = journey!.segmentFinished(result, result.scope === 'goal' || (submitting || finalNativeSubmit) && result.scope !== 'step'); if (handled) { this.view.journeyTransition(() => { void this.cancel(); }); this.sceneObserver?.refresh(); } return handled; }
     } : undefined;
     const missing = () => { this.view.status('That control changed or is no longer visible. Ask again to refresh the guide.', true); this.view.recoveryButton(container, () => { void this.ask(journey?.goal ?? run.answer); }); this.emit('target-missing', { runId: run.runId }); };
     if (run.steps.length) {

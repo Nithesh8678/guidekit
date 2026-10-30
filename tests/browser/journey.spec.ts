@@ -123,6 +123,16 @@ test('a native final submit waits through relabelled loading and a delayed host 
   await expect(page.locator('#saved-result')).toHaveText('Contact saved and verified.'); await expect(chat(page)).toBeVisible(); expect(requests).toHaveLength(3);
 });
 
+test('a legacy native result received while chat is open terminates on resume without a captured click or speculative continuation', async ({ page }) => {
+  finalContinues = true; await start(page); await openDetails(page); await reviewDetails(page);
+  await guide(page).getByRole('button', { name: 'Open chat', exact: true }).click(); await expect(chat(page)).toBeVisible();
+  await page.locator('#review-form').evaluate(form => (form as HTMLFormElement).requestSubmit());
+  await expect(page.locator('#saved-result')).toHaveText('Contact saved and verified.'); await expect(chat(page)).toBeVisible();
+  expect(requests).toHaveLength(3); await page.getByRole('button', { name: 'Resume guide', exact: true }).click();
+  await expect(guide(page)).toHaveCount(0); await expect(chat(page)).toBeVisible(); await expect(page.getByRole('log')).toContainText('The website confirmed the result.');
+  await page.waitForTimeout(1100); expect(requests).toHaveLength(3); await expect(page.getByRole('region', { name: 'Continuing your task' })).toHaveCount(0);
+});
+
 test('closing chat while reload Resume awaits host context prevents the obsolete task from restarting', async ({ page }) => {
   await page.addInitScript(({ endpoint, agentId }) => {
     const key = `guidekit:journey:${endpoint}:${agentId}`;

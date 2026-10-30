@@ -414,8 +414,8 @@ test('a known host result received while paused cancels the deadline and is appl
   context.mock.timers.enable({ apis: ['setTimeout'] });
   const save = new ButtonDouble(); const state = environment([['save', save]]);
   try {
-    state.session.start(); state.fire('click', save); save.visible = false; state.mutate(); state.session.setPaused(true); state.session.reportResult('save', { success: true });
-    context.mock.timers.tick(60000); assert.equal(state.finishes.length, 0); state.session.setPaused(false); assert.equal(state.finishes[0]!.verified, true); context.mock.timers.tick(60000); assert.equal(state.finishes.length, 1);
+    state.session.start(); state.fire('click', save); save.visible = false; state.mutate(); state.session.setPaused(true); state.session.reportResult('save', { success: true, message: 'A legacy host-specific saved message.' });
+    context.mock.timers.tick(60000); assert.equal(state.finishes.length, 0); state.session.setPaused(false); assert.equal(state.finishes[0]!.verified, true); assert.equal(state.finishes[0]!.message, 'The website confirmed the result.'); context.mock.timers.tick(60000); assert.equal(state.finishes.length, 1);
   } finally { state.restore(); context.mock.timers.reset(); }
 });
 
