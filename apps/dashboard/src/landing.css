@@ -11,18 +11,18 @@
   font-size: 16px;
   overflow: clip;
 }
-:where(.gk-landing) h1,
-:where(.gk-landing) h2,
-:where(.gk-landing) h3 {
+.gk-landing h1,
+.gk-landing h2,
+.gk-landing h3 {
   font-family: "Sora", sans-serif;
 }
-:where(.gk-landing) h2 {
+.gk-landing h2 {
   font-size: clamp(32px, 3.25vw, 46px);
   font-weight: 500;
   line-height: 1.23;
   letter-spacing: -1.9px;
 }
-:where(.gk-landing) h3 {
+.gk-landing h3 {
   font-weight: 500;
   font-size: 20px;
   line-height: 1.4;
@@ -1059,7 +1059,7 @@
   .landing-section-heading {
     display: block;
   }
-  :where(.gk-landing) h2 {
+  .gk-landing h2 {
     font-size: 31px;
     letter-spacing: -1.35px;
   }

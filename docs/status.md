@@ -1,5 +1,13 @@
 # GuideKit status
 
+## Public platform website — 2026-10-30
+
+Work is on `feat/platform-landing`, stacked on the unmerged `feat/platform-completion` branch. The public root now presents GuideKit as the platform, with real sign-up/sign-in entry and a protected dashboard. Existing signed-in visitors can return to the website and open their workspace. Account recovery, verification, invitation handling and unsaved-draft guards remain part of the same application.
+
+The new responsive visual system uses locally served Sora and Instrument Sans, original generated ribbon/document illustrations, a real component-contained interactive product preview, developer integration explanation, FAQ and clear account calls to action. The synthetic preview follows actual visitor clicks and typing, animates its guide cursor, waits for Save, returns to chat, and supports replay, cancellation, keyboard input and Reduced Motion. It sends no inference or microphone requests and changes only its own fictional component state. Two optimized WebP illustrations total 82,934 bytes. Prompts, asset locations and font licensing are recorded in [landing-page.md](landing-page.md).
+
+Local verification passed typecheck/build and **190** unit/HTTP/runtime/graph/SDK/package checks, **50** SDK/platform Chromium cases and **25** dashboard/landing contracts. The new landing acceptance covers 360/390/768/1280 layouts, real mouse/keyboard preview completion, public/authenticated links, FAQ, menu and reduced motion. Unsuppressed axe checks returned zero violations for WCAG 2/2.1/2.2 A/AA and best practices on the landing page, sign-up and active preview forms. Actual in-app-browser review confirmed the generated artwork, real sign-up screen and complete synthetic preview. These are local implementation and browser checks; public hosting remains a separate release gate. No paid provider was enabled, existing workspace records were preserved and Cutroom was not changed by this website work.
+
 ## Broad host workflow follow-up — 2026-10-30
 
 The shared SDK now preserves a whole supported goal across multiple editing tools instead of treating the first panel as the task. SDK `0.3.0-alpha.1` advertises `hostWorkflowProgress`; hosts can report bounded pending operations, distinguish an intermediate verified step from a verified goal, and supply a deliberate public semantic revision. The default continuation budget remains six; a host can explicitly choose 1–24. Collection and the server contract accept at most 160 safe controls from 2,000 scanned candidates. No model-generated selectors, automatic DOM mutation or new action authority were added.
