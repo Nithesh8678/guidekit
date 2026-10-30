@@ -1,6 +1,18 @@
 # GuideKit status
 
-## Current platform completion checkpoint — 2026-10-29
+## Broad host workflow follow-up — 2026-10-30
+
+The shared SDK now preserves a whole supported goal across multiple editing tools instead of treating the first panel as the task. SDK `0.3.0-alpha.1` advertises `hostWorkflowProgress`; hosts can report bounded pending operations, distinguish an intermediate verified step from a verified goal, and supply a deliberate public semantic revision. The default continuation budget remains six; a host can explicitly choose 1–24. Collection and the server contract accept at most 160 safe controls from 2,000 scanned candidates. No model-generated selectors, automatic DOM mutation or new action authority were added.
+
+Cutroom's separate local adapter now supplies reviewed tool, selection, readiness, canvas, clip-property and job metadata. It observes public control gestures, independently reads saved revisions and imported assets back, and waits for completed export jobs. Native file-picker waits, intermediate title saves, checkpoints, SVG icon clicks, modal accessibility and guide Pause/Resume were covered during integration. Media Add/Preview controls are visible at rest; privacy and visibility filters remain in place. Only the existing three explicitly approved registered actions can execute directly. The wider guide uses Cutroom's normal controls and command APIs.
+
+Final local code checkpoint `3dc5d25` passed **190** unit/HTTP/runtime/graph/SDK/package checks, typecheck and build, **50** SDK/platform Chromium cases, **13** dashboard contract cases and **two** dashboard/API integrations. Advisory and tracked-source secret checks passed. The final reusable release is `957765301e2c1a261d897dc7`. Cutroom checkpoint `3f9b2ff` passed ten host tests, typecheck, focused ESLint and build, all 14 existing SDK Chromium cases and three complete workflow cases against that release. The latter deliberately hold real save/export responses to reject premature continuation; the rendered output is downloaded and fully decoded. These automated planning/speech paths use explicit doubles, distinct from the live provider check below.
+
+Nine factual workflow documents now join the existing action guide in the actual Cutroom agent. Its active immutable **v3** became ready in **TigerGraph**, with ten documents, 453 vertices and 939 edges; five independent retrieval probes returned relevant sources and relationship paths. The existing database received a consistent private schema 3 backup before this update. A new synthetic project demonstrated a different whole-goal request using the actual subscription runtime: create a two-second Headline title, then change the canvas to 1920 × 1080. The guide continued through both tools, waited for saved results and restored chat. A separate authenticated API GET confirmed revision 2, one title lasting 70,560,000 ticks, weight 700 and the requested canvas. The verification did not change existing projects or personal media. Ignored evidence is under `.data/evidence/cutroom-title-canvas-*` and `cutroom-workflow-publication.json`.
+
+This expands supported workflow guidance, not universal task or media-understanding guarantees. Missing prerequisites, unsupported controls, private content and provider-dependent operations must still produce a clear question or limitation. Browser narration quality remains deferred; physical voice/device and hosted release boundaries below remain unchanged. Cutroom stays local and unmerged; GuideKit remains on the stacked platform feature branch.
+
+## Previous platform completion checkpoint — 2026-10-29
 
 Work is on `feat/platform-completion`, stacked on the unmerged `feat/heyclicky-guidance` branch. [Draft PR10](https://github.com/Nithesh8678/guidekit/pull/10) is reviewable; no main merge was performed. See [delivery-plan.md](delivery-plan.md) for scope and acceptance gates.
 
