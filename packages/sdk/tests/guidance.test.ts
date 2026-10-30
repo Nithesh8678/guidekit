@@ -463,6 +463,20 @@ test('pending host work cannot be advanced by a retained typing timer or editing
   } finally { state.restore(); context.mock.timers.reset(); }
 });
 
+test('trusted clicks from nested SVG icons resolve the known HTML control; private and SDK icon ancestry stays excluded', context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] }); const open = new ButtonDouble(), save = new ButtonDouble(); const state = environment([['open', open], ['save', save]]);
+  try {
+    state.session.start();
+    const path = { parentElement: { parentElement: open } } as unknown as ElementDouble;
+    state.fire('click', path); context.mock.timers.tick(0); assert.equal(state.state.index, 1);
+    state.fire('click', { parentElement: { parentElement: save } } as unknown as ElementDouble); assert.equal(state.state.confirmationPending, true);
+    state.session.reportResult('save', { success: true }); assert.equal(state.finishes[0]!.verified, true);
+  } finally { state.restore(); context.mock.timers.reset(); }
+  const privateControl = new ButtonDouble(); privateControl.setAttribute('data-guidekit-private', ''); const privateState = environment([['private', privateControl]]);
+  try { privateState.session.start(); privateState.fire('click', { parentElement: privateControl } as unknown as ElementDouble); assert.equal(privateState.state.confirmationPending, false); }
+  finally { privateState.restore(); }
+});
+
 test('pending host failure preserves retry, pause defers verified scope, and destroy removes the longer deadline', context => {
   context.mock.timers.enable({ apis: ['setTimeout'] }); const open = new ButtonDouble(); const state = environment([['open', open]]);
   try {

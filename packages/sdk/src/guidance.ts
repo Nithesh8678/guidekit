@@ -45,9 +45,18 @@ function validForm(form: HTMLFormElement): boolean {
   // Inspect validity without dispatching the native invalid events from checkValidity().
   return Array.from(form.elements).every(element => !('willValidate' in element) || !(element as HTMLInputElement).willValidate || ((element as HTMLInputElement).validity.valid && element.getAttribute('aria-invalid') !== 'true'));
 }
+function htmlAncestor(target: EventTarget | null): HTMLElement | null {
+  // Icons often dispatch from SVG/path nodes. Resolve only their local ancestry,
+  // never a selector from the model, and retain the original known-control check.
+  let current: EventTarget | null = target;
+  for (let depth = 0; current && depth < 12; depth++) {
+    if (current instanceof HTMLElement) return current;
+    current = 'parentElement' in current ? current.parentElement as EventTarget | null : null;
+  }
+  return null;
+}
 function guideControl(target: EventTarget | null): boolean {
-  const element = target instanceof HTMLElement ? target : target && 'parentElement' in target && target.parentElement instanceof HTMLElement ? target.parentElement : null;
-  return Boolean(element?.closest('[data-guidekit-root]'));
+  return Boolean(htmlAncestor(target)?.closest('[data-guidekit-root]'));
 }
 function pageControl(target: EventTarget | null): target is HTMLElement { return target instanceof HTMLElement && !guideControl(target) && isSafeTarget(target) && enabled(target) && (input(target) || textarea(target) || choice(target) || clickable(target)); }
 
@@ -280,8 +289,7 @@ export class GuidanceSession {
   private onEvent = (event: Event): void => {
     if (!this.running || event.isTrusted === false || guideControl(event.target) || this.hostPending) return;
     if (event.type === 'submit') { this.onSubmit(event); return; }
-    if (!(event.target instanceof HTMLElement)) return;
-    const source = event.target;
+    const source = htmlAncestor(event.target); if (!source) return;
     const matches = this.steps.flatMap((_, index) => { const target = this.safeTarget(index); return target === source || (event.type === 'click' && Boolean(target && clickable(target) && target.contains(source))) ? [index] : []; });
     const index = matches.includes(this.index) ? this.index : matches.sort((left, right) => Math.abs(left - this.index) - Math.abs(right - this.index) || right - left)[0] ?? -1;
     if (index < 0) return;

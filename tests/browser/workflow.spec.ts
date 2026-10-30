@@ -48,7 +48,7 @@ function review() {
  });
  changed(); success('review');
 }
-surface.innerHTML = '<h1>Workflow workbench</h1><button data-guidekit-id="import">Import assets</button><input id="files" type="file" multiple data-guidekit-private hidden><button data-guidekit-id="arrange">Arrange imported assets</button><form id="title-form"><label>Public title field<input data-guidekit-id="title-text" required></label><button data-guidekit-id="title-save" type="submit">Save title</button></form><button data-guidekit-id="review">Review workflow</button><aside><button aria-label="private-original-asset-name.mov">Private asset thumbnail</button></aside>';
+surface.innerHTML = '<h1>Workflow workbench</h1><button data-guidekit-id="import">Import assets</button><input id="files" type="file" multiple data-guidekit-private hidden><button data-guidekit-id="arrange">Arrange imported assets<svg data-test="arrange-icon" width="32" height="32" viewBox="0 0 32 32" aria-hidden="true"><g><path d="M0 0h32v32H0z"/></g></svg></button><form id="title-form"><label>Public title field<input data-guidekit-id="title-text" required></label><button data-guidekit-id="title-save" type="submit">Save title</button></form><button data-guidekit-id="review">Review workflow</button><aside><button aria-label="private-original-asset-name.mov">Private asset thumbnail</button></aside>';
 document.querySelector('[data-guidekit-id="import"]').addEventListener('click', () => {
  pending('import', 'Choose files, then wait for the import to finish…'); document.querySelector('#files').click();
 });
@@ -115,7 +115,7 @@ test('native file choice waits for asynchronous import, continues unchanged cont
   await (await chooser).setFiles([{ name: 'private-first-marker.txt', mimeType: 'text/plain', buffer: Buffer.from('private file one') }, { name: 'private-second-marker.txt', mimeType: 'text/plain', buffer: Buffer.from('private file two') }]);
   await expect(guide(page)).toContainText('Choose files, then wait'); await page.waitForTimeout(3100); expect(requests).toHaveLength(1); expect(await page.evaluate(() => window.workflowFixture.finished)).toEqual([]);
   await page.evaluate(() => window.workflowFixture.releaseImport()); await expect(guide(page)).toContainText('Arrange imported assets'); expect(requests).toHaveLength(2); expect(requests[1]!.page.context.workflow).toMatchObject({ imported: 2, arranged: false });
-  await page.locator('[data-guidekit-id="arrange"]').click(); await expect(guide(page)).toContainText('Review workflow'); expect(requests).toHaveLength(3); expect(requests[2]!.page.context.workflow).toMatchObject({ imported: 2, arranged: true });
+  await page.locator('[data-test="arrange-icon"] path').click(); await expect(guide(page)).toContainText('Review workflow'); expect(requests).toHaveLength(3); expect(requests[2]!.page.context.workflow).toMatchObject({ imported: 2, arranged: true });
   await persist(page, 4); expect(new Set(requests.map(request => request.journey.id)).size).toBe(1); expect(requests[1]!.journey.completed.find(step => step.targetId === 'import')!.evidence).toBe('host_verified');
   expect(JSON.stringify(requests)).not.toMatch(/private-first-marker|private-second-marker|private file one|private-original-asset/); expect(errors).toEqual([]);
 });
