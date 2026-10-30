@@ -59,3 +59,5 @@ Avoid: letters, labels, logos, watermarks, robots, people, stars, particles, neo
 
 Run `npm run check`, `npm run test:e2e`, `npm run test:dashboard` and `npm run test:dashboard:integration`. The account-entry tests use disposable real API/database state; contract and preview tests explicitly intercept API behavior. Desktop/mobile screenshots, keyboard/reduced-motion checks and accessibility scans accompany the integrated landing review. No personal media, account credentials or live inference is needed for this frontend acceptance.
 
+
+Verified locally on 2026-10-30: 190 unit/HTTP/runtime/graph/SDK checks, 50 core browser cases, 27 dashboard/landing contracts and three real API/database integrations passed. Eleven focused landing cases include keyboard, reduced-motion, mobile layouts, no preview runtime calls, and unsuppressed axe WCAG 2/2.1/2.2 AA plus best-practice checks. No violations were returned on the landing page, signup or active preview forms. Automated checks do not establish a complete accessibility certification. Final ignored screenshot evidence is under `.data/evidence/landing-*.png`.
