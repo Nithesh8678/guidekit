@@ -78,14 +78,12 @@ export function Landing({ signedIn, onSignUp, onSignIn, onDashboard }: Props) {
   };
   function preview() {
     setPlayRequest((value) => value + 1);
-    document
-      .getElementById("guidekit-preview")
-      ?.scrollIntoView({
-        behavior: matchMedia("(prefers-reduced-motion: reduce)").matches
-          ? "instant"
-          : "smooth",
-        block: "center",
-      });
+    document.getElementById("guidekit-preview")?.scrollIntoView({
+      behavior: matchMedia("(prefers-reduced-motion: reduce)").matches
+        ? "instant"
+        : "smooth",
+      block: "center",
+    });
   }
   return (
     <div className="gk-landing">
@@ -487,10 +485,10 @@ export function Landing({ signedIn, onSignUp, onSignIn, onDashboard }: Props) {
             <div>
               <Sparkles size={27} aria-hidden="true" />
               <h2 id="last-call-title">
-                Make your product
-                <br />a little more helpful.
+                Give every user
+                <br />a clear next step.
               </h2>
-              <p>Your next great feature might be a guide.</p>
+              <p>Build a guide that feels at home in your product.</p>
             </div>
             <a
               className="landing-button landing-button-white"

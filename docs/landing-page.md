@@ -4,7 +4,7 @@ The public entry page presents GuideKit as the platform. Company applications re
 
 ## Design
 
-Palette: Porcelain `#fbfcff`, Ink `#172b45`, Cornflower `#4a66ef`, Blue mist `#edf2ff`, Slate `#68758b`, and Outline `#e3e8f1`. Sora carries large geometric headings; Instrument Sans handles reading and controls. Both fonts are pinned Fontsource 5.3.0 packages and served locally; their SIL Open Font License notices are shipped under `public/assets/fonts/`.
+Palette: Porcelain `#fbfcff`, Ink `#172b45`, Cornflower `#4a66ef`, Blue mist `#edf2ff`, Slate `#566781`, and Outline `#e3e8f1`. Sora carries large geometric headings; Instrument Sans handles reading and controls. Both fonts are pinned Fontsource 5.3.0 packages and served locally; their SIL Open Font License notices are shipped under `public/assets/fonts/`.
 
 The selected layout pairs a concise left-aligned headline with an actual interactive preview. This gives the product behavior priority over a full-bleed decorative hero. Generated illustrations support the knowledge and setup sections and the account page. Feature rows, a genuine three-step setup sequence, a developer example, FAQ and a single blue final call to action keep the rest of the page quiet.
 
