@@ -5,6 +5,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import type { Server } from 'node:http';
+import { createRequire } from 'node:module';
 import { createApp } from '../../apps/server/src/app';
 import type { JourneyRequest, PageContext } from '../../packages/contracts/src/index';
 import type { GuideKitInstance } from '../../packages/sdk/src/types';
@@ -21,6 +22,8 @@ interface Fixture {
   releaseSave(): void;
   releasePersist(): void;
   failImport(): void;
+  openModal(): void;
+  closeModal(): void;
 }
 declare global { interface Window { workflowFixture: Fixture; } }
 function reference<T>(prompt: string, prefix: string): T { return JSON.parse(prompt.split('\n\n').find(line => line.startsWith(prefix))!.slice(prefix.length)); }
@@ -76,6 +79,18 @@ script.onload = async () => {
 test.beforeAll(async () => {
   assets = await mkdtemp(resolve(tmpdir(), 'guidekit-workflow-assets-')); data = await mkdtemp(resolve(tmpdir(), 'guidekit-workflow-data-'));
   await build({ entryPoints: ['packages/sdk/src/index.ts'], outfile: resolve(assets, 'dist/sdk/guidekit.js'), bundle: true, format: 'iife', target: 'es2022' });
+  const ariaHiddenEntry = process.env.GUIDEKIT_ARIA_HIDDEN_ENTRY || createRequire(import.meta.url).resolve('aria-hidden');
+  const modalScript = await build({ stdin: { contents: `import { hideOthers } from ${JSON.stringify(ariaHiddenEntry)};
+    let undo, modal, background;
+    window.workflowFixture.openModal = () => {
+      const surface = document.querySelector('main');
+      modal = document.createElement('section'); modal.setAttribute('role', 'dialog'); modal.setAttribute('aria-modal', 'true'); modal.setAttribute('aria-label', 'Workflow modal');
+      modal.append(surface); document.body.append(modal);
+      background = document.createElement('aside'); background.id = 'modal-background'; background.textContent = 'Background application'; document.body.append(background);
+      undo = hideOthers(modal);
+    };
+    window.workflowFixture.closeModal = () => { undo(); document.body.prepend(modal.querySelector('main')); modal.remove(); background.remove(); };
+  `, resolveDir: process.cwd(), sourcefile: 'actual-hide-others-fixture.ts' }, bundle: true, format: 'iife', target: 'es2022', write: false });
   service = createApp({ dataDir: data, root: assets, adminOrigins: new Set([endpoint]), testing: true, provider: {
     async status() { return { provider: 'codex', available: true, authenticated: true, message: 'Explicit synthetic workflow planner' }; },
     async infer({ prompt }) {
@@ -89,7 +104,7 @@ test.beforeAll(async () => {
   const owner = service.repo.register({ email: 'workflow@example.invalid', name: 'Workflow owner', companyName: 'Workflow' }, 'synthetic-non-login-hash');
   const agent = service.repo.createAgent(owner.tenant.id, { name: 'Workflow guide', companyName: 'Workflow', greeting: 'How can I help?', description: '', instructions: '', accentColor: '#365cf5', allowedOrigins: [website], allowedActions: [] }); agentId = agent.id;
   service.repo.addDocument(owner.tenant.id, agent.id, { title: 'Workflow guide', content: 'Import assets or save a title, then review and persist. The host verifies intermediate and final operations.' }); service.repo.publish(owner.tenant.id, agent.id);
-  const demo = express(); demo.get('/host.js', (_req, res) => res.type('js').send(host));
+  const demo = express(); demo.get('/host.js', (_req, res) => res.type('js').send(host)); demo.get('/modal.js', (_req, res) => res.type('js').send(modalScript.outputFiles[0]!.text));
   demo.use((_req, res) => { res.set('Content-Security-Policy', `default-src 'self'; script-src 'self' ${endpoint}; connect-src 'self' ${endpoint}; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'`); res.type('html').send('<!doctype html><html lang="en"><head><title>Workflow fixture</title></head><body style="padding:48px;font-family:system-ui"><main></main><script src="/host.js"></script></body></html>'); });
   const listen = (app: ReturnType<typeof express>, port: number) => new Promise<void>((accept, reject) => { const server = app.listen(port, '127.0.0.1', () => accept()); servers.push(server); server.on('error', reject); });
   await listen(service.app, 5110); await listen(demo, 5111);
@@ -153,4 +168,16 @@ test('large explicit workspaces expose at most 160 safe targets and retain the 2
     return window.workflowFixture.assistant.getPageContext();
   });
   expect(bounded.targets).toEqual([]); expect(requests).toHaveLength(0);
+});
+
+test('actual aria-hidden hideOthers retains accessible guidance while application background stays hidden', async ({ page }) => {
+  await start(page, 'Save a title, then review and persist it'); await page.addScriptTag({ url: `${website}/modal.js` });
+  await page.evaluate(() => { const privateArea = document.createElement('aside'); privateArea.id = 'authored-private-area'; privateArea.setAttribute('aria-hidden', 'true'); privateArea.textContent = 'Private application area'; document.body.append(privateArea); window.workflowFixture.openModal(); });
+  await expect(page.locator('#modal-background')).toHaveAttribute('aria-hidden', 'true'); await expect(page.locator('#authored-private-area')).toHaveAttribute('aria-hidden', 'true');
+  await expect(guide(page)).toBeVisible(); await expect(guide(page)).toContainText('Public title field');
+  await expect(page.locator('[data-guidekit-root]')).toHaveAttribute('aria-live', 'off'); expect(await page.locator('[data-guidekit-root]').getAttribute('aria-hidden')).toBeNull();
+  await expect(guide(page).locator('p')).toHaveAttribute('aria-live', 'polite');
+  await guide(page).getByRole('button', { name: 'Pause guide', exact: true }).click(); await expect(guide(page)).toHaveAttribute('data-paused', 'true');
+  await guide(page).getByRole('button', { name: 'Resume guide', exact: true }).click(); await expect(guide(page)).toHaveAttribute('data-paused', 'false');
+  await page.evaluate(() => window.workflowFixture.closeModal()); await expect(guide(page)).toBeVisible(); await expect(page.locator('#authored-private-area')).toHaveAttribute('aria-hidden', 'true'); expect(requests).toHaveLength(1);
 });

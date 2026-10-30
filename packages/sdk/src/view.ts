@@ -128,6 +128,10 @@ export class View {
 
   constructor(private readonly handlers: { open(): void; close(): void; submit(message: string): void; cancel(): void; mic(): void; speaker(): void; guideStep?(text: string, events: SpeechEvents): boolean; guidePause?(): void; guideFinish?(result: GuidanceResult): void; }) {
     this.host.dataset.guidekitRoot = ''; this.host.dataset.guidekitPrivate = '';
+    // aria-hidden's hideOthers (used by Radix) preserves explicit live-region
+    // roots. Keep this owned overlay available; only its authored child regions
+    // announce updates. Never remove application/private aria-hidden attributes.
+    this.host.setAttribute('aria-live', 'off');
     this.shadow = this.host.attachShadow({ mode: 'open' });
     const style = element('style'); style.textContent = styles; this.shadow.append(style);
     this.launcher = button('', 'launcher', handlers.open); this.launcher.append(icon('spark'), element('span', '', 'Ask your assistant')); this.launcher.setAttribute('aria-label', 'Open website assistant');
