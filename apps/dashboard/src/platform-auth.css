@@ -1,6 +1,6 @@
 .platform-auth {
   --auth-ink:#18294c;
-  --auth-muted:#677891;
+  --auth-muted:#566781;
   --auth-blue:#3465f5;
   display:grid;
   grid-template-columns:minmax(360px,.93fr) minmax(0,1.07fr);
@@ -50,7 +50,7 @@
 .platform-auth-story-copy>p {
   font-size:16px;
   line-height:1.7;
-  color:#617692;
+  color:#566781;
   max-width:330px;
   margin-top:22px;
 }
@@ -102,7 +102,7 @@
   color:#5b708f;
 }
 .platform-auth-foot {
-  color:#68809d;
+  color:#566781;
   font-size:11px;
   margin-top:12px;
 }
@@ -117,7 +117,7 @@
   display:inline-flex;
   align-items:center;
   gap:8px;
-  color:#687b96;
+  color:#566781;
   font-size:12px;
   text-decoration:none;
 }
@@ -188,7 +188,7 @@
   box-shadow:0 2px 3px rgba(28,52,93,.025);
 }
 .platform-auth input::placeholder {
-  color:#96a5ba;
+  color:#566781;
   font-size:13px;
 }
 .platform-auth input:hover:not(:disabled) {
@@ -205,7 +205,7 @@
 .platform-auth label small {
   font-size:11px;
   line-height:1.55;
-  color:#7a8ba3;
+  color:#566781;
   font-weight:400;
   margin-top:1px;
 }
@@ -240,7 +240,7 @@
 .auth-switch {
   font-size:12px;
   text-align:center;
-  color:#7889a1;
+  color:#566781;
   margin-top:24px;
   line-height:1.7;
 }
@@ -255,7 +255,7 @@
   text-underline-offset:3px;
 }
 .platform-auth .auth-note {
-  color:#8b99ac;
+  color:#566781;
   text-align:center;
   font-size:10px;
   line-height:1.7;
@@ -276,7 +276,7 @@
   justify-content:space-between;
   gap:15px;
   font-size:10px;
-  color:#8d9bb0;
+  color:#566781;
   padding-top:10px;
 }
 .platform-auth :is(a,button):focus-visible,.platform-compact-auth :is(a,button):focus-visible {
