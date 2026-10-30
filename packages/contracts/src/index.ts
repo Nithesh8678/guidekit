@@ -32,7 +32,7 @@ export const actionDescriptorSchema = z.object({
 }).strict();
 export const pageContextSchema = z.object({
   url: z.string().url().max(1800), title: z.string().max(200),
-  targets: z.array(pageTargetSchema).max(80),
+  targets: z.array(pageTargetSchema).max(160),
   actions: z.array(actionDescriptorSchema).max(30),
   context: z.record(z.string(), z.unknown()).default({})
 }).strict();

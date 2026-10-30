@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile, cp, rm } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 
-const SDK_VERSION = '0.2.0-alpha.1';
+const SDK_VERSION = '0.3.0-alpha.1';
 export async function buildSDK() {
   const output = resolve('dist/sdk'), packageDir = resolve('dist/sdk-package');
   await mkdir(output, { recursive: true });
@@ -14,7 +14,7 @@ export async function buildSDK() {
   const release = createHash('sha256').update(script).update(module).digest('hex').slice(0, 24), releaseDir = join(output, 'releases', release);
   await mkdir(releaseDir, { recursive: true });
   for (const file of ['guidekit.js', 'guidekit.mjs']) await cp(join(output, file), join(releaseDir, file));
-  const manifest = { version: SDK_VERSION, release, capabilities: { apiVersion: 1, explicitTargets: true, adaptiveJourneys: true }, script: { path: `/sdk/releases/${release}/guidekit.js`, integrity: `sha384-${createHash('sha384').update(script).digest('base64')}` }, module: { path: `/sdk/releases/${release}/guidekit.mjs`, integrity: `sha384-${createHash('sha384').update(module).digest('base64')}` } };
+  const manifest = { version: SDK_VERSION, release, capabilities: { apiVersion: 1, explicitTargets: true, adaptiveJourneys: true, hostWorkflowProgress: true }, script: { path: `/sdk/releases/${release}/guidekit.js`, integrity: `sha384-${createHash('sha384').update(script).digest('base64')}` }, module: { path: `/sdk/releases/${release}/guidekit.mjs`, integrity: `sha384-${createHash('sha384').update(module).digest('base64')}` } };
   await writeFile(join(output, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
   await writeFile(join(releaseDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
   await rm(packageDir, { recursive: true, force: true }); await mkdir(join(packageDir, 'dist'), { recursive: true });
