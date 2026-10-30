@@ -29,6 +29,30 @@ Add two short documents to a test agent: **Invoice routing** with `Invoice quest
 
 The same SDK works on the support website with a separately configured support agent and its own knowledge, origins and `create_ticket` action. Test it after the CRM flow; the core platform is independent of either host.
 
+## Multi-stage workflow checks
+
+Use a disposable host/workspace for these checks. Install the pinned SDK 0.3 candidate and verify the trusted manifest and runtime both advertise `hostWorkflowProgress: true`. For a dense application, confirm the relevant reviewed controls occur within the snapshot's 160-safe-target/2,000-candidate bounds. A host with private filenames or document labels should use explicit targets and generic public labels; never solve a missing target by sharing media or full page text.
+
+1. Ask for a goal that crosses several stages. Click an icon-centered tool button and confirm its SVG/path click advances the known control. Open the next panel or SPA route; the next instructions should use the newly visible controls while retaining the original goal.
+2. Start a native picker/import. The host must report `{ status: 'pending' }` before opening the picker or starting asynchronous work. Keep it pending for a few seconds. The compact card should show the host's waiting message, no new model request should run, and no successful completion should appear. The SDK must not receive filenames, file bytes or file-input values. Cancel the picker and have the host report failure: the step should remain retryable without an automatic business-operation retry.
+3. Complete and independently verify the import. Have the host report `{ success: true, scope: 'step' }`. A continuing plan should proceed into another stage, including when visible controls keep the same IDs/labels. The host signals that case through public workflow state and `setContext(context, { revision })`. Playback position, ordinary typing and geometry changes must not generate requests per change.
+4. Try a different branch, such as text → style → duration → save → review. A native intermediate form save needs explicit `scope: 'step'` to continue. Hold its actual host request in flight: drafts and clicks alone must not be treated as saved output. Verify persisted application state after the response, then continue. The ordinary CRM final submit with scope omitted must still finish, even if a planner incorrectly asks to continue.
+5. Finish a final save/export and verify its persisted result or actual artifact separately. A host's verified final/done step or explicit `scope: 'goal'` can finish verified. A planner's no-step `done` answer is informational; it must not invent a host verification event. Inspect the saved state/download rather than treating assistant prose as proof.
+6. During pending work, try Pause, Open chat, Resume and Escape. A paused guide must not advance. Escape/destroy must discard late host results and obsolete model responses. An unanswered pending deadline ends unverified, without retrying the operation. Explicit waits default to 120 active seconds, accept integer `timeoutMs` from 1,000–300,000, and cannot be extended by repeated pending reports. The ordinary unextended confirmation window remains 30 seconds.
+7. In a Radix-style dialog, keep a native control focused and use the accessible Pause/Resume guidance buttons. The dialog should stay open, its focus trap should remain active, and private/background `aria-hidden` attributes should stay intact. Then click an ordinary outside area and check the application's normal dismissal still works. The SDK's owned `aria-live="off"` root preserves its accessibility through `hideOthers`; the host may also need a narrowly scoped outside-interaction exception. Native HTML `<dialog>` top-layer behavior needs a separate adapter and is not covered by this exemption.
+
+Hosts can opt into longer bounded journeys with `journey: { maxContinuations: 12 }`, using an integer from 1 through 24; the default is six. A limit should surface honest recovery instead of silently looping. Reload resume remains a separate opt-in/consent feature and stores no field values or semantic revision.
+
+The generic SDK acceptance suite uses real Chromium and HTTP with explicit synthetic inference, generated disposable files and independently checked host persistence:
+
+```sh
+node --import tsx --test packages/sdk/tests/*.test.ts
+npx playwright test --config tests/browser/journey.config.ts
+npx playwright test --config tests/browser/workflow.config.ts
+```
+
+Run the browser commands sequentially. Journey fixtures use loopback ports 4610–4611; workflow fixtures use 5110–5111 and the actual installed `aria-hidden` library for the modal regression. These tests cover branches, pending/failure/cancel behavior, scope-specific native saves, semantic context, nested SVG clicks, privacy and discovery bounds. They do not call a real model or prove arbitrary task planning quality. Cutroom's separate `tests/browser/guidekit-workflows.spec.ts` exercises its actual local command/job APIs, persisted transitions/titles and generated export artifacts with a synthetic planner. A successful synthetic integration run is distinct from a completed new real-model Cutroom walkthrough, physical voice testing or a public deployment.
+
 ## Platform and recovery checks
 
 - Edit a knowledge document, save it, and inspect an earlier version in Install. Its source text must stay frozen. Use Knowledge → Test published knowledge to preview matching sources without a model call; temporary expected-document cases measure retrieval only.
@@ -37,6 +61,6 @@ The same SDK works on the support website with a separately configured support a
 - Install supplies a content-hash script URL, integrity and anonymous crossorigin. Copy the complete snippet into the installation lab. An altered integrity value must fail to load. Keep a prior release path for host rollback.
 - Activity shows real request outcomes plus workspace request capacity and aggregate per-agent durations. Development speech/model fixtures are explicitly separate from live checks.
 - Follow [operations.md](operations.md) for online backup, private archive verification, guarded offline restore and history retention. Test restore into a new disposable directory; never experiment on your only live copy.
-- Cutroom's separately committed `feat/guidekit-integration` branch has an opt-in connection in Provider and privacy settings. Follow that checkout's `docs/guidekit-integration.md`; its temporary demo on port 5373 uses a separate workspace and does not open your existing media.
+- Cutroom has an opt-in connection in Provider and privacy settings. Follow the selected checkout's `docs/guidekit-integration.md` and its workflow tests; run fixtures with a separate workspace and generated media. Its isolated browser fixture can use port 5373 without opening your existing projects. A released SDK bundle, synthetic host acceptance and a live real-model workflow are separate checks.
 
 Automated checks: `npm run check`, `npm run test:e2e`, `npm run test:dashboard`, and `npm run test:dashboard:integration`. Run browser suites sequentially because some share fixture ports. The optional `npm run test:live` uses the local subscription; `npm run test:graph` checks the configured real graph with synthetic scopes. Physical speech quality, real input methods and packaged-device behavior remain separate human/device checks.
