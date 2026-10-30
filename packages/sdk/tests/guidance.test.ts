@@ -452,6 +452,17 @@ test('pending deadlines are bounded, repeated pending does not extend the active
   } finally { state.restore(); context.mock.timers.reset(); }
 });
 
+test('pending host work cannot be advanced by a retained typing timer or editing an earlier field', context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] }); const name = new InputDouble(), company = new InputDouble(); const state = environment([['name', name], ['company', company], ['save', new ButtonDouble()]]);
+  try {
+    state.session.start(); name.value = 'Synthetic name'; state.fire('input', name); context.mock.timers.tick(1200);
+    company.value = 'Synthetic company'; state.fire('input', company); context.mock.timers.tick(600);
+    state.session.reportResult('company', { status: 'pending' }); state.fire('focusin', name); state.fire('input', name); context.mock.timers.tick(6000);
+    assert.equal(state.state.index, 1); assert.equal(state.state.hostPending, true); assert.equal(state.finishes.length, 0);
+    state.session.reportResult('company', { success: true, scope: 'step' }); assert.equal(state.state.index, 2);
+  } finally { state.restore(); context.mock.timers.reset(); }
+});
+
 test('pending host failure preserves retry, pause defers verified scope, and destroy removes the longer deadline', context => {
   context.mock.timers.enable({ apis: ['setTimeout'] }); const open = new ButtonDouble(); const state = environment([['open', open]]);
   try {

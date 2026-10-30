@@ -127,6 +127,7 @@ export class GuidanceSession {
     if ('status' in result) {
       if (index !== this.index || result.status !== 'pending' || result.timeoutMs !== undefined && (!Number.isInteger(result.timeoutMs) || result.timeoutMs < 1000 || result.timeoutMs > 300000)) return;
       this.cancelStepTimer(); this.submitted = null; this.clicked = null; this.deferredResult = null;
+      this.forgetObservation(this.index);
       if (!this.hostPending) { this.clearConfirmationTimer(); this.confirmationTimeout = result.timeoutMs ?? 120000; }
       this.hostPending = true; this.waitingForResult = true; this.failure = '';
       this.hostMessage = result.message?.trim().slice(0, 240) || 'The website is working. I’ll wait for its confirmation…';
@@ -142,6 +143,7 @@ export class GuidanceSession {
       this.failure = result.message?.trim().slice(0, 240) || 'The website could not complete that action. Try again.';
       this.refresh(); return;
     }
+    this.hostPending = false; this.hostMessage = ''; this.confirmationTimeout = confirmationMs;
     if (index === this.steps.length - 1 || result.scope === 'goal') { this.recordCompletion(index, 'host_verified'); this.finish({ reason: 'completed', verified: true, message: result.message?.trim().slice(0, 240) || 'The website confirmed the result.', ...(result.scope ? { scope: result.scope } : {}) }); return; }
     this.complete('host_verified');
   }
@@ -276,7 +278,7 @@ export class GuidanceSession {
   }
 
   private onEvent = (event: Event): void => {
-    if (!this.running || event.isTrusted === false || guideControl(event.target)) return;
+    if (!this.running || event.isTrusted === false || guideControl(event.target) || this.hostPending) return;
     if (event.type === 'submit') { this.onSubmit(event); return; }
     if (!(event.target instanceof HTMLElement)) return;
     const source = event.target;
@@ -285,7 +287,6 @@ export class GuidanceSession {
     if (index < 0) return;
     if ((event.type === 'focusin' || event.type === 'input') && index < this.index) this.move(index, false);
     const target = this.safeTarget(index); if (!target || !enabled(target)) return;
-    if (this.hostPending) return;
     if (event.type === 'focusin') { if (index === this.index) { this.cancelStepTimer(); this.resumeObservation(); } return; }
     if (event.type === 'compositionstart') { this.composing.add(target); this.forgetObservation(index); if (index === this.index) this.cancelStepTimer(); return; }
     if (event.type === 'compositionend') {

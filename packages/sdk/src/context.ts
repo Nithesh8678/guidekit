@@ -73,7 +73,7 @@ export class ContextCollector {
       if (id) explicitCounts.set(id, (explicitCounts.get(id) ?? 0) + 1);
     }
     for (const element of candidates) {
-      if (targets.length >= 80) break;
+      if (targets.length >= 160) break;
       if (!isSafeTarget(element)) continue;
       const label = publicLabel(labelFor(element)).slice(0, 160); if (!label) continue;
       const explicit = element.getAttribute('data-guidekit-id');
