@@ -48,7 +48,7 @@ async function fixture(page: Page, options: { pending?: boolean; legacy?: boolea
     else { status = 404; body = { error: `Unhandled contract fixture path ${method} ${path}` }; }
     await route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
   });
-  await page.goto('/'); await expect(page.getByRole('heading', { name: config.name, exact: true })).toBeVisible();
+  await page.goto('/#dashboard'); await expect(page.getByRole('heading', { name: config.name, exact: true })).toBeVisible();
   return { requests, failRetrieval() { retrievalFails = true; }, failDiagnostics() { diagnosticsFail = true; }, completeCandidate() { versions[1]!.status = 'ready'; agent.publishedVersion = 2; } };
 }
 
@@ -115,4 +115,49 @@ test('installation pins a reviewed manifest with integrity and usage distinguish
 
 test('an incompatible SDK manifest clearly falls back to the unversioned development alias', async ({ page }) => {
   await fixture(page, { manifest: 'invalid' }); await page.getByRole('tab', { name: 'Install', exact: true }).click(); await expect(page.getByText('Development alias: unversioned SDK.', { exact: false })).toBeVisible(); await expect(page.locator('pre code')).toContainText('http://127.0.0.1:4640/sdk/guidekit.js'); await expect(page.locator('pre code')).not.toContainText('example.invalid'); await expect(page.locator('pre code')).not.toContainText('integrity=');
+});
+
+test('direct invitation waits for initial authentication before it can create or switch an account', async ({ page }) => {
+  const token = 'I'.repeat(43), calls: string[] = [];
+  let releaseAuth!: () => void;
+  const authReady = new Promise<void>(resolve => { releaseAuth = resolve; });
+  const workspace = { user: { id: 'usr_delayed_invitee', name: 'Delayed Invitee', email: 'invitee@example.test', emailVerified: true }, tenant: { id: 'org_inviting', name: 'Inviting Workspace' }, role: 'viewer' };
+  await page.route('**/api/**', async route => {
+    const path = new URL(route.request().url()).pathname; calls.push(path);
+    let body: unknown;
+    if (path === '/api/auth/me') { await authReady; body = { workspace: null }; }
+    else if (path === '/api/auth/invitations/preview') body = { email: 'invitee@example.test', companyName: 'Inviting Workspace', role: 'viewer' };
+    else if (path === '/api/auth/invitations/accept') body = { workspace };
+    else if (path === '/api/agents') body = { agents: [] };
+    else if (path === '/api/runtime/status') body = { provider: 'codex', available: false, authenticated: false, message: 'Explicit delayed-auth contract fixture.' };
+    else throw new Error(`Unexpected delayed-auth fixture request ${path}`);
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
+  });
+  try {
+    await page.goto(`/#account/invite?token=${token}`);
+    await expect(page.getByText('Opening your workspace…', { exact: true })).toBeVisible();
+    await expect.poll(() => calls.filter(path => path === '/api/auth/me').length).toBeGreaterThan(0);
+    await expect(page.getByRole('dialog', { name: 'Workspace invitation', exact: true })).toHaveCount(0);
+    expect(calls.some(path => path.startsWith('/api/auth/invitations/'))).toBe(false);
+    releaseAuth();
+    const invitation = page.getByRole('dialog', { name: 'Workspace invitation', exact: true });
+    await invitation.getByLabel('Your name', { exact: true }).fill('Delayed Invitee');
+    await invitation.getByLabel('New account password', { exact: true }).fill('Synthetic-delayed-invite-password-42');
+    await invitation.getByRole('button', { name: 'Create account and join', exact: true }).click();
+    await expect(page).toHaveURL(/#dashboard$/);
+    await expect(page.getByText('You have viewer access.', { exact: false })).toBeVisible();
+    await expect(page.locator('.workspace-label')).toContainText('Inviting Workspace');
+    await expect(invitation).toHaveCount(0);
+  } finally { releaseAuth(); }
+});
+
+test('public website stays available while the initial authentication check is pending', async ({ page }) => {
+  let releaseAuth!: () => void;
+  const authReady = new Promise<void>(resolve => { releaseAuth = resolve; });
+  await page.route('**/api/auth/me', async route => { await authReady; await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ workspace: null }) }); });
+  try {
+    await page.goto('/');
+    await expect(page.getByRole('link', { name: 'Build your guide', exact: true }).first()).toBeVisible();
+    await expect(page.getByText('Opening your workspace…', { exact: true })).toHaveCount(0);
+  } finally { releaseAuth(); }
 });

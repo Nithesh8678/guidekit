@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 
 test('real dashboard and local API preserve immutable releases, roll back safely, and stop only new sessions on unpublish', async ({ page }) => {
   const browserErrors: string[] = []; page.on('pageerror', error => browserErrors.push(error.message)); page.on('dialog', dialog => dialog.accept());
-  await page.goto('/');
+  await page.goto('/#signup');
   await page.getByLabel('Your name', { exact: true }).fill('Dashboard Integration Tester');
   await page.getByLabel('Company name', { exact: true }).fill('Synthetic Release Workspace');
   await page.getByLabel('Email address').fill(`dashboard-${crypto.randomUUID()}@example.test`);
@@ -53,7 +53,7 @@ test('real dashboard and local API preserve immutable releases, roll back safely
 test('real account controls update profile, preserve failed password entry, revoke other sessions and manage local invitations', async ({ page, playwright }) => {
   const email = `account-${crypto.randomUUID()}@example.test`, current = 'Synthetic-account-current-42', next = 'Synthetic-account-updated-42';
   const errors: string[] = []; page.on('pageerror', error => errors.push(error.message)); page.on('dialog', dialog => dialog.accept());
-  await page.goto('/'); await page.getByLabel('Your name', { exact: true }).fill('Account Browser Tester'); await page.getByLabel('Company name', { exact: true }).fill('Synthetic Account Workspace'); await page.getByLabel('Email address').fill(email); await page.getByLabel('Password').fill(current); await page.getByRole('button', { name: 'Create workspace', exact: true }).click();
+  await page.goto('/#signup'); await page.getByLabel('Your name', { exact: true }).fill('Account Browser Tester'); await page.getByLabel('Company name', { exact: true }).fill('Synthetic Account Workspace'); await page.getByLabel('Email address').fill(email); await page.getByLabel('Password').fill(current); await page.getByRole('button', { name: 'Create workspace', exact: true }).click();
   await page.getByRole('button', { name: 'Account & team', exact: true }).click(); const dialog = page.getByRole('dialog', { name: 'Account & team', exact: true });
   await dialog.getByLabel('Your name', { exact: true }).fill('Updated Browser Tester'); await dialog.getByRole('button', { name: 'Save profile', exact: true }).click(); await expect(dialog.getByText('Profile updated.', { exact: true })).toBeVisible();
   await dialog.getByLabel('Current password', { exact: true }).fill('wrong-password'); await dialog.getByLabel('New password', { exact: true }).fill(next); await dialog.getByLabel('Confirm new password', { exact: true }).fill(next); await dialog.getByRole('button', { name: 'Change password', exact: true }).click(); await expect(dialog.getByText('Current password is incorrect.', { exact: false })).toBeVisible(); await expect(dialog.getByLabel('New password', { exact: true })).toHaveValue(next);
@@ -67,4 +67,57 @@ test('real account controls update profile, preserve failed password entry, revo
     await dialog.getByRole('button', { name: `Revoke invitation for ${inviteEmail}`, exact: true }).click(); await expect(dialog.getByText(inviteEmail, { exact: true })).toHaveCount(0); await dialog.getByRole('tab', { name: 'Security activity', exact: true }).click(); await expect(dialog.getByText('workspace invited', { exact: true })).toBeVisible(); await expect(dialog.getByText('workspace invitation revoked', { exact: true })).toBeVisible();
     await page.setViewportSize({ width: 390, height: 844 }); expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true); await dialog.getByRole('button', { name: 'Close account', exact: true }).click(); await expect(page.locator('.sidebar-user')).toContainText('Updated Browser Tester'); expect(errors).toEqual([]);
   } finally { await other.dispose(); }
+});
+
+test('real platform entry keeps the website public and completes registration, sign-out, protected entry and login', async ({ page, context }) => {
+  const email = `platform-${crypto.randomUUID()}@example.test`, password = 'Synthetic-platform-entry-42';
+  const errors: string[] = []; page.on('pageerror', error => errors.push(error.message));
+  await page.goto('/');
+  await expect(page.getByRole('button', { name: 'Create workspace', exact: true })).toHaveCount(0);
+  await page.getByRole('link', { name: 'Build your guide', exact: true }).first().click();
+  await expect(page).toHaveURL(/#signup$/);
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await expect(page.getByRole('heading', { name: 'Let’s build your guide.', exact: true })).toBeVisible();
+  await page.getByLabel('Your name', { exact: true }).fill('Platform Entry Tester');
+  await page.getByLabel('Company name', { exact: true }).fill('Synthetic Platform Workspace');
+  await page.getByLabel('Email address', { exact: true }).fill(email);
+  await page.getByLabel('Password', { exact: true }).fill(password);
+  await page.getByRole('button', { name: 'Create workspace', exact: true }).click();
+  await expect(page).toHaveURL(/#dashboard$/);
+  await expect(page.getByRole('button', { name: 'Create your first agent', exact: true })).toBeVisible();
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const me = await (await context.request.get('/api/auth/me')).json();
+  expect(me.workspace.tenant.name).toBe('Synthetic Platform Workspace');
+  // History returns to the public website even with a valid authenticated session.
+  await page.goBack();
+  await expect(page).not.toHaveURL(/#dashboard$/);
+  await expect(page.getByRole('link', { name: 'Open dashboard', exact: true }).first()).toBeVisible();
+  await page.goForward();
+  await expect(page).toHaveURL(/#dashboard$/);
+  await page.goBack();
+  await expect(page.getByRole('link', { name: 'Open dashboard', exact: true }).first()).toBeVisible();
+  await page.getByRole('link', { name: 'Open dashboard', exact: true }).first().click();
+  await expect(page).toHaveURL(/#dashboard$/);
+  await page.locator('.sidebar-user').click();
+  await expect(page).not.toHaveURL(/#dashboard$/);
+  expect((await (await context.request.get('/api/auth/me')).json()).workspace).toBeNull();
+  expect((await context.request.get('/api/agents')).status()).toBe(401);
+  await page.goto('/#dashboard');
+  await expect(page).toHaveURL(/#login$/);
+  await expect(page.getByRole('heading', { name: 'Good to see you again.', exact: true })).toBeVisible();
+  // A failed sign-in must preserve entered data for correction.
+  await page.getByLabel('Email address', { exact: true }).fill(email);
+  await page.getByLabel('Password', { exact: true }).fill('Incorrect-password-42');
+  await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+  await expect(page.getByRole('alert')).toBeVisible();
+  await expect(page.getByLabel('Email address', { exact: true })).toHaveValue(email);
+  await page.getByLabel('Password', { exact: true }).fill(password);
+  await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+  await expect(page).toHaveURL(/#dashboard$/);
+  await page.goto('/#product');
+  await expect(page.getByRole('link', { name: 'Open dashboard', exact: true }).first()).toBeVisible();
+  await page.goto('/#dashboard');
+  await expect(page.getByRole('button', { name: 'Create your first agent', exact: true })).toBeVisible();
+  expect(errors).toEqual([]);
 });

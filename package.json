@@ -26,6 +26,8 @@
     "test:dashboard:integration": "playwright test --config apps/dashboard/playwright.integration.config.ts"
   },
   "dependencies": {
+    "@fontsource-variable/instrument-sans": "5.3.0",
+    "@fontsource-variable/sora": "5.3.0",
     "@node-rs/argon2": "2.0.2",
     "express": "5.1.0",
     "express-rate-limit": "8.7.1",
@@ -37,6 +39,7 @@
     "zod": "4.6.7"
   },
   "devDependencies": {
+    "@axe-core/playwright": "4.13.0",
     "@playwright/test": "1.63.0",
     "@types/express": "5.0.6",
     "@types/express-session": "1.19.0",
