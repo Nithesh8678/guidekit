@@ -158,9 +158,9 @@ export function LandingDemo({ playRequest = 0 }: { playRequest?: number }) {
         <div className="ld-sidebar-bottom"><HelpCircle size={13} /><span>Help & support</span><span className="ld-user-avatar">JL</span></div>
       </aside>
 
-      <main className="ld-main">
+      <div className="ld-main">
         <div className="ld-topline"><span>Workspace <span>/</span> Contacts</span><span className="ld-top-avatar">JL</span></div>
-        <div className="ld-page-heading"><div><h3>Contacts</h3><p>A little closer to your people.</p></div><button type="button" ref={newRef} className="ld-new-button" disabled={active && stage !== 'new'} onClick={() => { setFormOpen(true); if (stage === 'new' || !active) setStage('name'); }}><Plus size={12} /><span>New contact</span></button></div>
+        <div className="ld-page-heading"><div><h2>Contacts</h2><p>A little closer to your people.</p></div><button type="button" ref={newRef} className="ld-new-button" disabled={active && stage !== 'new'} onClick={() => { setFormOpen(true); if (stage === 'new' || !active) setStage('name'); }}><Plus size={12} /><span>New contact</span></button></div>
         <div className="ld-table-toolbar"><span className="ld-view-tab">All contacts <span>{savedName ? 5 : 4}</span></span><span className="ld-search"><Search size={12} /><span>Search contacts</span></span><MoreHorizontal size={15} /></div>
         <div className="ld-table" role="table" aria-label="Fictional contacts">
           <div className="ld-table-row ld-table-head" role="row"><span className="ld-checkbox" aria-hidden="true" /><span role="columnheader">Name <ArrowDown size={10} /></span><span role="columnheader" className="ld-company">Company</span><span role="columnheader" className="ld-status">Status</span></div>
@@ -171,13 +171,13 @@ export function LandingDemo({ playRequest = 0 }: { playRequest?: number }) {
         <div className="ld-list-footer"><span>{savedName ? '5' : '4'} people. Plenty of possibilities.</span><span>1 of 1</span></div>
 
         {formOpen && <div className="ld-form-backdrop"><form className="ld-contact-form" onSubmit={addContact} aria-label="Add a fictional contact">
-          <div className="ld-form-heading"><div><span className="ld-form-icon"><Users size={17} /></span><h4>New contact</h4></div><button type="button" aria-label="Close preview contact form" onClick={stop}><X size={16} /></button></div>
+          <div className="ld-form-heading"><div><span className="ld-form-icon"><Users size={17} /></span><h3>New contact</h3></div><button type="button" aria-label="Close preview contact form" onClick={stop}><X size={16} /></button></div>
           <p>Good conversations start with a name.</p>
           <label htmlFor="ld-contact-name">Full name</label><input id="ld-contact-name" ref={nameRef} value={name} maxLength={40} onChange={(event) => { setName(event.target.value); if (stage === 'save' && !event.target.value.trim()) setStage('name'); }} onBlur={() => { if (stage === 'name' && name.trim()) setStage('save'); }} placeholder="e.g. Jamie Morgan" autoComplete="off" required />
           <div className="ld-form-note">Just a preview. No real contact is created.</div>
           <div className="ld-form-actions"><button type="button" onClick={stop}>Cancel</button><button type="submit" ref={saveRef} className="ld-save-button">Save contact</button></div>
         </form></div>}
-      </main>
+      </div>
     </div>
 
     {chatOpen && <div className={`ld-chat ${stage === 'complete' ? 'ld-chat-complete' : ''} ${active ? 'ld-chat-collapsed' : ''}`} inert={active} aria-hidden={active} onTransitionEnd={measure}>
