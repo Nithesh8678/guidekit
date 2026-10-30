@@ -426,3 +426,44 @@ test('grounding observes semantic attribute and text changes, not only layout mu
     for (const name of ['aria-label', 'aria-labelledby', 'role', 'title', 'placeholder', 'name', 'id', 'autocomplete', 'type']) assert.equal(options.attributeFilter?.includes(name), true, `Missing semantic observation: ${name}`);
   } finally { state.restore(); }
 });
+
+test('an async host operation suspends ordinary click advancement and waits without capturing a native file input', context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const open = new ButtonDouble(), next = new ButtonDouble(); const state = environment([['open', open], ['next', next]]);
+  try {
+    state.session.start(); state.fire('click', open);
+    state.session.reportResult('open', { status: 'pending', message: 'Waiting for your selection and import…' });
+    open.visible = false; state.mutate(); context.mock.timers.tick(60000);
+    assert.equal(state.state.index, 0); assert.equal(state.state.hostPending, true); assert.match(state.state.hint, /selection and import/); assert.equal(state.finishes.length, 0);
+    state.session.reportResult('open', { success: true, scope: 'step' }); assert.equal(state.state.index, 1); assert.equal(state.state.hostPending, false);
+    state.session.reportResult('next', { success: true, scope: 'goal', message: 'The requested operation was verified.' });
+    assert.deepEqual(state.finishes, [{ reason: 'completed', verified: true, scope: 'goal', message: 'The requested operation was verified.' }]);
+  } finally { state.restore(); context.mock.timers.reset(); }
+});
+
+test('pending deadlines are bounded, repeated pending does not extend the active budget, and timeout never verifies success', context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] }); const state = environment([['open', new ButtonDouble()]]);
+  try {
+    state.session.start(); state.session.reportResult('unknown', { status: 'pending' }); assert.equal(state.state.hostPending, false);
+    state.session.reportResult('open', { status: 'pending', timeoutMs: 300001 }); assert.equal(state.state.hostPending, false);
+    state.session.reportResult('open', { status: 'pending' }); context.mock.timers.tick(119999); assert.equal(state.finishes.length, 0);
+    state.session.reportResult('open', { status: 'pending', timeoutMs: 300000 }); context.mock.timers.tick(1);
+    assert.equal(state.finishes[0]!.verified, false); assert.match(state.finishes[0]!.message!, /has not confirmed/);
+  } finally { state.restore(); context.mock.timers.reset(); }
+});
+
+test('pending host failure preserves retry, pause defers verified scope, and destroy removes the longer deadline', context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] }); const open = new ButtonDouble(); const state = environment([['open', open]]);
+  try {
+    state.session.start(); state.session.reportResult('open', { status: 'pending', timeoutMs: 1000 });
+    state.session.reportResult('open', { success: false, message: 'No files were selected. Try again.' });
+    assert.equal(state.state.waiting, false); assert.equal(state.state.hostPending, false); assert.match(state.state.hint, /No files/);
+    state.fire('click', open); state.session.reportResult('open', { status: 'pending', timeoutMs: 300000 }); state.session.setPaused(true);
+    context.mock.timers.tick(400000); assert.equal(state.finishes.length, 0);
+    state.session.reportResult('open', { success: true, scope: 'step' }); state.session.setPaused(false);
+    assert.equal(state.finishes[0]!.scope, 'step'); assert.equal(state.finishes[0]!.verified, true);
+  } finally { state.restore(); context.mock.timers.reset(); }
+  context.mock.timers.enable({ apis: ['setTimeout'] }); const cancelled = environment([['open', new ButtonDouble()]]);
+  try { cancelled.session.start(); cancelled.session.reportResult('open', { status: 'pending' }); cancelled.session.destroy(); context.mock.timers.tick(400000); assert.deepEqual(cancelled.finishes, [{ reason: 'stopped', verified: false }]); assert.equal(cancelled.doc.listenerCount, 0); }
+  finally { cancelled.restore(); context.mock.timers.reset(); }
+});

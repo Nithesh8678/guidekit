@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { JourneyCoordinator, parseJourneyMemory, type JourneyPlan, type JourneyRequest } from '../src/journey';
+import { continuationLimit, JourneyCoordinator, parseJourneyMemory, semanticRevision, type JourneyPlan, type JourneyRequest } from '../src/journey';
 import type { PageContext, RunResult } from '../../contracts/src/index';
 
 const page = (ids = ['open'], url = 'https://host.test/app'): PageContext => ({ url, title: 'Product', targets: ids.map(id => ({ id, label: id, role: 'button' })), actions: [], context: {} });
@@ -49,7 +49,7 @@ test('host confirmation suspends an already queued continuation and rejects an o
     context.mock.timers.tick(5000); assert.equal(request, undefined);
     journey.setAwaitingHost(false); context.mock.timers.tick(750); assert.equal(signal.aborted, false);
     journey.setAwaitingHost(true); assert.equal(signal.aborted, true); release(plan(page(['loading']), request)); await settled(); assert.equal(rendered, 0);
-    assert.equal(journey.segmentFinished({ reason: 'completed', verified: true }), false); assert.equal(journey.active, false);
+    assert.equal(journey.segmentFinished({ reason: 'completed', verified: true }, true), false); assert.equal(journey.active, false);
   } finally { journey.cancel(); context.mock.timers.reset(); }
 });
 test('cancel and superseding generations discard delayed inference responses', async context => {
@@ -76,9 +76,55 @@ test('step memory is bounded and excludes field values, labels, URLs, session to
   } finally { state.journey.cancel(); }
 });
 test('verified completion and explicit Finish/unknown save outcomes never trigger automatic retries', () => {
-  for (const result of [{ reason: 'completed' as const, verified: true }, { reason: 'completed' as const, verified: false, message: 'Guide ended without a confirmed website result.' }, { reason: 'completed' as const, verified: false, message: 'The website has not confirmed the result. Check the website before trying again.' }]) {
+  for (const result of [{ reason: 'completed' as const, verified: true, scope: 'goal' as const }, { reason: 'completed' as const, verified: false, message: 'Guide ended without a confirmed website result.' }, { reason: 'completed' as const, verified: false, message: 'The website has not confirmed the result. Check the website before trying again.' }]) {
     const state = fixture(); assert.equal(state.journey.segmentFinished(result), false); assert.equal(state.journey.active, false); assert.equal(state.requests.length, 0);
   }
+});
+
+test('verified intermediate segments continue with the same goal; done and legacy native-submit boundaries remain terminal', async context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] }); const state = fixture();
+  try {
+    state.journey.setAwaitingHost(true);
+    assert.equal(state.journey.segmentFinished({ reason: 'completed', verified: true, scope: 'step' }), true);
+    context.mock.timers.tick(750); await settled(); assert.equal(state.requests.length, 1);
+    assert.equal(state.requests[0]!.reason, 'segment_completed'); assert.equal(state.requests[0]!.goal, state.journey.goal);
+    const final = plan(page(['save']), state.journey.initial()); final.run.journey!.disposition = 'done'; state.journey.adopt(final);
+    assert.equal(state.journey.segmentFinished({ reason: 'completed', verified: true, scope: 'step' }), false); assert.equal(state.journey.active, false);
+    const legacy = fixture(); assert.equal(legacy.journey.segmentFinished({ reason: 'completed', verified: true }, true), false); assert.equal(legacy.journey.active, false);
+  } finally { state.journey.cancel(); context.mock.timers.reset(); }
+});
+
+test('semantic revisions replan unchanged controls only after an expected continuing transition; input/context changes alone do not', async context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] }); const state = fixture();
+  try {
+    state.journey.seed(page(), page().url, 'number:0');
+    for (let index = 1; index < 10; index++) state.journey.observe({ ...page(), context: { count: index } }, page().url, `number:${index}`);
+    context.mock.timers.tick(1000); await settled(); assert.equal(state.requests.length, 0);
+    state.journey.record(0, { targetId: 'open', label: 'Open', role: 'button', evidence: 'observed' });
+    state.journey.observe(page(), page().url, 'number:10'); context.mock.timers.tick(1000); await settled(); assert.equal(state.requests.length, 0);
+    state.journey.expectTransition(); state.journey.observe(page(), page().url, 'number:11'); context.mock.timers.tick(750); await settled(); assert.equal(state.requests.length, 1);
+  } finally { state.journey.cancel(); context.mock.timers.reset(); }
+});
+
+test('host failure drops queued progress without an automatic retry', async context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] }); const state = fixture();
+  try {
+    state.journey.expectTransition(); state.scene(page(['next'])); state.journey.reportHostResult('open', false);
+    context.mock.timers.tick(5000); await settled(); assert.equal(state.requests.length, 0); assert.equal(state.journey.active, true);
+  } finally { state.journey.cancel(); context.mock.timers.reset(); }
+});
+
+test('longer host workflows explicitly opt into a bounded continuation budget', async context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] }); let calls = 0;
+  const journey = new JourneyCoordinator('Longer workflow', { replan: async request => { calls++; return plan(page([`next_${calls}`]), request); }, onPending() {}, onPlan() {}, onError: assert.fail }, { maxContinuations: 12 });
+  try {
+    journey.adopt(plan(page(), journey.initial()));
+    for (let index = 0; index < 10; index++) { journey.observe(page([`next_${index}`]), `/step/${index}`); context.mock.timers.tick(750); await settled(); }
+    assert.equal(calls, 10); assert.equal(journey.active, true);
+    assert.equal(continuationLimit(undefined), 6); for (const invalid of [0, 25, -1, 2.5, '12', null]) assert.throws(() => continuationLimit(invalid), /between 1 and 24/);
+    assert.equal(semanticRevision('1'), 'string:1'); assert.equal(semanticRevision(1), 'number:1');
+    for (const invalid of ['', 'x'.repeat(161), 'a\nb', NaN, {}, Number.MAX_SAFE_INTEGER + 1]) assert.throws(() => semanticRevision(invalid), /context revision/);
+  } finally { journey.cancel(); context.mock.timers.reset(); }
 });
 
 test('disappearing completed controls do not replan when the remaining segment is still grounded', async context => {

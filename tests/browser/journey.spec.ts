@@ -140,7 +140,7 @@ test('closing chat while reload Resume awaits host context prevents the obsolete
 
 test('explicit target mode excludes unannotated personal controls and bounds both adaptive snapshots and live resolution', async ({ page }) => {
   await start(page, false, 0, 'explicit'); expect(requests[0]!.page.targets.map(target => target.id)).toEqual(['open-dialog']);
-  expect(await page.evaluate(() => window.GuideKit.capabilities)).toEqual({ apiVersion: 1, explicitTargets: true, adaptiveJourneys: true });
+  expect(await page.evaluate(() => window.GuideKit.capabilities)).toEqual({ apiVersion: 1, explicitTargets: true, adaptiveJourneys: true, hostWorkflowProgress: true });
   expect(await page.evaluate(() => Object.isFrozen(window.GuideKit.capabilities))).toBe(true);
   expect(await page.evaluate(({ agentId, endpoint }) => { try { window.GuideKit.mount({ agentId, endpoint, targetMode: 'everything' as 'explicit' }); return ''; } catch (error) { return error instanceof Error ? error.message : ''; } }, { agentId, endpoint })).toMatch(/targetMode must be auto or explicit/);
   await expect(guide(page)).toBeVisible();

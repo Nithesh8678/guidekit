@@ -16,7 +16,9 @@ export class SceneObserver {
   private readonly interval: ReturnType<typeof setInterval>;
   private route = routeKey();
   private destroyed = false;
-  constructor(private readonly read: () => PageContext, private readonly notify: (page: PageContext, route: string) => void, private readonly enabled: () => boolean = () => true) {
+  private generation = 0;
+  private reading: AbortController | null = null;
+  constructor(private readonly read: (signal: AbortSignal) => PageContext | Promise<PageContext>, private readonly notify: (page: PageContext, route: string) => void, private readonly enabled: () => boolean = () => true) {
     this.observer = new MutationObserver(records => { if (records.some(record => !owned(record.target))) this.refresh(); });
     this.observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['hidden', 'open', 'class', 'style', 'aria-hidden', 'aria-label', 'aria-labelledby', 'role', 'title', 'data-guidekit-id', 'data-guidekit-label', 'data-guidekit-private'] });
     window.addEventListener('popstate', this.refresh); window.addEventListener('hashchange', this.refresh);
@@ -26,11 +28,21 @@ export class SceneObserver {
   }
   refresh = (): void => {
     if (this.destroyed || document.hidden || !this.enabled()) return;
+    const generation = ++this.generation; this.reading?.abort(); this.reading = null;
     if (this.timer) clearTimeout(this.timer);
-    this.timer = setTimeout(() => { this.timer = null; if (!this.destroyed && !document.hidden && this.enabled()) { this.route = routeKey(); this.notify(this.read(), this.route); } }, 180);
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      if (this.destroyed || document.hidden || !this.enabled()) return;
+      const route = routeKey(), controller = new AbortController(); this.reading = controller;
+      void Promise.resolve().then(() => this.read(controller.signal)).then(page => {
+        if (this.destroyed || controller.signal.aborted || generation !== this.generation || document.hidden || !this.enabled()) return;
+        if (route !== routeKey()) { this.refresh(); return; }
+        this.route = route; this.notify(page, route);
+      }).catch(() => { /* A failed/stale host context read must not replace an active scene. */ }).finally(() => { if (this.reading === controller) this.reading = null; });
+    }, 180);
   };
   destroy(): void {
-    this.destroyed = true; this.observer.disconnect(); clearInterval(this.interval); if (this.timer) clearTimeout(this.timer); this.timer = null;
+    this.destroyed = true; ++this.generation; this.reading?.abort(); this.reading = null; this.observer.disconnect(); clearInterval(this.interval); if (this.timer) clearTimeout(this.timer); this.timer = null;
     window.removeEventListener('popstate', this.refresh); window.removeEventListener('hashchange', this.refresh); document.removeEventListener('visibilitychange', this.refresh);
   }
 }

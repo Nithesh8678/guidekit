@@ -1,5 +1,6 @@
 import type { ModelPlan } from '../../contracts/src/index';
 import { isSafeTarget } from './context';
+import type { GuideStepResult } from './types';
 
 type Step = ModelPlan['steps'][number];
 export interface GuidanceState {
@@ -13,10 +14,11 @@ export interface GuidanceState {
   paused: boolean;
   waiting: boolean;
   confirmationPending: boolean;
+  hostPending: boolean;
 }
-export interface GuidanceResult { reason: 'completed' | 'stopped' | 'missing'; verified: boolean; message?: string; }
+export interface GuidanceResult { reason: 'completed' | 'stopped' | 'missing'; verified: boolean; message?: string; scope?: 'step' | 'goal'; }
 interface Callbacks { onUpdate(state: GuidanceState): void; onFinish(result: GuidanceResult): void; onComplete?(index: number, step: Step, evidence: 'observed' | 'manual' | 'host_verified'): void; }
-interface HostResult { success: boolean; message?: string; }
+type HostResult = GuideStepResult;
 interface Observation { target: HTMLElement; kind: 'text' | 'textarea' | 'choice'; ready: boolean; timer: ReturnType<typeof setTimeout> | null; }
 const quietMs = 1200;
 const recoveryMs = 1200;
@@ -69,6 +71,9 @@ export class GuidanceSession {
   private confirmationTimer: ReturnType<typeof setTimeout> | null = null;
   private epoch = 0;
   private waitingForResult = false;
+  private hostPending = false;
+  private hostMessage = '';
+  private confirmationTimeout = confirmationMs;
   private failure = '';
   private submitted: { index: number; nextBefore: HTMLElement | null } | null = null;
   private clicked: { index: number; target: HTMLElement; nextBefore: HTMLElement | null } | null = null;
@@ -119,16 +124,25 @@ export class GuidanceSession {
     if (!this.running) return;
     const index = this.steps[this.index]?.targetId === targetId ? this.index : this.steps.at(-1)?.targetId === targetId ? this.steps.length - 1 : -1;
     if (index < 0 || (index !== this.index && index !== this.steps.length - 1)) return;
+    if ('status' in result) {
+      if (index !== this.index || result.status !== 'pending' || result.timeoutMs !== undefined && (!Number.isInteger(result.timeoutMs) || result.timeoutMs < 1000 || result.timeoutMs > 300000)) return;
+      this.cancelStepTimer(); this.submitted = null; this.clicked = null; this.deferredResult = null;
+      if (!this.hostPending) { this.clearConfirmationTimer(); this.confirmationTimeout = result.timeoutMs ?? 120000; }
+      this.hostPending = true; this.waitingForResult = true; this.failure = '';
+      this.hostMessage = result.message?.trim().slice(0, 240) || 'The website is working. I’ll wait for its confirmation…';
+      this.refresh(); return;
+    }
     this.clearConfirmationTimer();
     if (this.paused || !this.automatic) { this.deferredResult = { id: targetId, atIndex: this.index, result: { ...result } }; return; }
     this.cancelStepTimer(); this.submitted = null; this.clicked = null;
     if (!result.success) {
       if (index !== this.index) return;
       this.waitingForResult = false;
+      this.hostPending = false; this.hostMessage = ''; this.confirmationTimeout = confirmationMs;
       this.failure = result.message?.trim().slice(0, 240) || 'The website could not complete that action. Try again.';
       this.refresh(); return;
     }
-    if (index === this.steps.length - 1) { this.recordCompletion(index, 'host_verified'); this.finish({ reason: 'completed', verified: true, message: 'The website confirmed the result.' }); return; }
+    if (index === this.steps.length - 1 || result.scope === 'goal') { this.recordCompletion(index, 'host_verified'); this.finish({ reason: 'completed', verified: true, message: result.message?.trim().slice(0, 240) || 'The website confirmed the result.', ...(result.scope ? { scope: result.scope } : {}) }); return; }
     this.complete('host_verified');
   }
 
@@ -170,7 +184,7 @@ export class GuidanceSession {
     this.cancelStepTimer();
     this.clearConfirmationTimer();
     if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
-    this.recoveryTimer = null; this.index = index; this.target = null; this.waitingForResult = false; this.failure = ''; this.submitted = null; this.clicked = null; this.lastState = null;
+    this.recoveryTimer = null; this.index = index; this.target = null; this.waitingForResult = false; this.hostPending = false; this.hostMessage = ''; this.confirmationTimeout = confirmationMs; this.failure = ''; this.submitted = null; this.clicked = null; this.lastState = null;
     this.refresh();
     if (consume) this.resumeObservation();
   }
@@ -196,7 +210,7 @@ export class GuidanceSession {
       this.confirmationTimer = null;
       if (!this.running || this.paused || !this.waitingForResult) return;
       this.finish({ reason: 'completed', verified: false, message: 'The website has not confirmed the result. Check the website before trying again.' });
-    }, confirmationMs);
+    }, this.confirmationTimeout);
   }
   private forgetObservation(index: number): void { const previous = this.observations.get(index); if (previous?.timer) clearTimeout(previous.timer); this.observations.delete(index); }
   private remember(index: number, target: HTMLElement, kind: Observation['kind'], ready: boolean): void {
@@ -251,11 +265,12 @@ export class GuidanceSession {
       else if (clickable(target)) hint = this.index === this.steps.length - 1 ? 'Click this control. I’ll wait for the website to confirm the result.' : 'Click this control to continue.';
     }
     if (this.waitingForResult) hint = 'Waiting for the website to confirm the result…';
+    if (this.hostPending) hint = this.hostMessage;
     if (this.failure) hint = this.failure;
     if (!target && !this.waitingForResult) hint = 'This control changed. Waiting for the page…';
     if (!this.automatic) hint = 'Automatic progress is off. Follow this step, then choose Next.';
     if (this.paused) hint = 'Guidance is paused. Resume when you’re ready.';
-    const state: GuidanceState = { index: this.index, total: this.steps.length, completed: this.completed.size, step: { ...this.steps[this.index]! }, target, hint, automatic: this.automatic, paused: this.paused, waiting: this.waitingForResult || !target, confirmationPending: this.waitingForResult };
+    const state: GuidanceState = { index: this.index, total: this.steps.length, completed: this.completed.size, step: { ...this.steps[this.index]! }, target, hint, automatic: this.automatic, paused: this.paused, waiting: this.waitingForResult || !target, confirmationPending: this.waitingForResult, hostPending: this.hostPending };
     if (this.lastState && Object.entries(state).every(([key, value]) => key === 'step' || this.lastState?.[key as keyof GuidanceState] === value)) return;
     this.lastState = state; this.callbacks.onUpdate(state);
   }
@@ -270,6 +285,7 @@ export class GuidanceSession {
     if (index < 0) return;
     if ((event.type === 'focusin' || event.type === 'input') && index < this.index) this.move(index, false);
     const target = this.safeTarget(index); if (!target || !enabled(target)) return;
+    if (this.hostPending) return;
     if (event.type === 'focusin') { if (index === this.index) { this.cancelStepTimer(); this.resumeObservation(); } return; }
     if (event.type === 'compositionstart') { this.composing.add(target); this.forgetObservation(index); if (index === this.index) this.cancelStepTimer(); return; }
     if (event.type === 'compositionend') {
