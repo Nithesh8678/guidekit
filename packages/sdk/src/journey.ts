@@ -130,7 +130,7 @@ export class JourneyCoordinator {
   }
   segmentFinished(result: GuidanceResult, terminal = false): boolean {
     if (!this.running) return false;
-    if (result.reason === 'stopped' || terminal || result.scope === 'goal' || result.verified && this.disposition !== 'continue') { this.end(); return false; }
+    if (result.reason === 'stopped' || result.verified && (terminal || result.scope === 'goal' || this.disposition !== 'continue')) { this.end(); return false; }
     // A confirmed intermediate operation can advance; it is not proof of the entire goal.
     if (result.verified) { this.awaitingHost = false; this.pendingReason = null; this.expectTransition(); this.schedule('segment_completed'); return this.running; }
     if (result.reason === 'missing') { this.schedule('target_missing'); return this.running; }

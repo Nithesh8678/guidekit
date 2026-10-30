@@ -94,6 +94,14 @@ test('verified intermediate segments continue with the same goal; done and legac
   } finally { state.journey.cancel(); context.mock.timers.reset(); }
 });
 
+test('a native terminal policy does not suppress fresh-context recovery before any outcome was verified', async context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] }); const state = fixture();
+  try {
+    assert.equal(state.journey.segmentFinished({ reason: 'missing', verified: false }, true), true);
+    context.mock.timers.tick(750); await settled(); assert.equal(state.requests.length, 1); assert.equal(state.requests[0]!.reason, 'target_missing');
+  } finally { state.journey.cancel(); context.mock.timers.reset(); }
+});
+
 test('semantic revisions replan unchanged controls only after an expected continuing transition; input/context changes alone do not', async context => {
   context.mock.timers.enable({ apis: ['setTimeout'] }); const state = fixture();
   try {
