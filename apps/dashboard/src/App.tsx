@@ -5,6 +5,8 @@ import { Knowledge } from './Knowledge';
 import { ActivityMetrics } from './ActivityMetrics';
 import { Install } from './Install';
 import { Auth } from './Auth';
+import { Landing } from './Landing';
+import { navigatePlatform, platformHash, readPlatformRoute, type PlatformRoute } from './platform-route';
 import { AccountPanel } from './Account';
 import { AccountLinkFlow, clearAccountLink, readAccountLink } from './AccountLink';
 import { api, Brand, date, emptyDocumentDraft, errorMessage, Notice, Spinner, versionStatus, type DashboardDetail, type DocumentDraft, type PublicationResult } from './shared';
@@ -26,8 +28,29 @@ export function App() {
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const [checking, setChecking] = useState(true);
   const [startupError, setStartupError] = useState('');
+  const [route, setRoute] = useState<PlatformRoute>(readPlatformRoute);
+  const currentRoute = useRef(route), leaveDashboard = useRef<(() => boolean) | null>(null);
+  currentRoute.current = route;
+  const registerNavigationGuard = useCallback((guard: (() => boolean) | null) => { leaveDashboard.current = guard; }, []);
   const [accountLink, setAccountLink] = useState(readAccountLink), [accountMessage, setAccountMessage] = useState('');
-  useEffect(() => { const changed = () => setAccountLink(readAccountLink()); window.addEventListener('hashchange', changed); return () => window.removeEventListener('hashchange', changed); }, []);
+  // An account dialog overlays the current editor without unmounting its unsaved draft.
+  const underlyingHash = useRef(location.hash.startsWith('#account/') ? '' : location.hash);
+  const navigate = useCallback((next: PlatformRoute, replace = false) => {
+    underlyingHash.current = platformHash(next); currentRoute.current = next; setRoute(next); navigatePlatform(next, replace);
+    window.scrollTo({ top: 0, behavior: 'instant' });
+  }, []);
+  useEffect(() => {
+    const changed = () => {
+      const link = readAccountLink(); setAccountLink(link);
+      if (!link) {
+        const next = readPlatformRoute();
+        if (currentRoute.current === 'dashboard' && next !== 'dashboard' && leaveDashboard.current && !leaveDashboard.current()) { history.replaceState(null, '', `${location.pathname}${location.search}${underlyingHash.current}`); return; }
+        underlyingHash.current = location.hash; currentRoute.current = next; setRoute(next);
+      }
+    };
+    window.addEventListener('hashchange', changed); window.addEventListener('popstate', changed);
+    return () => { window.removeEventListener('hashchange', changed); window.removeEventListener('popstate', changed); };
+  }, []);
   const checkAuth = useCallback(async () => {
     setChecking(true); setStartupError('');
     try { const result = await api<{ workspace: Workspace | null }>('/api/auth/me'); setWorkspace(result.workspace); }
@@ -35,12 +58,28 @@ export function App() {
     finally { setChecking(false); }
   }, []);
   useEffect(() => { void checkAuth(); }, [checkAuth]);
-  if (checking) return <div className="app-loading"><Brand /><Spinner /><p>Opening your workspace…</p></div>;
-  if (startupError) return <div className="app-loading"><Brand /><Notice>{startupError}</Notice><button className="button primary" onClick={() => void checkAuth()}><RefreshCw size={16} /> Retry connection</button><p>Start the GuideKit server, then retry.</p></div>;
-  return <>{workspace ? <Dashboard key={`${workspace.user.id}:${workspace.tenant.id}`} workspace={workspace} onWorkspaceChange={setWorkspace} notice={accountMessage} onDismissNotice={() => setAccountMessage('')} onLogout={() => setWorkspace(null)} /> : <Auth key={accountMessage ? 'account-result' : 'access'} onAuthenticated={setWorkspace} initialMode={accountMessage ? 'login' : 'register'} message={accountMessage} />}{accountLink && <AccountLinkFlow key={`${accountLink.kind}:${accountLink.token}`} link={accountLink} workspace={workspace} onAuthenticated={setWorkspace} onClose={() => { clearAccountLink(); setAccountLink(null); }} onComplete={(message, value) => { clearAccountLink(); setAccountLink(null); setAccountMessage(message); if (value !== undefined) setWorkspace(value); else void api<{ workspace: Workspace | null }>('/api/auth/me').then(result => setWorkspace(result.workspace)).catch(() => setAccountMessage(`${message} Refresh to update account status.`)); }} />}</>;
+  useEffect(() => {
+    if (checking || startupError || accountLink) return;
+    if (route === 'dashboard' && !workspace) navigate('login', true);
+    else if (workspace && (route === 'signup' || route === 'login')) navigate('dashboard', true);
+  }, [route, workspace, checking, startupError, accountLink, navigate]);
+  const authenticated = (value: Workspace) => { setWorkspace(value); setAccountMessage(''); navigate('dashboard', true); };
+  const closeAccountLink = () => {
+    clearAccountLink(); history.replaceState(null, '', `${location.pathname}${location.search}${underlyingHash.current}`); setAccountLink(null);
+  };
+  const landing = <Landing signedIn={!!workspace} onSignUp={() => navigate('signup')} onSignIn={() => navigate('login')} onDashboard={() => navigate('dashboard')} />;
+  if (checking && route !== 'landing') return <div className="app-loading"><Brand /><Spinner /><p>Opening your workspace…</p></div>;
+  if (startupError && route !== 'landing') return <div className="app-loading"><a href="#" onClick={event => { event.preventDefault(); navigate('landing'); }} aria-label="GuideKit home"><Brand /></a><Notice>{startupError}</Notice><button className="button primary" onClick={() => void checkAuth()}><RefreshCw size={16} /> Retry connection</button><p>Start the GuideKit server, then retry.</p></div>;
+  return <>{route === 'landing' ? landing : route === 'dashboard' && workspace ? <Dashboard key={`${workspace.user.id}:${workspace.tenant.id}`} workspace={workspace} onNavigationGuard={registerNavigationGuard} onWorkspaceChange={setWorkspace} notice={accountMessage} onDismissNotice={() => setAccountMessage('')} onLogout={() => { setWorkspace(null); setAccountMessage(''); navigate('landing', true); }} /> : <Auth key={route} onAuthenticated={authenticated} initialMode={route === 'signup' ? 'register' : 'login'} onModeChange={mode => navigate(mode === 'register' ? 'signup' : 'login')} onHome={() => navigate('landing')} message={accountMessage} />}{accountLink && <AccountLinkFlow key={`${accountLink.kind}:${accountLink.token}`} link={accountLink} workspace={workspace} onAuthenticated={setWorkspace} onClose={closeAccountLink} onComplete={(message, value) => {
+    const kind = accountLink.kind; closeAccountLink(); setAccountMessage(message);
+    if (value !== undefined) { setWorkspace(value); navigate(value ? 'dashboard' : 'login', true); }
+    else {
+      void api<{ workspace: Workspace | null }>('/api/auth/me').then(result => { setWorkspace(result.workspace); if (kind === 'invite') navigate(result.workspace ? 'dashboard' : 'login', true); }).catch(() => setAccountMessage(`${message} Refresh to update account status.`));
+    }
+  }} />}</>;
 }
 
-function Dashboard({ workspace, onLogout, onWorkspaceChange, notice, onDismissNotice }: { workspace: Workspace; onLogout: () => void; onWorkspaceChange(workspace: Workspace): void; notice: string; onDismissNotice(): void }) {
+function Dashboard({ workspace, onLogout, onWorkspaceChange, notice, onDismissNotice, onNavigationGuard }: { onNavigationGuard(guard: (() => boolean) | null): void; workspace: Workspace; onLogout: () => void; onWorkspaceChange(workspace: Workspace): void; notice: string; onDismissNotice(): void }) {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [detail, setDetail] = useState<DashboardDetail | null>(null);
@@ -71,6 +110,10 @@ function Dashboard({ workspace, onLogout, onWorkspaceChange, notice, onDismissNo
   const mutationBusy = !!busy || knowledgeBusy || publicationBusy;
   const pendingPublication = detail?.versions.some(version => ['preparing', 'syncing'].includes(versionStatus(version))) ?? false;
   const readOnly = workspace.role === 'viewer';
+  useEffect(() => {
+    onNavigationGuard(() => !mutationBusy && (!hasUnsavedChanges || window.confirm('Discard unsaved changes and leave the workspace?')));
+    return () => onNavigationGuard(null);
+  }, [hasUnsavedChanges, mutationBusy, onNavigationGuard]);
 
   const loadAgents = useCallback(async () => {
     setListError(''); setLoadingAgents(true);

@@ -15,7 +15,7 @@ const test = base.extend<{ browserErrors: string[] }>({
 });
 
 async function register(page: Page) {
-  await page.goto('/');
+  await page.goto('/#signup');
   await page.getByLabel('Your name', { exact: true }).fill('Browser Tester');
   await page.getByLabel('Company name', { exact: true }).fill('Acceptance Workspace');
   await page.getByLabel('Email address').fill(`browser-${crypto.randomUUID()}@example.test`);

@@ -42,7 +42,7 @@ async function setup(page: Page, options: { anonymous?: boolean; role?: Workspac
 }
 
 test('viewer access disables mutations while allowing source, version and account inspection', async ({ page }) => {
-  const calls = await setup(page, { role: 'viewer' }); await page.goto('/'); await expect(page.getByText('You have viewer access.', { exact: false })).toBeVisible();
+  const calls = await setup(page, { role: 'viewer' }); await page.goto('/#dashboard'); await expect(page.getByText('You have viewer access.', { exact: false })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Create agent', exact: true })).toBeDisabled(); await expect(page.getByRole('button', { name: 'Publish agent', exact: true })).toBeDisabled(); await expect(page.getByLabel(/^Instructions/)).toBeDisabled();
   await page.getByRole('tab', { name: /^Knowledge/ }).click(); await expect(page.getByRole('button', { name: 'Edit Saved guide', exact: true })).toBeDisabled();
   await page.getByRole('button', { name: /^Saved guide/ }).click(); await expect(page.locator('.document-preview')).toHaveText('Saved public knowledge');
@@ -52,7 +52,7 @@ test('viewer access disables mutations while allowing source, version and accoun
 });
 
 test('account security errors preserve fields, team delivery is explicit, and workspace switching clears old editor state', async ({ page }) => {
-  const calls = await setup(page); page.on('dialog', dialog => dialog.accept()); await page.goto('/'); await page.getByLabel(/^Instructions/).fill('Unsaved first workspace draft');
+  const calls = await setup(page); page.on('dialog', dialog => dialog.accept()); await page.goto('/#dashboard'); await page.getByLabel(/^Instructions/).fill('Unsaved first workspace draft');
   await page.getByRole('button', { name: 'Account & team', exact: true }).click(); const dialog = page.getByRole('dialog', { name: 'Account & team', exact: true });
   await expect(dialog.getByText('No email was sent.', { exact: false })).toHaveCount(0); await dialog.getByLabel('Your name', { exact: true }).fill('Updated Owner'); await dialog.getByRole('button', { name: 'Save profile', exact: true }).click(); await expect(dialog.getByText('Profile updated.', { exact: true })).toBeVisible();
   await dialog.getByLabel('Current password', { exact: true }).fill('wrong'); await dialog.getByLabel('New password', { exact: true }).fill(password); await dialog.getByLabel('Confirm new password', { exact: true }).fill(password); await dialog.getByRole('button', { name: 'Change password', exact: true }).click(); await expect(dialog.getByText('Current password is incorrect.', { exact: false })).toBeVisible(); await expect(dialog.getByLabel('New password', { exact: true })).toHaveValue(password);
@@ -68,27 +68,41 @@ test('account security errors preserve fields, team delivery is explicit, and wo
 });
 
 test('recovery links stay out of storage and request URLs, and successful reset removes the fragment', async ({ page }) => {
-  const calls = await setup(page, { anonymous: true }); await page.goto('/'); await page.getByRole('button', { name: 'Existing account', exact: true }).click(); await page.getByRole('button', { name: 'Forgot password?', exact: true }).click(); await page.getByLabel('Email address', { exact: true }).fill('unknown@example.test'); await page.getByRole('button', { name: 'Request recovery link', exact: true }).click(); await expect(page.getByText('If the account exists, its link uses', { exact: false })).toBeVisible();
+  const calls = await setup(page, { anonymous: true }); await page.goto('/#login'); await page.getByRole('button', { name: 'Forgot password?', exact: true }).click(); await page.getByLabel('Email address', { exact: true }).fill('unknown@example.test'); await page.getByRole('button', { name: 'Request recovery link', exact: true }).click(); await expect(page.getByText('If the account exists, its link uses', { exact: false })).toBeVisible();
   await page.evaluate(value => { location.hash = `account/reset?token=${value}`; }, token); const dialog = page.getByRole('dialog', { name: 'Reset your password', exact: true });
-  await dialog.getByLabel('New password', { exact: true }).fill(password); await dialog.getByLabel('Confirm new password', { exact: true }).fill(password); await dialog.getByRole('button', { name: 'Reset password', exact: true }).click(); await expect(dialog).toHaveCount(0); await expect(page.getByText('Password reset. Sign in with your new password.', { exact: true })).toBeVisible(); expect(new URL(page.url()).hash).toBe('');
+  await dialog.getByLabel('New password', { exact: true }).fill(password); await dialog.getByLabel('Confirm new password', { exact: true }).fill(password); await dialog.getByRole('button', { name: 'Reset password', exact: true }).click(); await expect(dialog).toHaveCount(0); await expect(page.getByText('Password reset. Sign in with your new password.', { exact: true })).toBeVisible(); expect(new URL(page.url()).hash).toBe('#login');
   expect(calls.find(call => call.path === '/api/auth/reset-password')?.body).toEqual({ token, password }); expect(calls.every(call => !call.path.includes(token))).toBe(true); expect(await page.evaluate(() => JSON.stringify(localStorage) + JSON.stringify(sessionStorage))).not.toContain(token);
 });
 
 test('existing invitee signs in without losing the invitation and verification preserves viewer permissions', async ({ page }) => {
   const calls = await setup(page, { anonymous: true }); await page.goto(`/#account/invite?token=${token}`); const invite = page.getByRole('dialog', { name: 'Workspace invitation', exact: true }); await invite.getByRole('button', { name: 'Sign in to invited account', exact: true }).click(); await expect(invite.getByLabel('Email address', { exact: true })).toHaveValue('invited@example.test'); await expect(invite.getByLabel('Email address', { exact: true })).toHaveAttribute('readonly', '');
-  await invite.getByLabel('Password', { exact: true }).fill(password); await invite.getByRole('button', { name: 'Sign in', exact: true }).click(); await expect(invite.getByRole('button', { name: 'Accept invitation', exact: true })).toBeVisible(); expect(new URL(page.url()).hash).toContain(token); await invite.getByRole('button', { name: 'Accept invitation', exact: true }).click(); await expect(invite).toHaveCount(0); expect(new URL(page.url()).hash).toBe('');
+  await invite.getByLabel('Password', { exact: true }).fill(password); await invite.getByRole('button', { name: 'Sign in', exact: true }).click(); await expect(invite.getByRole('button', { name: 'Accept invitation', exact: true })).toBeVisible(); expect(new URL(page.url()).hash).toContain(token); await invite.getByRole('button', { name: 'Accept invitation', exact: true }).click(); await expect(invite).toHaveCount(0); expect(new URL(page.url()).hash).toBe('#dashboard');
   expect(calls.find(call => call.path === '/api/auth/login')?.body).toEqual({ email: 'invited@example.test', password }); expect(calls.find(call => call.path === '/api/auth/invitations/accept')?.body).toEqual({ token });
   await page.reload();
   // The next fixture remains viewer-scoped; verification must not grant editing access.
-  await page.evaluate(value => { location.hash = `account/verify?token=${value}`; }, token); const verify = page.getByRole('dialog', { name: 'Verify your email', exact: true }); await verify.getByRole('button', { name: 'Verify email address', exact: true }).click(); await expect(verify).toHaveCount(0); await expect(page.getByText('You have viewer access.', { exact: false })).toBeVisible(); expect(new URL(page.url()).hash).toBe('');
+  await page.evaluate(value => { location.hash = `account/verify?token=${value}`; }, token); const verify = page.getByRole('dialog', { name: 'Verify your email', exact: true }); await verify.getByRole('button', { name: 'Verify email address', exact: true }).click(); await expect(verify).toHaveCount(0); await expect(page.getByText('You have viewer access.', { exact: false })).toBeVisible(); expect(new URL(page.url()).hash).toBe('#dashboard');
 });
 
 test('verification and canceled malformed links preserve the editor draft and remove consumed or canceled fragments', async ({ page }) => {
-  await setup(page); await page.goto('/'); await page.getByLabel(/^Instructions/).fill('Unsaved draft stays through email verification');
+  await setup(page); await page.goto('/#dashboard'); await page.getByLabel(/^Instructions/).fill('Unsaved draft stays through email verification');
   await page.evaluate(value => { location.hash = `account/verify?token=${value}`; }, token); const verify = page.getByRole('dialog', { name: 'Verify your email', exact: true }); await verify.getByRole('button', { name: 'Verify email address', exact: true }).click(); await expect(verify).toHaveCount(0); await expect(page.getByLabel(/^Instructions/)).toHaveValue('Unsaved draft stays through email verification');
-  await page.evaluate(() => { location.hash = 'account/reset?token=invalid'; }); const malformed = page.getByRole('dialog', { name: 'Invalid account link', exact: true }); await expect(malformed).toBeVisible(); await malformed.getByRole('button', { name: 'Cancel account link', exact: true }).click(); expect(new URL(page.url()).hash).toBe(''); await expect(page.getByLabel(/^Instructions/)).toHaveValue('Unsaved draft stays through email verification');
+  await page.evaluate(() => { location.hash = 'account/reset?token=invalid'; }); const malformed = page.getByRole('dialog', { name: 'Invalid account link', exact: true }); await expect(malformed).toBeVisible(); await malformed.getByRole('button', { name: 'Cancel account link', exact: true }).click(); expect(new URL(page.url()).hash).toBe('#dashboard'); await expect(page.getByLabel(/^Instructions/)).toHaveValue('Unsaved draft stays through email verification');
 });
 
 test('a new invited account joins with the requested role using only an explicit form submission', async ({ page }) => {
-  const calls = await setup(page, { anonymous: true }); await page.goto(`/#account/invite?token=${token}`); const invite = page.getByRole('dialog', { name: 'Workspace invitation', exact: true }); await invite.getByLabel('Your name', { exact: true }).fill('New Invitee'); await invite.getByLabel('New account password', { exact: true }).fill(password); expect(calls.some(call => call.path.endsWith('/accept'))).toBe(false); await invite.getByRole('button', { name: 'Create account and join', exact: true }).click(); await expect(invite).toHaveCount(0); expect(calls.find(call => call.path.endsWith('/accept'))?.body).toEqual({ token, name: 'New Invitee', password }); await expect(page.getByText('You have viewer access.', { exact: false })).toBeVisible(); expect(new URL(page.url()).hash).toBe('');
+  const calls = await setup(page, { anonymous: true }); await page.goto(`/#account/invite?token=${token}`); const invite = page.getByRole('dialog', { name: 'Workspace invitation', exact: true }); await invite.getByLabel('Your name', { exact: true }).fill('New Invitee'); await invite.getByLabel('New account password', { exact: true }).fill(password); expect(calls.some(call => call.path.endsWith('/accept'))).toBe(false); await invite.getByRole('button', { name: 'Create account and join', exact: true }).click(); await expect(invite).toHaveCount(0); expect(calls.find(call => call.path.endsWith('/accept'))?.body).toEqual({ token, name: 'New Invitee', password }); await expect(page.getByText('You have viewer access.', { exact: false })).toBeVisible(); expect(new URL(page.url()).hash).toBe('#dashboard');
+});
+
+test('public website navigation asks before discarding an unsaved dashboard draft', async ({ page }) => {
+  await setup(page); await page.goto('/#dashboard');
+  await page.getByLabel(/^Instructions/).fill('Keep this unsaved draft');
+  page.once('dialog', dialog => dialog.dismiss());
+  await page.evaluate(() => { location.hash = 'product'; });
+  await expect(page).toHaveURL(/#dashboard$/);
+  await expect(page.getByLabel(/^Instructions/)).toHaveValue('Keep this unsaved draft');
+  page.once('dialog', dialog => dialog.accept());
+  await page.evaluate(() => { location.hash = 'product'; });
+  await expect(page).toHaveURL(/#product$/);
+  await expect(page.getByRole('link', { name: 'Open dashboard', exact: true }).first()).toBeVisible();
+  await expect(page.getByLabel(/^Instructions/)).toHaveCount(0);
 });

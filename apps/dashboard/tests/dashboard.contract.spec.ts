@@ -48,7 +48,7 @@ async function fixture(page: Page, options: { pending?: boolean; legacy?: boolea
     else { status = 404; body = { error: `Unhandled contract fixture path ${method} ${path}` }; }
     await route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
   });
-  await page.goto('/'); await expect(page.getByRole('heading', { name: config.name, exact: true })).toBeVisible();
+  await page.goto('/#dashboard'); await expect(page.getByRole('heading', { name: config.name, exact: true })).toBeVisible();
   return { requests, failRetrieval() { retrievalFails = true; }, failDiagnostics() { diagnosticsFail = true; }, completeCandidate() { versions[1]!.status = 'ready'; agent.publishedVersion = 2; } };
 }
 
