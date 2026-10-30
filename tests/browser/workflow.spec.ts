@@ -144,6 +144,19 @@ test('a verified intermediate native form save continues into another branch wit
   expect(requests[1]!.page.context.workflow).toMatchObject({ titleSaved: true }); await persist(page, 3); expect(JSON.stringify(requests)).not.toContain('private-title-marker');
 });
 
+test('an intermediate success received behind chat waits for explicit Resume and then continues the same goal', async ({ page }) => {
+  await start(page, 'Save a title, then review and persist it'); const field = page.locator('[data-guidekit-id="title-text"]');
+  await field.fill('private-paused-title-marker'); await field.press('Tab'); await expect(guide(page)).toContainText('Save title'); await page.locator('[data-guidekit-id="title-save"]').click();
+  await expect(guide(page)).toContainText('Saving your title'); await guide(page).getByRole('button', { name: 'Open chat', exact: true }).click();
+  const chat = page.getByRole('dialog', { name: 'Website assistant' }); await expect(chat).toBeVisible();
+  await page.evaluate(() => window.workflowFixture.releaseSave()); await page.waitForTimeout(1300);
+  expect(requests).toHaveLength(1); await expect(chat).toBeVisible(); await expect(guide(page)).toBeHidden(); expect(await page.evaluate(() => window.workflowFixture.finished)).toEqual([]);
+  await chat.getByRole('button', { name: 'Resume guide', exact: true }).click();
+  await expect(guide(page)).toContainText('Review workflow'); expect(requests).toHaveLength(2); expect(requests[1]!.journey.id).toBe(requests[0]!.journey.id);
+  expect(requests[1]!.journey.completed.find(step => step.targetId === 'title-save')!.evidence).toBe('host_verified'); expect(requests[1]!.page.context.workflow).toMatchObject({ titleSaved: true });
+  await persist(page, 3); expect(JSON.stringify(requests)).not.toContain('private-paused-title-marker');
+});
+
 test('a cancelled import remains retryable without replanning; cancelling guidance discards a late host completion', async ({ page }) => {
   await start(page, 'Import two assets, arrange them, and persist the result'); const chooser = page.waitForEvent('filechooser'); await page.locator('[data-guidekit-id="import"]').click(); await (await chooser).setFiles([]);
   await page.evaluate(() => window.workflowFixture.failImport()); await expect(guide(page)).toContainText('Import cancelled'); await page.waitForTimeout(1300); expect(requests).toHaveLength(1); expect(await page.evaluate(() => window.workflowFixture.finished)).toEqual([]);

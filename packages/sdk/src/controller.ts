@@ -240,7 +240,14 @@ export class Assistant implements GuideKitInstance {
         if (state.confirmationPending && !state.hostPending && journey!.canContinue && !submitting) { progress(state.index, state.step, 'observed'); journey!.expectTransition(); }
         if (!state.paused) this.sceneObserver?.refresh();
       },
-      finish: result => { if (!current()) return false; const handled = journey!.segmentFinished(result, result.scope === 'goal' || (submitting || finalNativeSubmit) && result.scope !== 'step'); if (handled) { this.view.journeyTransition(() => { void this.cancel(); }); this.sceneObserver?.refresh(); } return handled; }
+      finish: result => {
+        if (!current()) return false;
+        // A deferred verified result finishes only after the visitor resumes
+        // local guidance. It may finish before emitting its unpaused state.
+        if (result.verified) journey!.setPaused(false);
+        const handled = journey!.segmentFinished(result, result.scope === 'goal' || (submitting || finalNativeSubmit) && result.scope !== 'step');
+        if (handled) { this.view.journeyTransition(() => { void this.cancel(); }); this.sceneObserver?.refresh(); } return handled;
+      }
     } : undefined;
     const missing = () => { this.view.status('That control changed or is no longer visible. Ask again to refresh the guide.', true); this.view.recoveryButton(container, () => { void this.ask(journey?.goal ?? run.answer); }); this.emit('target-missing', { runId: run.runId }); };
     if (run.steps.length) {
