@@ -29,7 +29,7 @@ export function postgresSQL(input: string): string {
 
 /** The web application may never use a migration/owner connection. */
 export async function assertRuntimeRole(client: Pick<PoolClient, 'query'>): Promise<void> {
-  const result = await client.query(`SELECT r.rolsuper,r.rolbypassrls,r.rolcreatedb,r.rolcreaterole,
+  const result = await client.query(`SELECT r.rolsuper,r.rolbypassrls,r.rolcreatedb,r.rolcreaterole,has_schema_privilege(current_user,current_schema(),'CREATE') AS can_create_objects,
     EXISTS(SELECT 1 FROM pg_roles p WHERE (p.rolsuper OR p.rolbypassrls OR p.rolcreatedb OR p.rolcreaterole) AND pg_has_role(current_user,p.oid,'MEMBER')) AS privileged_member,
     EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
       WHERE n.nspname=current_schema() AND c.relkind IN ('r','p')
@@ -37,7 +37,7 @@ export async function assertRuntimeRole(client: Pick<PoolClient, 'query'>): Prom
       AND pg_has_role(current_user,c.relowner,'MEMBER')) AS owns_product_tables
     FROM pg_roles r WHERE r.rolname=current_user`);
   const role = result.rows[0];
-  if (!role || role.rolsuper || role.rolbypassrls || role.rolcreatedb || role.rolcreaterole || role.privileged_member || role.owns_product_tables) throw new Error('PostgreSQL application access requires a separate restricted role without database ownership or privileged memberships. Use the explicit owner migration path for administration.');
+  if (!role || role.rolsuper || role.rolbypassrls || role.rolcreatedb || role.rolcreaterole || role.privileged_member || role.owns_product_tables || role.can_create_objects) throw new Error('PostgreSQL application access requires a separate restricted role without database ownership or privileged memberships. Use the explicit owner migration path for administration.');
 }
 
 /** Infrastructure failures use bounded public messages; SQL constraint codes remain available internally. */
@@ -60,7 +60,7 @@ export class PostgresDriver implements SQLDriver {
     if (!local) {
       const mode = url.searchParams.get('sslmode');
       if (mode && !['require', 'verify-ca', 'verify-full'].includes(mode)) throw new Error('Remote PostgreSQL requires TLS with certificate verification.');
-      // pg connection URL sslmode=require otherwise permits unverifiable certificates.
+      // Keep certificate/hostname verification explicit across pg and libpq compatibility modes.
       url.searchParams.set('sslmode', 'verify-full');
     }
     const pool = new Pool({ connectionString: url.toString(), max: 10, connectionTimeoutMillis: 10_000, idleTimeoutMillis: 30_000, statement_timeout: 30_000, application_name: 'guidekit' });

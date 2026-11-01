@@ -184,3 +184,18 @@ test('real PostgreSQL runtime rejects owners and accepts a dedicated unprivilege
     await assert.rejects(runtime.db.exec('CREATE TABLE forbidden_runtime_ddl (id TEXT)'), /permission denied/);
   } finally { await runtime?.close(); await state.close(); if (roleCreated) await owner.query(`DROP ROLE ${role}`); await owner.end(); }
 });
+
+
+test('an explicitly empty PostgreSQL connection never silently selects SQLite', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'guidekit-invalid-postgres-'));
+  try { await assert.rejects(AsyncRepository.open({ dir: directory, connectionString: '' }), /Invalid URL/); }
+  finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('a future local repository marker is rejected without downgrading its data', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'guidekit-future-repository-'));
+  const repo = await AsyncRepository.open({ dir: directory });
+  await repo.db.exec("INSERT INTO repository_migrations VALUES (2,'2026-11-01T00:00:00.000Z')"); await repo.close();
+  try { await assert.rejects(AsyncRepository.open({ dir: directory }), /newer GuideKit release/); }
+  finally { await rm(directory, { recursive: true, force: true }); }
+});

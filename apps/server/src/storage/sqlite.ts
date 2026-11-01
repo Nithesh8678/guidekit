@@ -16,7 +16,9 @@ export class SqliteDriver implements SQLDriver {
       legacy.db.exec(`BEGIN IMMEDIATE;
         CREATE TABLE IF NOT EXISTS repository_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
       `);
-      const migrated = legacy.row('SELECT version FROM repository_migrations WHERE version=1');
+      const current = Number(legacy.row('SELECT COALESCE(MAX(version),0) AS version FROM repository_migrations')!.version);
+      if (current > 1) throw new Error('This local repository was created by a newer GuideKit release. Use a compatible server.');
+      const migrated = current >= 1;
       if (!migrated) {
         legacy.db.exec(`CREATE TABLE publication_states_next (
           agent_id TEXT NOT NULL, version INTEGER NOT NULL,

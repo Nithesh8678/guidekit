@@ -15,7 +15,7 @@ export class AsyncRepository {
   readonly dialect: SQLDriver['dialect'];
   private constructor(readonly dir: string, readonly db: SQLDriver, readonly sessionSecret: string) { this.dialect = db.dialect; }
   static async open(options: { dir: string; connectionString?: string; migrate?: boolean }): Promise<AsyncRepository> {
-    if (!options.connectionString) {
+    if (options.connectionString === undefined) {
       const driver = await SqliteDriver.open(options.dir);
       return new AsyncRepository(options.dir, driver, driver.sessionSecret);
     }
