@@ -372,7 +372,10 @@ export class View {
       onUpdate: update => {
         if (disposed) return;
         hooks?.state?.(update);
-        const changedStep = lastIndex !== update.index, changedTarget = state?.target !== update.target; state = update;
+        const changedStep = lastIndex !== update.index, changedTarget = state?.target !== update.target, resuming = state?.paused && !update.paused; state = update;
+        // An explicit Resume can finish a reveal canceled by Pause/Open chat.
+        // Geometry updates and manual-scroll interruptions never rearm it.
+        if (resuming && card.dataset.gkScrollState === 'cancelled') { revealTarget = null; revealIndex = -1; }
         const ownsMotion = !this.guideChatOpen && !this.cursorDocked;
         if (changedStep || changedTarget || update.waiting) { reveal?.cancel(); ++narration; markReady = false; lastPresented = -1; lastNarrated = -1; beats.cancel(); if (ownsMotion) motion.erase({ animate: false, preserveCursor: true }); this.handlers.guidePause?.(); }
         const focusFirst = lastIndex < 0 && (document.activeElement === this.host || document.activeElement === document.body);
