@@ -432,3 +432,28 @@ test('independent rings and step badges stay beside unobscured controls on deskt
     await toolbar(page).getByRole('button', { name: 'Stop visual guidance', exact: true }).click(); await expect(chat(page)).toBeVisible();
   }
 });
+
+test('mobile essential feedback moves its full panel and controls away from the active retry target', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 740 }); await page.emulateMedia({ reducedMotion: 'no-preference' });
+  await openFixture(page, ['Retry the import.'], false, true);
+  const failure = 'Import failed. Please retry the import.';
+  await page.evaluate(message => {
+    const previous = document.querySelector('[data-guidekit-id="contact-name"]')!;
+    const retry = document.createElement('button'); retry.type = 'button'; retry.dataset.guidekitId = 'contact-name'; retry.textContent = 'Retry import'; retry.setAttribute('aria-label', 'Retry import');
+    Object.assign(retry.style, { position: 'fixed', left: '170px', top: '625px', width: '130px', height: '30px' });
+    retry.addEventListener('click', () => window.GuideKit.reportStepResult('contact-name', { success: false, message }));
+    previous.replaceWith(retry);
+  }, failure);
+  const requests: string[] = []; page.on('request', request => { if (request.url().endsWith('/api/embed/session/ask')) requests.push(request.url()); });
+  await ask(page); await finished(page, 'Retry the import.');
+  await page.getByRole('button', { name: 'Retry import', exact: true }).click();
+  const assist = toolbar(page).locator('.guide-assist');
+  await expect(assist).toBeVisible(); await expect(assist.getByRole('status')).toHaveText(failure);
+  await expect(toolbar(page).getByRole('button', { name: 'Show guidance help', exact: true })).toHaveAttribute('aria-expanded', 'false');
+  await expect.poll(() => toolbar(page).evaluate(strip => {
+    const panel = strip.querySelector('.guide-assist')!.getBoundingClientRect(), controls = strip.getBoundingClientRect(), target = document.querySelector('[data-guidekit-id="contact-name"]')!.getBoundingClientRect();
+    const overlap = (box: DOMRect) => Math.max(0, Math.min(box.right, target.right) - Math.max(box.left, target.left)) * Math.max(0, Math.min(box.bottom, target.bottom) - Math.max(box.top, target.top));
+    return { contained: [panel, controls].every(box => box.left >= 0 && box.top >= 0 && box.right <= innerWidth && box.bottom <= innerHeight), overlap: overlap(panel) + overlap(controls), topCorner: controls.top < innerHeight / 2 && panel.bottom < innerHeight / 2, targetUnmoved: target.top === 625 && target.bottom === 655 };
+  }), 'Essential feedback reserves its entire visible footprint and leaves the retry control usable').toMatchObject({ contained: true, overlap: 0, topCorner: true, targetUnmoved: true });
+  expect(requests, 'Local host attention does not trigger another model request').toHaveLength(1);
+});
