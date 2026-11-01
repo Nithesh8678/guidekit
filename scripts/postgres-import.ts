@@ -8,7 +8,7 @@ import { PostgresDriver } from '../apps/server/src/storage/postgres.js';
 import type { SQLDriver, SQLRow, SQLValue } from '../apps/server/src/storage/driver.js';
 
 /** Fixed, audited transfer schema. No identifier or SQL fragment comes from archive data. */
-const TABLES = [
+export const POSTGRES_PRODUCT_COLUMNS = [
   { name: 'tenants', columns: ['id','name'], order: 'id' },
   { name: 'users', columns: ['id','tenant_id','email','name','password_hash','verified_at','auth_epoch'], numbers: ['auth_epoch'], order: 'id' },
   { name: 'dashboard_sessions', columns: ['id','data','expires'], numbers: ['expires'], order: 'id' },
@@ -24,6 +24,7 @@ const TABLES = [
   { name: 'account_tokens', columns: ['id','token_hash','purpose','user_id','tenant_id','email','payload','expires','consumed_at','created_at'], numbers: ['expires'], order: 'id' },
   { name: 'audit_events', columns: ['id','tenant_id','actor_id','event','resource_id','details','created_at'], order: 'id' },
 ] as const;
+const TABLES = POSTGRES_PRODUCT_COLUMNS;
 type Table = (typeof TABLES)[number];
 export interface TableFingerprint { rows: number; sha256: string }
 export interface PostgreSQLImportResult {
