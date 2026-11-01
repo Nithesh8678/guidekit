@@ -1,6 +1,6 @@
 # GuideKit
 
-A visual AI assistant platform for websites. Configure an agent with company knowledge, publish a version, and install the same browser SDK on your website. Visitors can ask questions, follow a guide that advances with their progress, and approve explicitly registered actions. Chat tucks away during guidance and returns when the guide finishes.
+A visual AI assistant platform for websites. Configure an agent with company knowledge, publish a version, and install the same browser SDK on your website. Visitors can ask questions, follow a guide that advances with their progress, and approve explicitly registered actions. Chat tucks away during guidance and returns when the guide finishes. Hosts can declare safe future controls so a single model plan follows the user across panels locally; see [latency architecture and measurements](docs/guidance-latency.md).
 
 The default core runs locally and uses the developer's signed-in ChatGPT subscription through official Codex app-server, without a model API key or credential extraction. A [separate hosted-provider adapter](docs/hosted-provider.md) is prepared and disabled by default; it requires explicit selection and enablement, with no paid fallback. Public source does not expose your personal runtime as a hosted service.
 
@@ -98,7 +98,7 @@ CI installs locked dependencies without lifecycle scripts, runs advisory/secret 
 
 Core: authenticated workspaces and team roles, local one-time account recovery, company-scoped knowledge and retrieval evaluation, prepared immutable publishing, shared browser SDK, adaptive visual guidance, approved registered actions, persisted outcomes, browser dictation/read-aloud, and recoverable local operations. Speech depends on browser support and microphone permission; human verification and its quality limits are recorded in status.
 
-Cutroom is a separate demonstration host. Its optional adapter is committed on its own local `feat/guidekit-integration` branch, with rename, track mute and selected-clip movement through its authenticated revision/idempotency-aware commands. These workflows are browser/HTTP tested; a real model rename and normal Undo were also verified. Existing projects and personal media were not opened. The separate branch remains unmerged and unpublished.
+Cutroom is a separate demonstration host. Its optional adapter is committed on its own local `feat/guidekit-low-latency` branch, with rename, track mute and selected-clip movement through its authenticated revision/idempotency-aware commands. These workflows are browser/HTTP tested; a real model rename and normal Undo were also verified. Existing projects and personal media were not opened. The separate branch remains unmerged and unpublished.
 
 TigerGraph document relationships are implemented through server-side preparation and scoped retrieval; see [setup and verification](docs/tigergraph.md). Browser speech recognition and synthesis are the selected voice approach; no Wispr key is required. Public HTTPS hosting, live paid inference, external account email, npm/CDN publication and packaged-device acceptance remain separate gates. Billing, SSO, native capture and arbitrary-site automation are separately scoped phases. The SDK cannot bypass a host's permissions or access cross-origin iframe/canvas semantics automatically.
 
