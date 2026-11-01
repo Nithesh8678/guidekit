@@ -79,9 +79,11 @@ test('logical PostgreSQL archive captures a coherent full snapshot and restores 
       let restoreFailure: unknown;
       const restoring = restorePostgresBackup({ connectionString: target.url.toString(), archive, dataDir: restoreDir, offline: true, port: await freePort(), knowledgeSchema: target.knowledge });
       void restoring.catch(error => { restoreFailure = error; });
+      let gateFailure: unknown;
       try {
         for (let attempt = 0; ; attempt++) {
           if (restoreFailure) throw restoreFailure;
+          await blocker.query('SELECT pg_stat_clear_snapshot()');
           const deferred = await blocker.query("SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event='advisory' AND query=$1", ["SELECT pg_advisory_xact_lock(hashtext('guidekit:postgres-restore'))"]);
           if (deferred.rows.length) break;
           if (attempt > 100) throw new Error('Restore did not reach its deferred query.'); await delay(20);
@@ -91,8 +93,10 @@ test('logical PostgreSQL archive captures a coherent full snapshot and restores 
         assert.equal((await stat(restoreLock)).mode & 0o777, 0o600);
         assert.throws(() => acquireProcessLock(restoreDir), /restore is in progress/);
         await assert.rejects(stat(join(restoreDir, '.service.lock')), { code: 'ENOENT' });
-      } finally { await blocker.query('ROLLBACK'); blocker.release(); }
+      } catch (error) { gateFailure = error; }
+      finally { await blocker.query('ROLLBACK'); blocker.release(); }
       const restored = await restoring;
+      if (gateFailure) throw gateFailure;
       await assert.rejects(stat(`${restoreDir}.restore.lock`), { code: 'ENOENT' });
       assert.deepEqual(restored.tables, backup.manifest.tables);
       assert.equal(await readFile(join(restoreDir, 'session.secret'), 'utf8'), source.repository.sessionSecret);
