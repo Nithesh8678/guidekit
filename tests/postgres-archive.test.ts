@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, readFile, readdir, writeFile, stat, cp } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, readdir, writeFile, stat, cp, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:net';
@@ -107,4 +107,29 @@ test('logical PostgreSQL backup fails closed for RLS-limited operator credential
     await assert.rejects(createPostgresBackup({ connectionString: url.toString(), dataDir: source.directory, destination, knowledgeSchema: source.knowledge }), /archive operation failed/);
     await assert.rejects(stat(destination), { code: 'ENOENT' });
   } finally { await source.close(created ? role : undefined); await rm(root, { recursive: true, force: true }); }
+});
+
+
+test('logical PostgreSQL restore rejects missing offline acknowledgement before reading input', async () => {
+  await assert.rejects(restorePostgresBackup({ connectionString: 'invalid', archive: 'not-read', dataDir: 'not-written', offline: false }), /explicit offline/);
+});
+
+test('logical PostgreSQL archive rejects unknown manifest formats without database access', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'guidekit-postgres-archive-invalid-'));
+  try { await writeFile(join(root, 'manifest.json'), JSON.stringify({ format: 'unknown', formatVersion: 999 })); await assert.rejects(verifyPostgresArchive(root), /unsupported/); }
+  finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('logical PostgreSQL restore rolls back product and vector rows after a late index insertion failure', { skip: !testURL, timeout: 120_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'guidekit-postgres-archive-rollback-')), source = await fixture(root, 'source'), target = await fixture(root, 'target');
+  try {
+    await seed(source); const archive = join(root, 'archive');
+    await createPostgresBackup({ connectionString: source.url.toString(), dataDir: source.directory, destination: archive, knowledgeSchema: source.knowledge });
+    await target.repository.db.exec(`CREATE FUNCTION ${target.knowledge}.fail_restore() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'sensitive synthetic payload must be withheld'; END $$; CREATE TRIGGER abort_restore BEFORE INSERT ON ${target.knowledge}.chunks FOR EACH ROW EXECUTE FUNCTION ${target.knowledge}.fail_restore()`);
+    const dataDir = join(root, 'no-committed-secret');
+    await assert.rejects(restorePostgresBackup({ connectionString: target.url.toString(), archive, dataDir, offline: true, port: await freePort(), knowledgeSchema: target.knowledge }), error => { assert.match((error as Error).message, /archive operation failed/); assert.doesNotMatch((error as Error).message, /sensitive synthetic/); return true; });
+    for (const table of ['tenants','users','agents','documents','versions','knowledge_fts','publication_states',`${target.knowledge}.versions`,`${target.knowledge}.documents`,`${target.knowledge}.chunks`]) assert.equal(Number((await target.repository.row(`SELECT COUNT(*) AS count FROM ${table}`))?.count), 0);
+    assert.equal(Number((await target.repository.row(`SELECT COUNT(*) AS count FROM ${target.knowledge}.metadata`))?.count), 1);
+    await assert.rejects(stat(join(dataDir, 'session.secret')), { code: 'ENOENT' });
+  } finally { await source.close(); await target.close(); await rm(root, { recursive: true, force: true }); }
 });

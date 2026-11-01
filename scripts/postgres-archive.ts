@@ -124,6 +124,8 @@ const safe = (error: unknown): Error => error && typeof error === 'object' && 'c
 export async function createPostgresBackup(options: PostgresBackupOptions): Promise<{ archive: string; manifest: PostgresArchiveManifest }> {
   const archive = resolve(options.destination), dataDir = resolve(options.dataDir), secretPath = resolve(dataDir, 'session.secret');
   if (overlap(dataDir, archive) || overlap(archive, dataDir)) throw new Error('PostgreSQL backup must be outside the data directory.');
+  const directory = await lstat(dataDir);
+  if (!directory.isDirectory() || directory.isSymbolicLink()) throw new Error('PostgreSQL data directory must be a real directory.');
   const secretBefore = await fileDigest(secretPath, 65_536, false), secret = await readFile(secretPath);
   if (secret.length < 32) throw new Error('The session secret is invalid.');
   await mkdir(dirname(archive), { recursive: true, mode: 0o700 }); await mkdir(archive, { mode: 0o700 }); await chmod(archive, 0o700);
@@ -184,6 +186,8 @@ export async function restorePostgresBackup(options: PostgresRestoreOptions): Pr
   const archive = resolve(options.archive), dataDir = resolve(options.dataDir);
   if (overlap(archive, dataDir) || overlap(dataDir, archive)) throw new Error('PostgreSQL restore archive and data directory must be separate.');
   const manifest = await verifyPostgresArchive(archive), secretPath = resolve(dataDir, 'session.secret');
+  try { const directory = await lstat(dataDir); if (!directory.isDirectory() || directory.isSymbolicLink()) throw new Error('PostgreSQL restore data directory must be a real directory.'); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
   await assertOffline(dataDir, options.port);
   let hasSecret = false;
   try { const existing = await fileDigest(secretPath, 65_536, false); hasSecret = true; if (existing.sha256 !== manifest.files['session.secret'].sha256) throw new Error('The target signing secret differs. Use a new data directory; an existing secret is never overwritten.'); }
