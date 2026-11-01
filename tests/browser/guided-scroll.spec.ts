@@ -51,7 +51,7 @@ async function openFixture(page: Page, speech = false) {
   await expect(chat(page)).toBeVisible();
 }
 
-async function arrange(page: Page, layout: 'window' | 'nested' | 'second-step' | 'visible') {
+async function arrange(page: Page, layout: 'window' | 'nested' | 'outer-clip' | 'second-step' | 'visible') {
   await page.evaluate(kind => {
     const form = document.querySelector<HTMLElement>('#contact-form')!;
     // Preserve the real fixture's host listeners, stable IDs and accessible
@@ -71,13 +71,23 @@ async function arrange(page: Page, layout: 'window' | 'nested' | 'second-step' |
     // Private email is not involved in these public-control fixtures.
     document.querySelector<HTMLElement>('input[name="email"]')!.closest('label')!.setAttribute('hidden', '');
     if (kind === 'window') document.querySelector<HTMLElement>('[data-guidekit-id="contact-name"]')!.closest('label')!.style.top = '5000px';
-    if (kind === 'nested' || kind === 'second-step') {
+    if (kind === 'nested' || kind === 'outer-clip' || kind === 'second-step') {
       const panel = document.createElement('div'); panel.id = 'scroll-panel';
       Object.assign(panel.style, { position: 'absolute', left: '40px', top: '100px', width: '540px', height: '300px', overflow: 'auto', border: '2px solid #999', scrollBehavior: 'auto', overflowAnchor: 'none' });
       document.body.append(panel); panel.append(form);
       Object.assign(form.style, { left: '10px', top: '0', width: '440px', height: '1600px' });
-      const id = kind === 'nested' ? 'contact-name' : 'contact-company';
+      const id = kind === 'second-step' ? 'contact-company' : 'contact-name';
       document.querySelector<HTMLElement>(`[data-guidekit-id="${id}"]`)!.closest('label')!.style.top = '540px';
+      if (kind === 'outer-clip') {
+        // The target fits the inner scroller's own port. Its non-scrollable
+        // ancestor clips that port, so the inner scroller must compensate.
+        const clip = document.createElement('div'); clip.id = 'outer-clip';
+        Object.assign(clip.style, { position: 'absolute', left: '40px', top: '100px', width: '550px', height: '250px', overflow: 'clip' });
+        document.body.append(clip); clip.append(panel);
+        Object.assign(panel.style, { top: '0', left: '0', height: '500px' });
+        document.querySelector<HTMLElement>('[data-guidekit-id="contact-name"]')!.closest('label')!.style.top = '400px';
+        document.querySelector<HTMLElement>('main')!.style.display = 'none';
+      }
     }
     window.scrollTo({ top: 0, behavior: 'instant' });
   }, layout);
@@ -177,6 +187,24 @@ test('a target clipped by a nested overflow panel is revealed even when its page
     expect(moving.some(frame => frame.ink)).toBe(false);
     expect(await page.evaluate(() => window.scrollY)).toBe(0);
     expect(await page.locator('#scroll-panel').evaluate(node => node.scrollTop)).toBeGreaterThan(200);
+  } finally { await stopProbe(page); }
+});
+
+test('the inner scroller compensates when a non-scrollable outer clipping ancestor hides its otherwise visible target', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'no-preference' }); await openFixture(page); await arrange(page, 'outer-clip');
+  const before = await target(page).boundingBox(), inner = await page.locator('#scroll-panel').boundingBox(), outer = await page.locator('#outer-clip').boundingBox();
+  expect(before!.y).toBeGreaterThan(outer!.y + outer!.height);
+  expect(before!.y + before!.height).toBeLessThan(inner!.y + inner!.height);
+  expect(await page.evaluate(() => document.documentElement.scrollHeight - innerHeight)).toBe(0);
+  await startProbe(page);
+  try {
+    await ask(page); await settled(page);
+    const frames = await stopProbe(page), moving = frames.filter(frame => frame.state === 'revealing');
+    expect(new Set(moving.map(frame => Math.round(frame.panel))).size).toBeGreaterThan(3);
+    expect(moving.some(frame => frame.ink)).toBe(false);
+    const after = await target(page).boundingBox();
+    expect(after!.y).toBeGreaterThanOrEqual(outer!.y); expect(after!.y + after!.height).toBeLessThanOrEqual(outer!.y + outer!.height);
+    expect(await page.evaluate(() => scrollY)).toBe(0);
   } finally { await stopProbe(page); }
 });
 
