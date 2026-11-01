@@ -21,6 +21,14 @@ The assistant cursor rests in a dock inside the chat header while the visitor as
 
 The first editable control can receive focus when the user was in the composer. Automatic advancement moves visual attention without moving the user's keyboard cursor. Opening chat pauses the same guide; Resume guide restores it. Pause, Back and Automatic progress remain explicit controls. Escape/Stop remove the guide and restore chat. The dock follows panel entrance, resize and viewport changes, while a paused guide yields renderer ownership to chat so host mutations cannot interrupt the return flight.
 
+## Guided scrolling
+
+A newly grounded step reveals its control before cursor flight, drawing or spoken narration. The local controller checks the visual viewport and clipping ancestors, then moves the required scrollable panels and document with a smooth acceleration/braking curve. Already visible controls remain in place with no reveal delay. The nearest clipped edge receives a comfortable margin; author-supplied `scroll-padding` and target `scroll-margin` preserve room for sticky headers and panel chrome. Nested panels are handled independently of the document's scroll position.
+
+One reveal owns a bounded animation, revalidating the safe control identity each frame. It remeasures after settling before allowing the existing cursor and pen sequence to run. Only a new step, replacement control or explicit Resume can request another reveal; layout observations do not repeatedly pull a visitor back after manual scrolling. Wheel, touch movement, page-navigation keys and a click on the host interrupt the animation. Pause, chat, stop, Escape, hidden pages and destroy cancel its work. A paused reveal can be explicitly resumed. Reduced Motion applies the required scroll instantly and keeps the existing static presentation behavior.
+
+Scrolling uses public target geometry only, makes no model request and does not edit or submit the host. Offscreen or clipped targets receive no stale drawing or narration. Source visibility/privacy and host authorization rules remain unchanged. Hosts should declare sticky offsets using CSS scroll padding instead of relying on header guessing; see [scroll padding](https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/Properties/scroll-padding-top) and [the visual viewport](https://developer.mozilla.org/en-US/docs/Web/API/VisualViewport).
+
 The observer runs only for the active session. A trusted edit, native validity and 1.2 seconds of quiet complete a single-line field. A real field exit can complete it immediately. Multiline input waits for field exit; composition waits for commit. Native selections/toggles follow their change event. Quickly filled future fields are retained locally so the guide can catch up. It checks readiness, not transmitted field-value content.
 
 Clicking a final submit control is an attempt. The guide waits for `reportStepResult(targetId, { success, message })` after the host saves and independently reads back the result. Without a host integration, Finish guide remains available and explicitly leaves the outcome unverified. This local result callback grants no execution authority and creates no action receipt.
@@ -41,6 +49,7 @@ Geometry is prepared locally and retains stable seeded variation. The annotation
 | First flight wait | At least .45 seconds and until actual cursor arrival | .45-second source parameter; arrival gating adapts it to dock departure |
 | Later travel wait | At distance ≥110: `min(.55,.2+distance/2400)` seconds | Current shipped drawing |
 | Cursor flight | `clamp(distance/800,.6,1.4)` seconds, quadratic arc and smoothstep | Older public cursor recipe; exact current flight was unavailable |
+| Guided scroll | 280–780 ms, distance-based quintic easing; at most three layout corrections within 2.3 seconds | GuideKit browser interaction design; runs before cursor flight |
 
 Flights use monotonic elapsed time, tangent rotation and a mid-flight scale envelope. Interruptions retarget from the currently sampled presentation. Marks remain local while reasoning is slow; rendering never waits on a per-frame model request.
 

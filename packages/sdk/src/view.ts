@@ -4,6 +4,7 @@ import type { GuideStepResult } from './types';
 import { BeatScheduler, type SpeechEvents } from './beats';
 import { MotionDirector, type MotionPoint } from './motion';
 import type { VoiceSettingsHandlers, VoiceSettingsState } from './voices';
+import { GuidedReveal, revealedBounds, targetRevealed } from './scroll';
 
 const styles = `
 :host{all:initial;position:fixed;inset:0;z-index:2147483000;pointer-events:none;font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#17213b;font-size:14px;line-height:1.5;color-scheme:light;--gk-accent:#365cf5}
@@ -276,33 +277,39 @@ export class View {
     controls.append(previous, automatic, pause, next); card.append(head, progress, text, hint, controls); this.shadow.append(card);
     let state: GuidanceState | null = null, disposed = false, frame = 0, lastIndex = -1, lastNarrated = -1, narration = 0, animateNext = false;
     let cardAnimation: Animation | null = null, observed: HTMLElement | null = null, markReady = false, lastPresented = -1, hasPresented = false, fromChat = true, presentedTarget: HTMLElement | null = null, motionUntil = 0, lastBox = '';
+    let reveal: GuidedReveal | null = null, revealTarget: HTMLElement | null = null, revealIndex = -1;
+    card.dataset.gkScrollState = 'ready';
     const reduced = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
     const viewport = () => ({ left: window.visualViewport?.offsetLeft ?? 0, top: window.visualViewport?.offsetTop ?? 0, width: window.visualViewport?.width ?? document.documentElement.clientWidth, height: window.visualViewport?.height ?? window.innerHeight });
     const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(Math.max(min, max), value));
     const position = () => {
       frame = 0; if (disposed || this.guideChatOpen || !state) return;
-      if (document.hidden) { motion.setVisible(false); return; }
+      if (document.hidden) { reveal?.cancel(); motion.setVisible(false); return; }
       const area = viewport(), edge = 12, width = area.width, height = area.height;
       card.style.maxHeight = `${Math.max(100, height - edge * 2)}px`; card.style.overflowY = 'auto';
       const current = state.target ? resolve(state.step.targetId) : null;
       if (current !== state.target) { session.refresh(); return; }
-      const rect = current?.getBoundingClientRect();
+      beginReveal();
+      const rect = current?.getBoundingClientRect(), clipped = current ? revealedBounds(current) : null;
+      const targetVisible = !!current && !!clipped && targetRevealed(current);
+      if (!state.paused && !state.waiting) hint.textContent = reveal?.active ? 'Scrolling to this step…' : targetVisible ? state.hint : 'Scroll to this control to continue. I’ll point when it’s visible.';
       lastBox = rect ? `${rect.left},${rect.top},${rect.width},${rect.height}` : '';
       const oldCard = card.getBoundingClientRect();
       const cardWidth = card.offsetWidth, cardHeight = card.offsetHeight;
       let cardLeft = area.left + width - cardWidth - edge, cardTop = area.top + height - cardHeight - edge;
-      if (rect) {
-        const left = clamp(rect.left - 5, area.left + 3, area.left + width - 3), top = clamp(rect.top - 5, area.top + 3, area.top + height - 3);
-        const right = clamp(rect.right + 5, left, area.left + width - 3), bottom = clamp(rect.bottom + 5, top, area.top + height - 3);
-        const visible = rect.bottom >= area.top && rect.top <= area.top + height && rect.right >= area.left && rect.left <= area.left + width && right - left >= .25 && bottom - top >= .25;
+      if (rect && clipped && !reveal?.active) {
+        const left = clamp(clipped.left - 5, area.left + 3, area.left + width - 3), top = clamp(clipped.top - 5, area.top + 3, area.top + height - 3);
+        const right = clamp(clipped.right + 5, left, area.left + width - 3), bottom = clamp(clipped.bottom + 5, top, area.top + height - 3);
+        const visible = targetVisible && right - left >= .25 && bottom - top >= .25;
         const box = { left, top, width: right - left, height: bottom - top };
+        if (visible) narrate();
         if (markReady && visible) {
           if (lastPresented !== state.index || presentedTarget !== current) {
             motion.present({ id: `step-${state.index}-${state.step.targetId}`, kind: state.step.annotation ?? 'target', box, index: state.index + 1 }, { animate: !reduced(), first: fromChat || !hasPresented });
             fromChat = false; hasPresented = true; lastPresented = state.index; presentedTarget = current;
           } else motion.updateBounds(box);
         }
-        motion.setVisible(visible);
+        motion.setVisible(visible && !state.paused);
         const candidates = [[rect.right + 14, rect.top], [rect.left - cardWidth - 14, rect.top], [rect.left, rect.bottom + 14], [rect.left, rect.top - cardHeight - 14]];
         let best = Infinity;
         for (const candidate of candidates) {
@@ -333,7 +340,36 @@ export class View {
     const hostMotion = (event: Event) => {
       if (event.target instanceof Element && state?.target && event.target.contains(state.target)) { motionUntil = performance.now() + 10000; reposition(); }
     };
-    const visibility = () => { if (this.cursorDocked) return; motion.setVisible(!document.hidden && !this.guideChatOpen && !!state?.target); if (!document.hidden) schedulePosition(); };
+    const visibility = () => { if (this.cursorDocked) return; if (document.hidden) { reveal?.cancel(); motion.setVisible(false); } else schedulePosition(); };
+    const narrate = () => {
+      if (!state || state.paused || state.waiting || reveal?.active || lastNarrated === state.index || this.guideChatOpen) return;
+      const update = state; lastNarrated = update.index; const index = update.index, beat = ++narration;
+      const currentBeat = () => !disposed && narration === beat && state?.index === index && !state.paused && !this.guideChatOpen && !reveal?.active && resolve(update.step.targetId) === update.target;
+      beats.start(events => {
+        motion.setActivity('waiting');
+        const queued = this.handlers.guideStep?.(update.step.text, {
+          onStart: () => { if (currentBeat()) { motion.setActivity('speaking'); events.onStart(); } },
+          onEnd: () => { if (currentBeat()) { motion.setActivity('pointing'); events.onEnd(); } },
+          onError: () => { if (currentBeat()) { motion.setActivity('pointing'); events.onError(); } }
+        }) ?? false;
+        if (!queued) motion.setActivity('pointing'); return queued;
+      }, reason => {
+        if (!currentBeat()) return;
+        markReady = true; if (reason === 'unavailable') { this.handlers.guidePause?.(); motion.setActivity('pointing'); } schedulePosition();
+      });
+    };
+    const beginReveal = () => {
+      const update = state;
+      if (!update?.target || update.waiting || update.paused || this.guideChatOpen || document.hidden || revealIndex === update.index && revealTarget === update.target) return;
+      revealIndex = update.index; revealTarget = update.target;
+      const index = update.index, target = update.target;
+      reveal = new GuidedReveal(target, () => resolve(update.step.targetId), () => !disposed && state?.index === index && state.target === target && !state.paused && !this.guideChatOpen, reduced, result => {
+        if (disposed || state?.index !== index || state.target !== target) return;
+        card.dataset.gkScrollState = result; hint.textContent = state.hint; schedulePosition();
+      });
+      reveal.start();
+      if (reveal.active) { card.dataset.gkScrollState = 'revealing'; hint.textContent = 'Scrolling to this step…'; motion.setVisible(false); }
+    };
     // WAAPI-only movement emits no DOM mutation or CSS transition event. A
     // four-Hz local check notices it and enables frame tracking while moving.
     const groundingPoll = setInterval(() => {
@@ -351,39 +387,26 @@ export class View {
       onUpdate: update => {
         if (disposed) return;
         hooks?.state?.(update);
-        const changedStep = lastIndex !== update.index; state = update;
+        const changedStep = lastIndex !== update.index, changedTarget = state?.target !== update.target, resuming = state?.paused && !update.paused; state = update;
+        // An explicit Resume can finish a reveal canceled by Pause/Open chat.
+        // Geometry updates and manual-scroll interruptions never rearm it.
+        if (resuming && card.dataset.gkScrollState === 'cancelled') { revealTarget = null; revealIndex = -1; }
         const ownsMotion = !this.guideChatOpen && !this.cursorDocked;
-        if (changedStep || update.waiting) { ++narration; markReady = false; lastPresented = -1; beats.cancel(); if (ownsMotion) motion.erase({ animate: false, preserveCursor: true }); this.handlers.guidePause?.(); if (update.waiting) lastNarrated = -1; }
+        if (changedStep || changedTarget || update.waiting) { reveal?.cancel(); ++narration; markReady = false; lastPresented = -1; lastNarrated = -1; beats.cancel(); if (ownsMotion) motion.erase({ animate: false, preserveCursor: true }); this.handlers.guidePause?.(); }
         const focusFirst = lastIndex < 0 && (document.activeElement === this.host || document.activeElement === document.body);
         label.textContent = `Step ${update.index + 1} of ${update.total}`; text.textContent = update.step.text; hint.textContent = update.hint;
         progress.max = update.total; progress.value = update.completed; previous.disabled = update.index === 0;
         next.textContent = update.index === update.total - 1 ? 'Finish guide' : 'Next';
         automatic.setAttribute('aria-pressed', String(update.automatic)); pause.textContent = update.paused ? 'Resume' : 'Pause'; pause.setAttribute('aria-label', update.paused ? 'Resume guide' : 'Pause guide');
         card.dataset.paused = String(update.paused); card.dataset.waiting = String(update.waiting); if (ownsMotion) { motion.setPaused(update.paused); motion.element.style.opacity = update.paused ? '.45' : '1'; }
-        if (observed !== update.target) { if (observed) resize.unobserve(observed); observed = update.target; if (observed) resize.observe(observed); }
+        if (observed !== update.target) {
+          resize.disconnect(); resize.observe(document.documentElement); observed = update.target;
+          for (let ancestor = observed, depth = 0; ancestor && depth < 64; ancestor = ancestor.parentElement, depth++) resize.observe(ancestor);
+        }
         if (!this.guideChatOpen) { this.panel.hidden = true; this.launcher.hidden = true; card.hidden = false; }
         if (focusFirst && update.target?.matches('input:not(:disabled),textarea:not(:disabled),select:not(:disabled)')) update.target.focus({ preventScroll: true });
-        if (changedStep && update.target && !this.guideChatOpen) {
-          const rect = update.target.getBoundingClientRect(), area = viewport();
-          if (rect.top < area.top + 10 || rect.bottom > area.top + area.height - 10 || rect.left < area.left || rect.right > area.left + area.width) update.target.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: reduced() ? 'instant' : 'smooth' });
-        }
-        if (update.paused) { ++narration; lastNarrated = -1; markReady = false; lastPresented = -1; beats.cancel(); if (ownsMotion) motion.erase({ animate: false, preserveCursor: true }); this.handlers.guidePause?.(); }
-        else if (!update.waiting && lastNarrated !== update.index && !this.guideChatOpen) {
-          lastNarrated = update.index; const index = update.index, beat = ++narration;
-          const currentBeat = () => !disposed && narration === beat && state?.index === index && !state.paused && !this.guideChatOpen;
-          beats.start(events => {
-            motion.setActivity('waiting');
-            const queued = this.handlers.guideStep?.(update.step.text, {
-              onStart: () => { if (currentBeat()) { motion.setActivity('speaking'); events.onStart(); } },
-              onEnd: () => { if (currentBeat()) { motion.setActivity('pointing'); events.onEnd(); } },
-              onError: () => { if (currentBeat()) { motion.setActivity('pointing'); events.onError(); } }
-            }) ?? false;
-            if (!queued) motion.setActivity('pointing'); return queued;
-          }, reason => {
-            if (disposed || state?.index !== index || state.paused || this.guideChatOpen) return;
-            markReady = true; if (reason === 'unavailable') { this.handlers.guidePause?.(); motion.setActivity('pointing'); } schedulePosition();
-          });
-        }
+        beginReveal();
+        if (update.paused) { reveal?.cancel(); ++narration; lastNarrated = -1; markReady = false; lastPresented = -1; beats.cancel(); if (ownsMotion) motion.erase({ animate: false, preserveCursor: true }); this.handlers.guidePause?.(); }
         schedulePosition(changedStep && lastIndex >= 0); lastIndex = update.index;
       },
       onFinish: result => {
@@ -398,12 +421,12 @@ export class View {
       onComplete: (index, step, evidence) => hooks?.progress?.(index, step, evidence)
     });
     this.guideSession = session; this.guideChatOpen = false; this.resumeGuide.hidden = true;
-    this.guideVisibility = visible => { card.hidden = !visible; if (!this.cursorDocked) motion.setVisible(visible); if (!visible) { fromChat = true; beats.cancel(); } else schedulePosition(); };
+    this.guideVisibility = visible => { card.hidden = !visible; if (!visible) { reveal?.cancel(); if (!this.cursorDocked) motion.setVisible(false); fromChat = true; beats.cancel(); } else schedulePosition(); };
     this.guideFocus = () => {
       if ((document.activeElement === this.host || document.activeElement === document.body) && state?.target && resolve(state.step.targetId) === state.target && state.target.matches('input:not(:disabled),textarea:not(:disabled),select:not(:disabled)')) state.target.focus({ preventScroll: true });
     };
     this.guideCleanup = () => {
-      disposed = true; session.destroy(); beats.cancel(); motion.erase({ animate: false, preserveCursor: true }); resize.disconnect(); mutations.disconnect(); clearInterval(groundingPoll); cancelAnimationFrame(frame); cardAnimation?.cancel();
+      disposed = true; reveal?.cancel(); session.destroy(); beats.cancel(); motion.erase({ animate: false, preserveCursor: true }); resize.disconnect(); mutations.disconnect(); clearInterval(groundingPoll); cancelAnimationFrame(frame); cardAnimation?.cancel();
       document.removeEventListener('scroll', reposition, true); window.removeEventListener('resize', reposition); window.visualViewport?.removeEventListener('resize', reposition); window.visualViewport?.removeEventListener('scroll', reposition);
       for (const event of ['transitionrun', 'transitionend', 'transitioncancel', 'animationstart', 'animationend', 'animationcancel']) document.removeEventListener(event, hostMotion, true);
       document.removeEventListener('visibilitychange', visibility); card.remove();
