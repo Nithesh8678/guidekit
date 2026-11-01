@@ -9,7 +9,7 @@ const instruction = (page: Page) => guide(page).locator('.guide-instruction');
 const accessible = (page: Page) => guide(page).locator('.guide-instruction-accessible');
 const longInstruction = 'Enter the full name you want to save for this contact. Take your time and check the spelling before continuing. The guide stays beside the field while you work, and it will move to the company field after you finish. You can pause, open chat, or show the complete instruction at any point. Nothing is submitted by this explanation; you stay in control of the contact details and the final save.';
 
-interface CardFrame { text: string; accessible: string; typing: boolean; width: number; height: number; scroll: string; step: string; footer?: { textHeight: number; lineHeight: number; outside: string[] }; }
+interface CardFrame { text: string; accessible: string; typing: boolean; width: number; height: number; scroll: string; step: string; stepOpacity: number; stepTransform: string; stepState: string; chrome?: { textHeight: number; lineHeight: number; outside: string[] }; }
 interface CardProbe { frames: CardFrame[]; running: boolean; }
 type ProbeWindow = Window & { __guidekitCardProbe: CardProbe };
 
@@ -65,8 +65,8 @@ async function openFixture(page: Page, texts: string[], belowPage = false, singl
   }, belowPage);
 }
 
-async function startProbe(page: Page, inspectFooter = false) {
-  await page.evaluate(inspectFooter => {
+async function startProbe(page: Page, inspectChrome = false) {
+  await page.evaluate(inspectChrome => {
     const probe = (window as unknown as ProbeWindow).__guidekitCardProbe;
     probe.frames = []; probe.running = true;
     const frame = () => {
@@ -74,22 +74,23 @@ async function startProbe(page: Page, inspectFooter = false) {
       const card = root?.querySelector<HTMLElement>('[aria-label="Visual guidance"]');
       if (card && !card.hidden) {
         const bounds = card.getBoundingClientRect();
-        let footer: CardFrame['footer'];
-        if (inspectFooter) {
-          const end = card.querySelector<HTMLElement>('.guide-controls button:last-child')!;
-          const range = document.createRange(); range.selectNodeContents(end);
-          const outside = [...card.querySelectorAll<HTMLElement>('.guide-controls button, .guide-tools button')].flatMap(button => {
+        let chrome: CardFrame['chrome'];
+        if (inspectChrome) {
+          const pause = card.querySelector<HTMLElement>('.guide-tools [aria-label="Pause guide"]')!;
+          const range = document.createRange(); range.selectNodeContents(pause);
+          const outside = [...card.querySelectorAll<HTMLElement>('.guide-tools button')].flatMap(button => {
             const control = button.getBoundingClientRect();
             return control.left < bounds.left - 1 || control.right > bounds.right + 1 || control.top < bounds.top - 1 || control.bottom > bounds.bottom + 1 ? [button.getAttribute('aria-label') ?? button.textContent ?? ''] : [];
           });
-          footer = { textHeight: range.getBoundingClientRect().height, lineHeight: parseFloat(getComputedStyle(end).lineHeight), outside };
+          chrome = { textHeight: range.getBoundingClientRect().height, lineHeight: parseFloat(getComputedStyle(pause).lineHeight), outside };
         }
-        probe.frames.push({ text: card.querySelector('.guide-instruction')?.textContent ?? '', accessible: card.querySelector('.guide-instruction-accessible')?.textContent ?? '', typing: card.dataset.gkTyping === 'true', width: bounds.width, height: bounds.height, scroll: card.dataset.gkScrollState ?? '', step: card.querySelector('.guide-label')?.textContent ?? '', ...(footer ? { footer } : {}) });
+        const label = card.querySelector<HTMLElement>('.guide-label')!;
+        probe.frames.push({ text: card.querySelector('.guide-instruction')?.textContent ?? '', accessible: card.querySelector('.guide-instruction-accessible')?.textContent ?? '', typing: card.dataset.gkTyping === 'true', width: bounds.width, height: bounds.height, scroll: card.dataset.gkScrollState ?? '', step: label.textContent ?? '', stepOpacity: Number(getComputedStyle(label).opacity), stepTransform: getComputedStyle(label).transform, stepState: card.dataset.gkStepState ?? '', ...(chrome ? { chrome } : {}) });
       }
       if (probe.running) requestAnimationFrame(frame);
     };
     requestAnimationFrame(frame);
-  }, inspectFooter);
+  }, inspectChrome);
 }
 
 async function stopProbe(page: Page): Promise<CardFrame[]> {
@@ -108,6 +109,7 @@ async function ask(page: Page) {
   await page.getByRole('button', { name: 'Send question', exact: true }).click();
   expect((await response).status()).toBe(200);
   await expect(guide(page)).toBeVisible(); await expect(chat(page)).toBeHidden();
+  await expect(guide(page).getByRole('button', { name: /^(Back|Next|Finish guide|Automatic progress|Auto)$/ })).toHaveCount(0);
 }
 
 async function finished(page: Page, text: string) {
@@ -140,36 +142,46 @@ test('real intermediate instruction prefixes expand the card smoothly in width a
 test('compact instructions stay smaller and a 320px viewport contains long unbroken text and every control', async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 740 }); await page.emulateMedia({ reducedMotion: 'no-preference' });
   const unbroken = 'A'.repeat(440);
-  await openFixture(page, ['Enter your name.', unbroken]); await ask(page); await finished(page, 'Enter your name.');
+  await openFixture(page, ['Enter your name.', unbroken]);
+  const requests: string[] = []; page.on('request', request => { if (request.url().endsWith('/api/embed/session/ask')) requests.push(request.url()); });
+  await ask(page); await finished(page, 'Enter your name.');
   const compact = await guide(page).boundingBox();
-  await guide(page).getByRole('button', { name: 'Next', exact: true }).click(); await finished(page, unbroken); await frames(page, 12);
+  await startProbe(page);
+  await page.locator('[data-guidekit-id="contact-name"]').fill('Observed Card Name');
+  await expect(guide(page).getByText('Step 2 of 4', { exact: true })).toBeVisible(); await finished(page, unbroken); await frames(page, 12);
+  await expect(guide(page).locator('.guide-step-number')).toHaveText('2');
+  const stepFrames = (await stopProbe(page)).filter(sample => sample.step === 'Step 2 of 4');
+  expect(stepFrames.some(sample => sample.stepOpacity > 0 && sample.stepOpacity < 1), 'The actual step label has intermediate opacity after observed progress').toBe(true);
+  expect(new Set(stepFrames.filter(sample => sample.stepTransform !== 'none').map(sample => sample.stepTransform)).size, 'The actual step label moves through intermediate transforms').toBeGreaterThan(2);
+  expect(stepFrames.some(sample => sample.stepState === 'presented')).toBe(true);
+  expect(requests, 'Advancing to the next field stays local after the single initial model request').toHaveLength(1);
   const long = await guide(page).boundingBox();
   expect(long!.height).toBeGreaterThan(compact!.height + 25);
   expect(long!.x).toBeGreaterThanOrEqual(0); expect(long!.x + long!.width).toBeLessThanOrEqual(320);
   expect(long!.y).toBeGreaterThanOrEqual(0); expect(long!.y + long!.height).toBeLessThanOrEqual(740);
   const overflow = await guide(page).evaluate(node => ({ card: node.scrollWidth - node.clientWidth, text: node.querySelector('.guide-instruction')!.scrollWidth - node.querySelector('.guide-instruction')!.clientWidth }));
   expect(overflow.card).toBeLessThanOrEqual(1); expect(overflow.text).toBeLessThanOrEqual(1);
-  for (const label of ['Back', 'Next', 'Automatic progress', 'Pause guide', 'Open chat', 'Stop visual guidance']) {
+  for (const label of ['Pause guide', 'Open chat', 'Stop visual guidance']) {
     const control = guide(page).getByRole('button', { name: label, exact: true }); await expect(control).toBeInViewport({ ratio: 1 });
     const box = await control.boundingBox(); expect(box!.x).toBeGreaterThanOrEqual(long!.x); expect(box!.x + box!.width).toBeLessThanOrEqual(long!.x + long!.width + 1);
   }
 });
 
-test('a one-step guide keeps its Finish guide label on one line and all controls inside the compact typing card', async ({ page }) => {
+test('a one-step guide has no wizard navigation and keeps its Pause control inside the compact typing card', async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 740 }); await page.emulateMedia({ reducedMotion: 'no-preference' });
   const text = 'Enter your name.';
   await openFixture(page, [text], false, true); await startProbe(page, true);
   try {
     await ask(page); await finished(page, text);
-    await expect(guide(page).getByRole('button', { name: 'Finish guide', exact: true })).toBeVisible();
+    await expect(guide(page).getByRole('button', { name: 'Pause guide', exact: true })).toBeVisible();
     const samples = (await stopProbe(page)).filter(sample => sample.typing && sample.text.length > 0);
     expect(samples.some(sample => sample.text.length < 7), 'Observe the short initial prefix, before full text can widen the card').toBe(true);
-    expect(samples.every(sample => sample.footer && Number.isFinite(sample.footer.lineHeight) && sample.footer.textHeight <= sample.footer.lineHeight + 1), 'The actual Finish guide text range occupies at most one line during typing').toBe(true);
-    expect(samples.flatMap(sample => sample.footer?.outside ?? []), 'Header and footer controls stay within the rendered card throughout typing').toEqual([]);
+    expect(samples.every(sample => sample.chrome && Number.isFinite(sample.chrome.lineHeight) && sample.chrome.textHeight <= sample.chrome.lineHeight + 1), 'The actual Pause text range occupies at most one line during typing').toBe(true);
+    expect(samples.flatMap(sample => sample.chrome?.outside ?? []), 'The real header controls stay within the rendered card throughout typing').toEqual([]);
   } finally { await stopProbe(page); }
 });
 
-test('a 180px visual viewport lets keyboard users scroll to Next, Pause and Finish guide inside the card', async ({ page }) => {
+test('a 180px visual viewport keeps real Pause, Resume, chat and stop controls reachable by keyboard', async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 740 }); await page.emulateMedia({ reducedMotion: 'no-preference' });
   await openFixture(page, Array(4).fill(longInstruction) as string[]);
   await page.locator('[data-guidekit-id="contact-name"]').evaluate(node => { (node.closest('label') as HTMLElement).style.top = '-20px'; });
@@ -208,19 +220,16 @@ test('a 180px visual viewport lets keyboard users scroll to Next, Pause and Fini
         if (/auto|scroll/.test(style.overflowY) && ancestor.scrollHeight > ancestor.clientHeight + 1) { nativeScroll = true; scrolled ||= ancestor.scrollTop > 0; }
       }
       return { visible: bounds.left >= left - 1 && bounds.right <= right + 1 && bounds.top >= top - 1 && bounds.bottom <= bottom + 1, nativeScroll, scrolled };
-    }), 'The focused control is visibly inside every clipping ancestor after native keyboard scrolling').toMatchObject({ visible: true, nativeScroll: true, scrolled: true });
+    }), 'The focused control is visibly inside every clipping ancestor, whether the card fits or scrolls').toMatchObject({ visible: true });
   };
   await guide(page).getByRole('button', { name: 'Open chat', exact: true }).focus();
-  await tabTo('Next');
-  await visibleFocusedControl('Next');
   await tabTo('Pause guide', 'Shift+Tab'); await visibleFocusedControl('Pause guide');
   await page.keyboard.press('Enter'); await expect(guide(page)).toHaveAttribute('data-paused', 'true');
-  await tabTo('Next'); await visibleFocusedControl('Next');
-  for (let index = 2; index <= 4; index++) {
-    await page.keyboard.press('Enter'); await expect(guide(page).getByText(`Step ${index} of 4`, { exact: true })).toBeVisible();
-  }
-  await tabTo('Resume guide', 'Shift+Tab'); await visibleFocusedControl('Resume guide');
-  await tabTo('Finish guide'); await visibleFocusedControl('Finish guide');
+  await visibleFocusedControl('Resume guide');
+  await page.keyboard.press('Enter'); await expect(guide(page)).toHaveAttribute('data-paused', 'false');
+  await tabTo('Open chat'); await visibleFocusedControl('Open chat');
+  await tabTo('Stop visual guidance'); await visibleFocusedControl('Stop visual guidance');
+  await page.keyboard.press('Enter'); await expect(guide(page)).toHaveCount(0); await expect(chat(page)).toBeVisible();
   await test.info().attach('Short-viewport keyboard traversal', { body: JSON.stringify(traversal, null, 2), contentType: 'application/json' });
 });
 
@@ -243,14 +252,15 @@ test('assistive technology receives the full instruction once while Show full in
   await page.emulateMedia({ reducedMotion: 'no-preference' }); await openFixture(page, [longInstruction]); await startProbe(page);
   try {
     await ask(page); await expect(guide(page)).toHaveAttribute('data-gk-typing', 'true');
-    await expect(accessible(page)).toHaveText(longInstruction); await expect(accessible(page)).toHaveAttribute('aria-live', 'polite');
+    await expect(accessible(page)).toContainText(longInstruction); await expect(accessible(page)).toContainText('Step 1 of 4'); await expect(accessible(page)).toHaveAttribute('aria-live', 'polite');
+    const announcement = await accessible(page).textContent();
     await expect(accessible(page)).toHaveAttribute('aria-atomic', 'true'); await expect(instruction(page)).toHaveAttribute('aria-hidden', 'true');
     expect(await instruction(page).getAttribute('aria-live')).toBeNull();
     await guide(page).getByRole('button', { name: 'Show full instruction', exact: true }).click();
     await finished(page, longInstruction); await frames(page);
     const samples = await stopProbe(page);
     expect(samples.filter(sample => sample.typing).length).toBeGreaterThan(0);
-    expect(samples.every(sample => sample.accessible === longInstruction), 'The live region never streams individual prefixes').toBe(true);
+    expect(samples.every(sample => sample.accessible === announcement), 'The live region never streams individual prefixes').toBe(true);
     await expect(guide(page).getByText('Step 1 of 4', { exact: true })).toBeVisible();
     await expect(chat(page)).toBeHidden();
   } finally { await stopProbe(page); }
@@ -264,6 +274,10 @@ test('Reduced Motion immediately displays the full instruction without type, glo
     expect(samples.length).toBeGreaterThan(0); expect(samples.every(sample => !sample.typing && (!sample.text || sample.text === longInstruction))).toBe(true);
     await expect(guide(page).getByRole('button', { name: 'Show full instruction', exact: true })).toBeHidden();
     expect(await guide(page).evaluate(node => node.getAnimations({ subtree: true }).filter(animation => animation.playState === 'running').length)).toBe(0);
+    await page.locator('[data-guidekit-id="contact-name"]').fill('Reduced Motion Name');
+    await expect(guide(page).getByText('Step 2 of 4', { exact: true })).toBeVisible(); await finished(page, 'Continue to this control.');
+    expect(await guide(page).locator('.guide-label').evaluate(node => ({ opacity: getComputedStyle(node).opacity, transform: getComputedStyle(node).transform }))).toEqual({ opacity: '1', transform: 'none' });
+    expect(await guide(page).evaluate(node => node.getAnimations({ subtree: true }).filter(animation => animation.playState === 'running').length)).toBe(0);
   } finally { await stopProbe(page); }
 });
 
@@ -272,7 +286,6 @@ test('host geometry and same-step observation refreshes do not restart an instru
   const requests: string[] = []; page.on('request', request => { if (request.url().endsWith('/api/embed/session/ask')) requests.push(request.url()); });
   await ask(page); await expect(guide(page)).toHaveAttribute('data-gk-typing', 'true'); await startProbe(page);
   try {
-    await guide(page).getByRole('button', { name: 'Automatic progress', exact: true }).click();
     await page.locator('[data-guidekit-id="contact-name"]').evaluate(node => { (node as HTMLElement).style.transform = 'translateX(15px)'; window.dispatchEvent(new Event('resize')); });
     await finished(page, longInstruction); await frames(page, 15);
     const samples = await stopProbe(page), lengths = samples.map(sample => sample.text.length);
@@ -285,8 +298,12 @@ test('rapid steps replace the old typewriter, and pause, chat, resume and destro
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   const second = `Company instruction. ${longInstruction}`, third = `Status instruction. ${longInstruction}`;
   await openFixture(page, [longInstruction, second, third]); await ask(page); await expect(guide(page)).toHaveAttribute('data-gk-typing', 'true');
-  await guide(page).getByRole('button', { name: 'Next', exact: true }).click();
-  await guide(page).getByRole('button', { name: 'Next', exact: true }).click();
+  // Public host result reports model two real asynchronous host completions;
+  // this explicit fixture never calls or mutates the internal guidance session.
+  await page.evaluate(() => {
+    window.GuideKit.reportStepResult('contact-name', { success: true, message: 'The synthetic host verified the name.' });
+    window.GuideKit.reportStepResult('contact-company', { success: true, message: 'The synthetic host verified the company.' });
+  });
   await expect(guide(page).getByText('Step 3 of 4', { exact: true })).toBeVisible(); await startProbe(page);
   try {
     await expect(guide(page)).toHaveAttribute('data-gk-typing', 'true');
@@ -311,6 +328,7 @@ test('smoothly revealing an offscreen control finishes before instruction typing
     const samples = await stopProbe(page), scrolling = samples.filter(sample => sample.scroll === 'revealing');
     expect(scrolling.length).toBeGreaterThan(3);
     expect(scrolling.every(sample => sample.text === '' && !sample.typing), 'The visitor first sees a settled target, then the explanation').toBe(true);
+    expect(scrolling.every(sample => sample.stepState === 'pending' && sample.stepOpacity === 0), 'The step label reveal also waits until scrolling finishes').toBe(true);
     expect(samples.some(sample => sample.scroll === 'ready' && sample.typing && sample.text.length > 0)).toBe(true);
     expect(await page.evaluate(() => scrollY)).toBeGreaterThan(4000);
   } finally { await stopProbe(page); }
