@@ -14,18 +14,21 @@ export type KnowledgeSource = 'local' | 'tigergraph' | 'postgres';
 export class AsyncRepository {
   readonly dialect: SQLDriver['dialect'];
   private constructor(readonly dir: string, readonly db: SQLDriver, readonly sessionSecret: string) { this.dialect = db.dialect; }
-  static async open(options: { dir: string; connectionString?: string }): Promise<AsyncRepository> {
+  static async open(options: { dir: string; connectionString?: string; migrate?: boolean }): Promise<AsyncRepository> {
     if (!options.connectionString) {
       const driver = await SqliteDriver.open(options.dir);
       return new AsyncRepository(options.dir, driver, driver.sessionSecret);
     }
     mkdirSync(options.dir, { recursive: true, mode: 0o700 }); chmodSync(options.dir, 0o700);
     const path = join(options.dir, 'session.secret');
-    if (!existsSync(path)) writeFileSync(path, randomBytes(48).toString('hex'), { mode: 0o600, flag: 'wx' });
+    if (!existsSync(path)) {
+      try { writeFileSync(path, randomBytes(48).toString('hex'), { mode: 0o600, flag: 'wx' }); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+    }
     chmodSync(path, 0o600);
     const secret = readFileSync(path, 'utf8');
     if (secret.length < 32 || secret.length > 65536) throw new Error('The local session signing secret is invalid. Restore it from a verified backup.');
-    return new AsyncRepository(options.dir, await PostgresDriver.open(options.connectionString), secret);
+    return new AsyncRepository(options.dir, await PostgresDriver.open(options.connectionString, options.migrate ?? false), secret);
   }
   transaction<T>(fn: () => Promise<T>): Promise<T> { return this.db.transaction(fn); }
   row(sql: string, ...values: SQLValue[]): Promise<Row | undefined> { return this.db.prepare(sql).get(...values); }

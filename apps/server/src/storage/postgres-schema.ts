@@ -44,3 +44,11 @@ export async function migratePostgres(client: PoolClient): Promise<void> {
     await client.query('COMMIT');
   } catch (error) { await client.query('ROLLBACK'); throw error; }
 }
+
+/** Runtime roles only verify compatibility; DDL requires the explicit owner migration path. */
+export async function verifyPostgres(client: PoolClient): Promise<void> {
+  const marker = await client.query("SELECT to_regclass('guidekit_schema_migrations') AS marker");
+  if (!marker.rows[0]?.marker) throw new Error('GuideKit PostgreSQL schema is not initialized. Run the owner migration before starting the application.');
+  const result = await client.query('SELECT COALESCE(MAX(version),0) AS version FROM guidekit_schema_migrations');
+  if (Number(result.rows[0].version) !== 1) throw new Error('This PostgreSQL schema is incompatible. Run a compatible owner migration before starting the application.');
+}

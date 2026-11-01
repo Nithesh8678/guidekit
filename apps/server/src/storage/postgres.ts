@@ -1,11 +1,12 @@
 import { Pool, type PoolClient, type QueryResult } from 'pg';
 import { transactionStorage, type SQLDriver, type SQLStatement, type SQLValue } from './driver.js';
-import { migratePostgres } from './postgres-schema.js';
+import { migratePostgres, verifyPostgres } from './postgres-schema.js';
 
 /** Translate only server-authored SQL; values remain independent bound parameters. */
 export function postgresSQL(input: string): string {
   let sql = input.replace(/json_extract\(data,'\$\.userId'\)/g, "(data::jsonb->>'userId')")
     .replace(/\bIS\s+\?/g, 'IS NOT DISTINCT FROM ?')
+    .replace(/\?\s+IS NULL\b/g, 'CAST(? AS TEXT) IS NULL')
     .replace(/\bAS\s+([a-z][a-z0-9]*[A-Z][A-Za-z0-9_]*)\b/g, 'AS "$1"');
   const ignore = /^\s*INSERT OR IGNORE\s+INTO\b/i.test(sql);
   const replaceSession = /^\s*INSERT OR REPLACE\s+INTO dashboard_sessions\b/i.test(sql);
@@ -30,12 +31,21 @@ export class PostgresDriver implements SQLDriver {
   private readonly storage = transactionStorage<PoolClient>();
   private closed = false;
   private constructor(private readonly pool: Pool) {}
-  static async open(connectionString: string): Promise<PostgresDriver> {
-    const pool = new Pool({ connectionString, max: 10, connectionTimeoutMillis: 10_000, idleTimeoutMillis: 30_000, statement_timeout: 30_000, application_name: 'guidekit' });
+  static async open(connectionString: string, migrate = false): Promise<PostgresDriver> {
+    const url = new URL(connectionString);
+    if (!['postgres:', 'postgresql:'].includes(url.protocol)) throw new Error('Use a PostgreSQL connection URL.');
+    const local = ['localhost', '127.0.0.1', '[::1]', '::1'].includes(url.hostname);
+    if (!local) {
+      const mode = url.searchParams.get('sslmode');
+      if (mode && !['require', 'verify-ca', 'verify-full'].includes(mode)) throw new Error('Remote PostgreSQL requires TLS with certificate verification.');
+      // pg connection URL sslmode=require otherwise permits unverifiable certificates.
+      url.searchParams.set('sslmode', 'verify-full');
+    }
+    const pool = new Pool({ connectionString: url.toString(), max: 10, connectionTimeoutMillis: 10_000, idleTimeoutMillis: 30_000, statement_timeout: 30_000, application_name: 'guidekit' });
     // Idle connection errors must not become uncaught process exceptions. Next requests fail normally.
     pool.on('error', () => {});
     const driver = new PostgresDriver(pool);
-    try { const client = await pool.connect(); try { await migratePostgres(client); } finally { client.release(); } return driver; }
+    try { const client = await pool.connect(); try { if (migrate) await migratePostgres(client); else await verifyPostgres(client); } finally { client.release(); } return driver; }
     catch (error) { await pool.end(); throw error; }
   }
   private async query(sql: string, values: SQLValue[] = []): Promise<QueryResult> {
