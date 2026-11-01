@@ -41,23 +41,23 @@ export function createPostgresKnowledgeProvider(config?: PostgresKnowledgeConfig
   pool.on('error', () => undefined);
   const syncing = new Map<string, { manifest: string; promise: Promise<{ chunks: number }> }>();
   let closed = false;
-  async function assertRuntime(client: PoolClient) {
+  async function assertRuntime(client: PoolClient, scope?: KnowledgeScope) {
     const result = await client.query(`SELECT r.rolsuper,r.rolbypassrls,r.rolcreaterole,r.rolcreatedb,
       EXISTS(SELECT 1 FROM pg_roles p WHERE (p.rolsuper OR p.rolbypassrls) AND pg_has_role(current_user,p.oid,'MEMBER')) AS privileged_member,
-      (SELECT count(*)::int FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='guidekit_knowledge' AND c.relname IN('versions','documents','chunks') AND c.relrowsecurity AND c.relforcerowsecurity AND NOT pg_has_role(current_user,c.relowner,'MEMBER') AND EXISTS(SELECT 1 FROM pg_policy p WHERE p.polrelid=c.oid AND p.polname='scope_boundary' AND NOT p.polpermissive)) AS protected_tables
-      FROM pg_roles r WHERE r.rolname=current_user`);
+      (SELECT count(*)::int FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='guidekit_knowledge' AND c.relname IN('versions','documents','chunks') AND c.relrowsecurity AND c.relforcerowsecurity AND NOT pg_has_role(current_user,c.relowner,'MEMBER') AND EXISTS(SELECT 1 FROM pg_policy p WHERE p.polrelid=c.oid AND p.polname='scope_boundary' AND NOT p.polpermissive)) AS protected_tables,
+      (SELECT schema_version FROM guidekit_knowledge.metadata WHERE singleton=true) AS schema_version
+      ${scope ? ",set_config('guidekit.tenant_id',$1,true),set_config('guidekit.agent_id',$2,true),set_config('guidekit.version',$3,true)" : ''}
+      FROM pg_roles r WHERE r.rolname=current_user`, scope ? [scope.tenantId, scope.agentId, String(scope.version)] : []);
     const role = result.rows[0];
     if (!role || role.rolsuper || role.rolbypassrls || role.rolcreaterole || role.rolcreatedb || role.privileged_member || role.protected_tables !== 3) fail('invalid_config', 'PostgreSQL knowledge requires a separate restricted runtime role and forced row-level security. Owner, privileged and migration connections are refused.');
-    const schema = await client.query('SELECT schema_version FROM guidekit_knowledge.metadata WHERE singleton=true');
-    if (schema.rows[0]?.schema_version !== KNOWLEDGE_SCHEMA_VERSION) fail('invalid_config', 'PostgreSQL knowledge schema version is incompatible.');
+    if (role.schema_version !== KNOWLEDGE_SCHEMA_VERSION) fail('invalid_config', 'PostgreSQL knowledge schema version is incompatible.');
   }
   async function scoped<T>(scope: KnowledgeScope, task: (client: PoolClient) => Promise<T>): Promise<T> {
     validateScope(scope); if (closed) fail('request_failed', 'PostgreSQL knowledge is closed.');
     let client: PoolClient;
     try { client = await pool.connect(); } catch { return fail('request_failed', 'PostgreSQL knowledge connection could not open.'); }
     try {
-      await client.query('BEGIN'); await assertRuntime(client);
-      await client.query(`SELECT set_config('guidekit.tenant_id',$1,true),set_config('guidekit.agent_id',$2,true),set_config('guidekit.version',$3,true)`, [scope.tenantId, scope.agentId, String(scope.version)]);
+      await client.query('BEGIN'); await assertRuntime(client, scope);
       const value = await task(client); await client.query('COMMIT'); return value;
     } catch (error) { await client.query('ROLLBACK').catch(() => undefined); throw safeError(error); } finally { client.release(); }
   }
@@ -120,12 +120,12 @@ export function createPostgresKnowledgeProvider(config?: PostgresKnowledgeConfig
       if (typeof input.question !== 'string' || !input.question.trim() || input.question.length > 3000 || input.question.includes('\0')) fail('invalid_input', 'A retrieval question must contain 1–3000 characters.');
       const limit = input.limit ?? 8;
       if (!Number.isInteger(limit) || limit < 1 || limit > 16) fail('invalid_input', 'Retrieval limit must be between 1 and 16.');
-      // Fail on missing/model-incompatible snapshots before running local inference.
-      await scoped(input, async client => { if (!verifyVersion(await readVersion(client, input))) fail('not_ready', 'This published version has not completed PostgreSQL knowledge preparation.'); });
-      let embedded: number[];
-      try { embedded = normalizedVectors(await embeddings.embed([input.question]), 1)[0]!; } catch (error) { if (error instanceof KnowledgeError) throw error; return fail('embedding_failed', 'Local query embedding did not complete. No keyword-only fallback was used.'); }
       return scoped(input, async client => {
-        if (!verifyVersion(await readVersion(client, input))) fail('not_ready', 'This publication is unavailable.');
+        // One bounded transaction keeps the scope fixed while local CPU embedding runs.
+        // Immutable publications need no second version read or connection round trip.
+        if (!verifyVersion(await readVersion(client, input))) fail('not_ready', 'This published version has not completed PostgreSQL knowledge preparation.');
+        let embedded: number[];
+        try { embedded = normalizedVectors(await embeddings.embed([input.question]), 1)[0]!; } catch (error) { if (error instanceof KnowledgeError) throw error; return fail('embedding_failed', 'Local query embedding did not complete. No keyword-only fallback was used.'); }
         const result = await client.query(`WITH scoped AS MATERIALIZED (
           SELECT c.* FROM guidekit_knowledge.chunks c WHERE c.tenant_id=$1 AND c.agent_id=$2 AND c.version=$3
         ), query AS (SELECT to_tsquery('english',coalesce((SELECT string_agg(quote_literal(term),' | ') FROM (SELECT unnest(tsvector_to_array(to_tsvector('english',$4))) AS term LIMIT 32) terms),'')) AS q),

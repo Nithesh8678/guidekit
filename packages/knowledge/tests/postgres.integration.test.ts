@@ -18,7 +18,7 @@ const scopedQuery = async (pool: Pool, snapshot: KnowledgeSnapshot, sql: string,
 
 test('PostgreSQL hybrid retrieval: immutable atomic snapshots, exact grounded sources and RLS isolation', { skip: !enabled }, async t => {
   assert.equal(new URL(ownerUrl!).pathname, '/guidekit_test', 'Integration tests require the explicitly disposable test database.');
-  await installPostgresKnowledgeSchema({ connectionString: ownerUrl!, runtimeRole: 'guidekit_knowledge_runtime' });
+  await installPostgresKnowledgeSchema({ connectionString: ownerUrl!, runtimeRole: decodeURIComponent(new URL(runtimeUrl!).username) });
   const provider = createPostgresKnowledgeProvider({ connectionString: runtimeUrl!, embeddings: fixtureEmbeddings() });
   const owner = new Pool({ connectionString: ownerUrl, max: 1 }), runtime = new Pool({ connectionString: runtimeUrl, max: 2 });
   const snapshot: KnowledgeSnapshot = { tenantId: `test_${unique()}`, agentId: 'agent', version: 1, allowedActions: ['save'], documents: [{ id: 'transition', title: 'Dissolve transitions', content: '😀 Open Transitions. Choose Dissolve and add a gradual fade between two clips.' }, { id: 'billing', title: 'ExportPreset42 payment deadline', content: 'Invoices must be paid within 30 days. This billing policy explains payment deadlines.' }] };
@@ -46,6 +46,9 @@ test('PostgreSQL hybrid retrieval: immutable atomic snapshots, exact grounded so
       const runs = await Promise.all(Array.from({ length: 12 }, (_, index) => { const scope = index % 2 ? others[index % 3]! : snapshot; return provider.retrieve({ ...scope, question: 'blend movies' }).then(result => ({ scope, result })); }));
       for (const { scope, result } of runs) assert.equal(result.citations[0]?.title, scope === snapshot ? 'Dissolve transitions' : 'Other scope');
       const rows = await runtime.query('SELECT document_id FROM guidekit_knowledge.chunks'); assert.deepEqual(rows.rows, []);
+      await owner.query('CREATE POLICY test_accidental_allow ON guidekit_knowledge.chunks USING(true) WITH CHECK(true)');
+      try { assert.deepEqual((await runtime.query('SELECT document_id FROM guidekit_knowledge.chunks')).rows, [], 'The restrictive boundary must survive a broad permissive policy.'); }
+      finally { await owner.query('DROP POLICY test_accidental_allow ON guidekit_knowledge.chunks'); }
       const scoped = await scopedQuery(runtime, snapshot, 'SELECT DISTINCT tenant_id,agent_id,version FROM guidekit_knowledge.chunks'); assert.deepEqual(scoped.rows, [{ tenant_id: snapshot.tenantId, agent_id: snapshot.agentId, version: 1 }]);
       await assert.rejects(scopedQuery(runtime, snapshot, "INSERT INTO guidekit_knowledge.versions(tenant_id,agent_id,version,manifest,embedding_model,dimensions,chunk_count,allowed_actions) VALUES($1,'agent',1,repeat('a',64),'fixture',384,0,'[]')", [`forged_${unique()}`]), /row-level security/);
     });
