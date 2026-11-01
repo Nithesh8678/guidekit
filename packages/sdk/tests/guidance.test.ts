@@ -32,9 +32,14 @@ class ButtonDouble extends ElementDouble { type = 'button'; form: FormDouble | n
 class FormDouble extends ElementDouble { elements: ElementDouble[] = []; constructor() { super('form'); } }
 class DocumentDouble {
   documentElement = new ElementDouble('html'); listeners = new Map<string, Set<(event: Event) => void>>();
+  activeElement: ElementDouble | null = null;
   addEventListener(name: string, callback: (event: Event) => void) { const callbacks = this.listeners.get(name) ?? new Set(); callbacks.add(callback); this.listeners.set(name, callbacks); }
   removeEventListener(name: string, callback: (event: Event) => void) { this.listeners.get(name)?.delete(callback); }
-  fire(type: string, target: ElementDouble, extra: Record<string, unknown> = {}) { for (const callback of [...this.listeners.get(type) ?? []]) callback({ type, target, isTrusted: true, ...extra } as unknown as Event); }
+  fire(type: string, target: ElementDouble, extra: Record<string, unknown> = {}) {
+    if (type === 'focusin') this.activeElement = target;
+    if (type === 'focusout') this.activeElement = extra.relatedTarget as ElementDouble | null ?? null;
+    for (const callback of [...this.listeners.get(type) ?? []]) callback({ type, target, isTrusted: true, ...extra } as unknown as Event);
+  }
   get listenerCount() { return [...this.listeners.values()].reduce((count, listeners) => count + listeners.size, 0); }
 }
 class ObserverDouble {
@@ -120,6 +125,48 @@ test('valid choices advance after dispatch, while final click waits for a verifi
   } finally { state.restore(); context.mock.timers.reset(); }
 });
 
+test('a native select keeps its default only after a fresh trusted departure to a safe page control', context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const status = new SelectDouble(); status.value = 'Keep this private default'; const save = new ButtonDouble(); const state = environment([['status', status], ['save', save]]);
+  try {
+    state.session.start(); assert.match(state.state.hint, /leave this field to keep its current selection/);
+    state.fire('focusin', status); context.mock.timers.tick(5000); assert.equal(state.state.index, 0);
+    state.fire('focusout', status, { relatedTarget: save }); context.mock.timers.tick(0); assert.equal(state.state.index, 0, 'Native programmatic focus events alone are insufficient');
+    state.fire('focusin', status); state.fire('keydown', status, { key: 'Tab', isTrusted: false }); state.fire('focusout', status, { relatedTarget: save }); context.mock.timers.tick(0); assert.equal(state.state.index, 0);
+    state.fire('focusin', status); state.fire('keydown', status, { key: 'Tab' }); context.mock.timers.tick(0); state.fire('focusout', status, { relatedTarget: save }); context.mock.timers.tick(0); assert.equal(state.state.index, 0, 'An expired departure cannot authorize a later programmatic blur');
+    state.fire('focusin', status); state.fire('keydown', status, { key: 'Tab' }); state.fire('focusout', status, { relatedTarget: save }); context.mock.timers.tick(0); assert.equal(state.state.index, 1);
+    assert.equal(state.finishes.length, 0); assert.equal(JSON.stringify(state.updates.map(({ target, ...metadata }) => metadata)).includes(status.value), false);
+    state.fire('click', save); context.mock.timers.tick(1000); assert.equal(state.finishes.length, 0); state.session.reportResult('save', { success: true }); assert.equal(state.finishes[0]!.verified, true);
+  } finally { state.restore(); context.mock.timers.reset(); }
+});
+
+test('select acceptance rejects invalid values, GuideKit chrome and paused gestures, then accepts a fresh pointer departure', context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const status = new SelectDouble(); const save = new ButtonDouble(); const state = environment([['status', status], ['save', save]]), hud = new ElementDouble('div'); hud.setAttribute('data-guidekit-root', '');
+  try {
+    state.session.start(); status.validity.valid = false;
+    state.fire('focusin', status); state.fire('keydown', status, { key: 'Tab' }); state.fire('focusout', status, { relatedTarget: save }); context.mock.timers.tick(0); assert.equal(state.state.index, 0);
+    status.validity.valid = true; state.fire('focusin', status); state.fire('keydown', status, { key: 'Tab' }); state.fire('focusout', status, { relatedTarget: hud }); context.mock.timers.tick(0); assert.equal(state.state.index, 0);
+    state.fire('focusin', status); state.fire('keydown', status, { key: 'Tab' }); state.session.setPaused(true); state.fire('focusout', status, { relatedTarget: save }); context.mock.timers.tick(0); state.session.setPaused(false); context.mock.timers.tick(5000); assert.equal(state.state.index, 0);
+    state.fire('focusin', status); state.fire('pointerdown', save, { isTrusted: false }); state.fire('focusout', status, { relatedTarget: save }); context.mock.timers.tick(0); assert.equal(state.state.index, 0);
+    state.fire('focusin', status); state.fire('pointerdown', save); state.fire('focusout', status, { relatedTarget: save }); context.mock.timers.tick(0); assert.equal(state.state.index, 1);
+  } finally { state.restore(); context.mock.timers.reset(); }
+});
+
+test('unchecked checkboxes and passive targets never complete from a focus departure or elapsed time', context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const checkbox = new InputDouble('checkbox'), save = new ButtonDouble(), state = environment([['checkbox', checkbox], ['save', save]]);
+  try {
+    state.session.start(); state.fire('focusin', checkbox); state.fire('keydown', checkbox, { key: 'Tab' }); state.fire('focusout', checkbox, { relatedTarget: save }); context.mock.timers.tick(60000); assert.equal(state.state.index, 0); assert.equal(state.finishes.length, 0);
+  } finally { state.restore(); }
+  const passive = new ElementDouble('div'), waiting = environment([['passive', passive], ['save', save]]);
+  try {
+    waiting.session.start(); assert.match(waiting.state.hint, /website needs to confirm/); assert.doesNotMatch(waiting.state.hint, /Next|Finish/);
+    waiting.fire('click', passive); context.mock.timers.tick(60000); assert.equal(waiting.state.index, 0); assert.equal(waiting.finishes.length, 0);
+    waiting.session.reportResult('passive', { success: true, scope: 'step' }); assert.equal(waiting.state.index, 1); assert.equal(waiting.finishes.length, 0);
+  } finally { waiting.restore(); context.mock.timers.reset(); }
+});
+
 test('nonfinal click advances after dispatch; submit waits for the next newly available known target', context => {
   context.mock.timers.enable({ apis: ['setTimeout'] });
   const open = new ButtonDouble(); const submit = new ButtonDouble(); const after = new InputDouble(); after.visible = false;
@@ -183,7 +230,7 @@ test('stop and destroy remove all observers, listeners and timers, with no delay
   context.mock.timers.enable({ apis: ['setTimeout'] });
   const name = new InputDouble(); const state = environment([['name', name], ['save', new ButtonDouble()]]);
   try {
-    state.session.start(); name.value = 'Taylor'; state.fire('input', name); assert.equal(state.doc.listenerCount, 8);
+    state.session.start(); name.value = 'Taylor'; state.fire('input', name); assert.equal(state.doc.listenerCount, 10);
     state.session.destroy(); assert.equal(state.doc.listenerCount, 0); assert.equal(ObserverDouble.instances[0]!.connected, false); assert.equal(state.session.active, false);
     state.session.start(); state.fire('input', name); state.session.reportResult('save', { success: true }); context.mock.timers.tick(20000); state.mutate(); assert.deepEqual(state.finishes, [{ reason: 'stopped', verified: false }]);
   } finally { state.restore(); context.mock.timers.reset(); }
