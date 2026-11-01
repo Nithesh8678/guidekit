@@ -9,7 +9,7 @@ const instruction = (page: Page) => guide(page).locator('.guide-instruction');
 const accessible = (page: Page) => guide(page).locator('.guide-instruction-accessible');
 const longInstruction = 'Enter the full name you want to save for this contact. Take your time and check the spelling before continuing. The guide stays beside the field while you work, and it will move to the company field after you finish. You can pause, open chat, or show the complete instruction at any point. Nothing is submitted by this explanation; you stay in control of the contact details and the final save.';
 
-interface CardFrame { text: string; accessible: string; typing: boolean; width: number; height: number; scroll: string; step: string; }
+interface CardFrame { text: string; accessible: string; typing: boolean; width: number; height: number; scroll: string; step: string; footer?: { textHeight: number; lineHeight: number; outside: string[] }; }
 interface CardProbe { frames: CardFrame[]; running: boolean; }
 type ProbeWindow = Window & { __guidekitCardProbe: CardProbe };
 
@@ -21,7 +21,7 @@ const test = base.extend<{ browserErrors: string[] }>({
   }, { auto: true }],
 });
 
-async function openFixture(page: Page, texts: string[], belowPage = false) {
+async function openFixture(page: Page, texts: string[], belowPage = false, singleStep = false) {
   await page.addInitScript(() => {
     (window as unknown as ProbeWindow).__guidekitCardProbe = { frames: [], running: false };
     // This suite exercises local presentation using the explicit test provider.
@@ -35,7 +35,7 @@ async function openFixture(page: Page, texts: string[], belowPage = false) {
     const response = await route.fetch();
     expect(response.status()).toBe(200);
     const run = await response.json() as RunResult;
-    run.steps = run.steps.map((step, index) => ({ ...step, text: texts[index] ?? 'Continue to this control.' }));
+    run.steps = (singleStep ? run.steps.slice(0, 1) : run.steps).map((step, index) => ({ ...step, text: texts[index] ?? 'Continue to this control.' }));
     await route.fulfill({ response, json: run });
   });
   const auth = await page.request.post(`${endpoint}/api/auth/register`, { headers: { Origin: endpoint }, data: { email: `card-${crypto.randomUUID()}@example.test`, name: 'Card Tester', companyName: 'Card Workspace', password: 'Synthetic-card-password-42' } });
@@ -65,8 +65,8 @@ async function openFixture(page: Page, texts: string[], belowPage = false) {
   }, belowPage);
 }
 
-async function startProbe(page: Page) {
-  await page.evaluate(() => {
+async function startProbe(page: Page, inspectFooter = false) {
+  await page.evaluate(inspectFooter => {
     const probe = (window as unknown as ProbeWindow).__guidekitCardProbe;
     probe.frames = []; probe.running = true;
     const frame = () => {
@@ -74,12 +74,22 @@ async function startProbe(page: Page) {
       const card = root?.querySelector<HTMLElement>('[aria-label="Visual guidance"]');
       if (card && !card.hidden) {
         const bounds = card.getBoundingClientRect();
-        probe.frames.push({ text: card.querySelector('.guide-instruction')?.textContent ?? '', accessible: card.querySelector('.guide-instruction-accessible')?.textContent ?? '', typing: card.dataset.gkTyping === 'true', width: bounds.width, height: bounds.height, scroll: card.dataset.gkScrollState ?? '', step: card.querySelector('.guide-label')?.textContent ?? '' });
+        let footer: CardFrame['footer'];
+        if (inspectFooter) {
+          const end = card.querySelector<HTMLElement>('.guide-controls button:last-child')!;
+          const range = document.createRange(); range.selectNodeContents(end);
+          const outside = [...card.querySelectorAll<HTMLElement>('.guide-controls button, .guide-tools button')].flatMap(button => {
+            const control = button.getBoundingClientRect();
+            return control.left < bounds.left - 1 || control.right > bounds.right + 1 || control.top < bounds.top - 1 || control.bottom > bounds.bottom + 1 ? [button.getAttribute('aria-label') ?? button.textContent ?? ''] : [];
+          });
+          footer = { textHeight: range.getBoundingClientRect().height, lineHeight: parseFloat(getComputedStyle(end).lineHeight), outside };
+        }
+        probe.frames.push({ text: card.querySelector('.guide-instruction')?.textContent ?? '', accessible: card.querySelector('.guide-instruction-accessible')?.textContent ?? '', typing: card.dataset.gkTyping === 'true', width: bounds.width, height: bounds.height, scroll: card.dataset.gkScrollState ?? '', step: card.querySelector('.guide-label')?.textContent ?? '', ...(footer ? { footer } : {}) });
       }
       if (probe.running) requestAnimationFrame(frame);
     };
     requestAnimationFrame(frame);
-  });
+  }, inspectFooter);
 }
 
 async function stopProbe(page: Page): Promise<CardFrame[]> {
@@ -143,6 +153,20 @@ test('compact instructions stay smaller and a 320px viewport contains long unbro
     const control = guide(page).getByRole('button', { name: label, exact: true }); await expect(control).toBeInViewport({ ratio: 1 });
     const box = await control.boundingBox(); expect(box!.x).toBeGreaterThanOrEqual(long!.x); expect(box!.x + box!.width).toBeLessThanOrEqual(long!.x + long!.width + 1);
   }
+});
+
+test('a one-step guide keeps its Finish guide label on one line and all controls inside the compact typing card', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 740 }); await page.emulateMedia({ reducedMotion: 'no-preference' });
+  const text = 'Enter your name.';
+  await openFixture(page, [text], false, true); await startProbe(page, true);
+  try {
+    await ask(page); await finished(page, text);
+    await expect(guide(page).getByRole('button', { name: 'Finish guide', exact: true })).toBeVisible();
+    const samples = (await stopProbe(page)).filter(sample => sample.typing && sample.text.length > 0);
+    expect(samples.some(sample => sample.text.length < 7), 'Observe the short initial prefix, before full text can widen the card').toBe(true);
+    expect(samples.every(sample => sample.footer && Number.isFinite(sample.footer.lineHeight) && sample.footer.textHeight <= sample.footer.lineHeight + 1), 'The actual Finish guide text range occupies at most one line during typing').toBe(true);
+    expect(samples.flatMap(sample => sample.footer?.outside ?? []), 'Header and footer controls stay within the rendered card throughout typing').toEqual([]);
+  } finally { await stopProbe(page); }
 });
 
 test('typed Unicode prefixes end only at complete graphemes including combining accents, flags and joined emoji', async ({ page }) => {
