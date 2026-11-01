@@ -59,6 +59,7 @@ export class JourneyCoordinator {
   private sceneRoute = '';
   private contextRevision: string | undefined;
   private sceneRevision: string | undefined;
+  private sceneGeneration = 0;
   private readonly maxContinuations: number;
   private disposition: 'continue' | 'needs_input' | 'done' = 'continue';
   private planTargets = new Set<string>();
@@ -78,7 +79,7 @@ export class JourneyCoordinator {
   get canContinue(): boolean { return this.disposition === 'continue'; }
   get suspended(): boolean { return this.paused || this.awaitingHost; }
   initial(): JourneyRequest { return this.request('initial'); }
-  seed(page: PageContext, route: string, revision?: string): void { this.baseline = page; this.scene = page; this.routeKey = route; this.sceneRoute = route; this.contextRevision = revision; this.sceneRevision = revision; this.expectingTransition = false; }
+  seed(page: PageContext, route: string, revision?: string): void { this.baseline = page; this.scene = page; this.routeKey = route; this.sceneRoute = route; this.contextRevision = revision; this.sceneRevision = revision; this.expectingTransition = false; this.sceneGeneration++; }
   memory(): JourneyMemory { return { version: 1, id: this.id, goal: this.goal, completed: this.completed.map(({ targetId, evidence }) => ({ targetId, evidence })), savedAt: Date.now() }; }
 
   adopt(plan: JourneyPlan): void {
@@ -126,6 +127,7 @@ export class JourneyCoordinator {
   observe(page: PageContext, routeKey: string, revision?: string): void {
     if (!this.running || this.paused || this.awaitingHost || !this.baseline) return;
     if (this.scene && fingerprint(page) === fingerprint(this.scene) && routeKey === this.sceneRoute && revision === this.sceneRevision) return;
+    this.sceneGeneration++;
     this.scene = page; this.sceneRoute = routeKey; this.sceneRevision = revision;
     if (fingerprint(page) === fingerprint(this.baseline) && routeKey === this.routeKey && revision === this.contextRevision) return;
     const changedRoute = routeKey !== this.routeKey;
@@ -189,7 +191,7 @@ export class JourneyCoordinator {
     if (this.calls >= this.maxContinuations) { this.fail('This task reached its automatic guidance limit. Check your progress, then ask for the next part.'); return; }
     this.calls++; this.revision++;
     const controller = new AbortController(); this.inFlight = controller; const epoch = ++this.epoch;
-    const sceneBefore = sceneFingerprint(this.scene, this.sceneRoute, this.sceneRevision);
+    const sceneGenerationBefore = this.sceneGeneration;
     this.callbacks.onPending();
     try {
       const plan = await this.callbacks.replan(this.request(reason), controller.signal);
@@ -197,7 +199,7 @@ export class JourneyCoordinator {
       const metadata = plan.run.journey;
       if (!metadata || metadata.id !== this.id || metadata.revision !== this.revision) throw new Error('The journey response did not match the active task.');
       const latestScene = sceneFingerprint(this.scene, this.sceneRoute, this.sceneRevision);
-      if (latestScene !== sceneBefore && sceneFingerprint(plan.page, plan.routeKey, plan.contextRevision) !== latestScene) {
+      if (this.sceneGeneration !== sceneGenerationBefore && sceneFingerprint(plan.page, plan.routeKey, plan.contextRevision) !== latestScene) {
         // Never apply a response for an obsolete route, control identity or host
         // revision. Many intermediate scene updates become one fresh request.
         this.pendingReason = 'scene_changed'; return;

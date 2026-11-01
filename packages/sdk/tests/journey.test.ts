@@ -219,6 +219,22 @@ test('scene storms keep one unsettled planning promise and discard its stale pla
   } finally { journey.cancel(); context.mock.timers.reset(); }
 });
 
+test('an observed A to B to A cycle rejects a captured B response even when the final scene matches the starting scene', async context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] }); const requests: JourneyRequest[] = [], releases: Array<(plan: JourneyPlan) => void> = [], applied: JourneyPlan[] = [];
+  const journey = new JourneyCoordinator('Keep current controls grounded', { replan: request => { requests.push(request); return new Promise(resolve => releases.push(resolve)); }, onPending() {}, onPlan: value => applied.push(value), onError: assert.fail });
+  try {
+    journey.adopt(plan(page(), journey.initial())); const sceneA = page(['control_a']), sceneB = page(['control_b']);
+    journey.observe(sceneA, sceneA.url); context.mock.timers.tick(120); assert.equal(requests.length, 1);
+    // The request collected B, while the observer later catches B and returns
+    // to A on the same route. Endpoint equality must not hide that history.
+    journey.observe(sceneB, sceneB.url); journey.observe(sceneA, sceneA.url); context.mock.timers.tick(1000); assert.equal(requests.length, 1);
+    releases[0]!(plan(sceneB, requests[0])); await settled(); assert.equal(applied.length, 0);
+    context.mock.timers.tick(119); assert.equal(requests.length, 1); context.mock.timers.tick(1); assert.equal(requests.length, 2);
+    releases[1]!(plan(sceneA, requests[1])); await settled(); assert.equal(applied.length, 1); assert.deepEqual(applied[0]!.page.targets.map(target => target.id), ['control_a']);
+    context.mock.timers.tick(1000); assert.equal(requests.length, 2);
+  } finally { journey.cancel(); context.mock.timers.reset(); }
+});
+
 test('changed route, target identity, privacy removal and host revision reject stale in-flight plans', async context => {
   context.mock.timers.enable({ apis: ['setTimeout'] });
   const original = page(['field']);
