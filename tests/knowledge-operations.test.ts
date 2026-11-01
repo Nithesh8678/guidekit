@@ -48,7 +48,7 @@ test('knowledge previews, retrieval evaluation, request capacities and metrics a
 test('PostgreSQL knowledge selection preserves snapshot sources and validates provider evidence before inference', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'guidekit-provider-')), origins = new Set<string>();
   const snapshots = new Map<number, { tenantId: string; agentId: string; version: number; documents: Array<{ id: string; title: string; content: string }> }>();
-  let fail = false, forged = false, infer = 0, retrievals = 0;
+  let fail = false, forged = false, infer = 0, retrievals = 0, citedId = '';
   const knowledge = {
     id: 'postgres' as const,
     status: async () => ({ source: 'postgres' as const, configured: true, connected: !fail, mode: 'hybrid', message: 'Explicit synthetic PostgreSQL provider.' }),
@@ -57,15 +57,15 @@ test('PostgreSQL knowledge selection preserves snapshot sources and validates pr
       retrievals++; if (fail) throw new Error('private connection detail');
       const snapshot = snapshots.get(scope.version)!;
       assert.equal(scope.tenantId, snapshot.tenantId); assert.equal(scope.agentId, snapshot.agentId);
-      return { source: 'postgres' as const, citations: snapshot.documents.map(document => ({ documentId: document.id, title: document.title, excerpt: forged ? 'Fabricated text outside the saved source.' : document.content })), paths: [] };
+      return { source: 'postgres' as const, citations: snapshot.documents.flatMap(document => document.content.split(/(?<=\.) /).map(excerpt => ({ documentId: document.id, title: document.title, excerpt: forged ? 'Fabricated text outside the saved source.' : excerpt }))), paths: [] };
     }
   };
-  const core = await createApp({ dataDir: dir, testing: true, knowledge, adminOrigins: origins, provider: { status: async () => ({ provider: 'codex', authenticated: true, available: true, message: 'Explicit test provider' }), infer: async () => { infer++; return JSON.stringify({ answer: 'Use billing export.', steps: [], action: null, citationIds: [] }); }, close: async () => {} } });
+  const core = await createApp({ dataDir: dir, testing: true, knowledge, adminOrigins: origins, provider: { status: async () => ({ provider: 'codex', authenticated: true, available: true, message: 'Explicit test provider' }), infer: async () => { infer++; return JSON.stringify({ answer: 'Use billing export.', steps: [], action: null, citationIds: [citedId] }); }, close: async () => {} } });
   const server = createServer(core.app); await new Promise<void>(accept => server.listen(0, '127.0.0.1', accept)); const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`; origins.add(base);
   try {
     const owner = await core.repo.register({ email: 'provider@example.invalid', name: 'Provider owner', companyName: 'Provider' }, 'synthetic-no-login-hash');
     const agent = await core.repo.createAgent(owner.tenant.id, { name: 'Provider guide', companyName: 'Provider', description: '', instructions: '', greeting: 'Hello', accentColor: '#365cf5', allowedOrigins: [website], allowedActions: [] });
-    const document = await core.repo.addDocument(owner.tenant.id, agent.id, { title: 'Billing', content: 'Billing invoices support CSV export.' });
+    const document = await core.repo.addDocument(owner.tenant.id, agent.id, { title: 'Billing', content: 'Billing invoices support CSV export. Export history is retained for thirty days.' }); citedId = document.id;
     await core.repo.publish(owner.tenant.id, agent.id);
     const sid = 'provider_fixture', expires = Date.now() + 60000;
     await core.repo.db.prepare('INSERT INTO dashboard_sessions VALUES (?,?,?)').run(sid, JSON.stringify({ userId: owner.user.id, cookie: { path: '/', expires: new Date(expires).toISOString() } }), expires);
@@ -92,11 +92,16 @@ test('PostgreSQL knowledge selection preserves snapshot sources and validates pr
     });
     const started = await fetch(`${base}/api/embed/${agent.id}/session`, { method: 'POST', headers: { Origin: website, 'Content-Type': 'application/json' }, body: '{}' }); const token = (await started.json() as any).token;
     const page = { url: `${website}/`, title: 'Test', targets: [], actions: [], context: {} };
+    await t.test('a cited document preserves distinct source excerpts for a multi-part answer', async () => {
+      const answer = await request('/api/embed/session/ask', { message: 'billing export history', requestId: 'multiple_excerpts', page }, token);
+      assert.equal(answer.status, 200); assert.deepEqual(answer.data.citations.map((citation: { excerpt: string }) => citation.excerpt), ['Billing invoices support CSV export.', 'Export history is retained for thirty days.']);
+      assert.ok(answer.data.citations.every((citation: { documentId: string }) => citation.documentId === document.id));
+    });
     await t.test('forged citations and outages fail closed without local or model fallback', async () => {
-      forged = true;
-      const answer = await request('/api/embed/session/ask', { message: 'billing', requestId: 'forged_evidence', page }, token); assert.equal(answer.status, 502); assert.match(answer.data.error, /outside this published knowledge snapshot/); assert.equal(infer, 0);
+      const before = infer; forged = true;
+      const answer = await request('/api/embed/session/ask', { message: 'billing', requestId: 'forged_evidence', page }, token); assert.equal(answer.status, 502); assert.match(answer.data.error, /outside this published knowledge snapshot/); assert.equal(infer, before);
       forged = false; fail = true;
-      const unavailable = await request('/api/embed/session/ask', { message: 'billing', requestId: 'unavailable_evidence', page }, token); assert.equal(unavailable.status, 502); assert.match(unavailable.data.error, /PostgreSQL/); assert.doesNotMatch(unavailable.data.error, /private connection/); assert.equal(infer, 0);
+      const unavailable = await request('/api/embed/session/ask', { message: 'billing', requestId: 'unavailable_evidence', page }, token); assert.equal(unavailable.status, 502); assert.match(unavailable.data.error, /PostgreSQL/); assert.doesNotMatch(unavailable.data.error, /private connection/); assert.equal(infer, before);
       const failedCandidate = await request(`/api/agents/${agent.id}/publish`, {}); assert.equal(failedCandidate.data.version.status, 'failed'); assert.equal(failedCandidate.data.activeVersion, 2); assert.equal((await request('/ready')).status, 503);
       fail = false;
       const retry = await request(`/api/agents/${agent.id}/versions/3/retry`, {}); assert.equal(retry.data.version.status, 'ready'); assert.equal(retry.data.activeVersion, 3); assert.equal((await request('/ready')).status, 200);

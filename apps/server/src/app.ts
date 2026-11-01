@@ -49,7 +49,8 @@ export async function createApp(options: AppOptions) {
   const legacyGraph = asKnowledgeProvider(options.graph);
   const knowledgeProviders = [knowledgeProvider, legacyGraph].filter((value): value is KnowledgeProvider => !!value);
   const publications = new Publications(repo, knowledgeProvider, legacyGraph);
-  await publications.ready();
+  try { await publications.ready(); }
+  catch (error) { await Promise.allSettled([options.provider.close(), knowledgeProvider?.close?.(), repo.close()]); throw error; }
   const inFlight = new Map<string, Promise<RunResult>>();
   const controllers = new Set<AbortController>();
   const dailyRunLimit = options.limits?.dailyRuns ?? 500, activeSessionLimit = options.limits?.activeSessions ?? 100;
@@ -134,19 +135,41 @@ export async function createApp(options: AppOptions) {
     res.once('finish', () => { if (res.statusCode < 400) void repo.audit(actor.tenant.id, actor.user.id, `agent.${method.toLowerCase()}`, path.split('/').filter(Boolean).slice(0, 4).join('/') || 'new', { status: res.statusCode }).catch(() => undefined); });
     next();
   });
-  app.get('/api/agents', async (req, res) => res.json({ agents: (await repo.listAgents((await workspace(req)).tenant.id)) }));
-  app.post('/api/agents', async (req, res) => res.status(201).json({ agent: (await repo.createAgent((await workspace(req)).tenant.id, agentConfigSchema.parse(req.body))) }));
-  app.get('/api/agents/:id', async (req, res) => res.json((await repo.detail((await workspace(req)).tenant.id, String(req.params.id)))));
-  app.put('/api/agents/:id', async (req, res) => res.json({ agent: (await repo.updateAgent((await workspace(req)).tenant.id, String(req.params.id), agentConfigSchema.parse(req.body))) }));
-  app.post('/api/agents/:id/documents', async (req, res) => res.status(201).json({ document: (await repo.addDocument((await workspace(req)).tenant.id, String(req.params.id), documentSchema.parse(req.body))) }));
-  app.put('/api/agents/:id/documents/:documentId', async (req, res) => res.json({ document: (await repo.updateDocument((await workspace(req)).tenant.id, String(req.params.id), String(req.params.documentId), documentSchema.parse(req.body))) }));
-  app.delete('/api/agents/:id/documents/:documentId', async (req, res) => { (await repo.removeDocument((await workspace(req)).tenant.id, String(req.params.id), String(req.params.documentId))); res.json({ ok: true }); });
+  // Tenant membership changes and account revocations acquire these same locks.
+  // Recheck inside the mutation transaction so PostgreSQL awaits cannot turn an
+  // earlier editor permission check into authority after the permission is revoked.
+  const authorizeAgentWrite = async (req: Request, expectedTenant?: string): Promise<Workspace> => {
+    const initial = await workspace(req);
+    if (expectedTenant && initial.tenant.id !== expectedTenant) throw new AppError(403, 'Workspace access changed. Retry in the intended workspace.');
+    await repo.lockTenant(initial.tenant.id); await repo.lockUser(initial.user.id);
+    const actor = await workspace(req);
+    if (actor.user.id !== initial.user.id || actor.tenant.id !== initial.tenant.id || actor.role === 'viewer') throw new AppError(403, 'Viewers cannot change agents or publish versions. Ask a workspace admin for editor access.');
+    return actor;
+  };
+  const mutateAgent = <T>(req: Request, operation: (actor: Workspace) => Promise<T>) => repo.transaction(async () => operation(await authorizeAgentWrite(req)));
+  app.get('/api/agents', async (req, res) => res.json({ agents: await repo.listAgents((await workspace(req)).tenant.id) }));
+  app.post('/api/agents', async (req, res) => res.status(201).json({ agent: await mutateAgent(req, actor => repo.createAgent(actor.tenant.id, agentConfigSchema.parse(req.body))) }));
+  app.get('/api/agents/:id', async (req, res) => res.json(await repo.detail((await workspace(req)).tenant.id, String(req.params.id))));
+  app.put('/api/agents/:id', async (req, res) => res.json({ agent: await mutateAgent(req, actor => repo.updateAgent(actor.tenant.id, String(req.params.id), agentConfigSchema.parse(req.body))) }));
+  app.post('/api/agents/:id/documents', async (req, res) => res.status(201).json({ document: await mutateAgent(req, actor => repo.addDocument(actor.tenant.id, String(req.params.id), documentSchema.parse(req.body))) }));
+  app.put('/api/agents/:id/documents/:documentId', async (req, res) => res.json({ document: await mutateAgent(req, actor => repo.updateDocument(actor.tenant.id, String(req.params.id), String(req.params.documentId), documentSchema.parse(req.body))) }));
+  app.delete('/api/agents/:id/documents/:documentId', async (req, res) => { await mutateAgent(req, actor => repo.removeDocument(actor.tenant.id, String(req.params.id), String(req.params.documentId))); res.json({ ok: true }); });
   const versionNumber = (value: unknown) => z.coerce.number().int().positive().max(2_147_483_647).parse(value);
-  app.post('/api/agents/:id/publish', async (req, res) => res.status(201).json(await publications.publish((await workspace(req)).tenant.id, String(req.params.id))));
-  app.get('/api/agents/:id/versions/:number', async (req, res) => res.json((await repo.version((await workspace(req)).tenant.id, String(req.params.id), versionNumber(req.params.number)))));
-  app.post('/api/agents/:id/versions/:number/retry', async (req, res) => res.json(await publications.prepare((await workspace(req)).tenant.id, String(req.params.id), versionNumber(req.params.number))));
-  app.post('/api/agents/:id/versions/:number/activate', async (req, res) => { const tenantId = (await workspace(req)).tenant.id, agentId = String(req.params.id); (await publications.activate(tenantId, agentId, versionNumber(req.params.number))); res.json({ activeVersion: (await repo.agent(tenantId, agentId)).publishedVersion }); });
-  app.post('/api/agents/:id/unpublish', async (req, res) => { (await repo.unpublish((await workspace(req)).tenant.id, String(req.params.id))); res.json({ activeVersion: null }); });
+  app.post('/api/agents/:id/publish', async (req, res) => {
+    const tenantId = (await workspace(req)).tenant.id;
+    res.status(201).json(await publications.publish(tenantId, String(req.params.id), async () => { await authorizeAgentWrite(req, tenantId); }));
+  });
+  app.get('/api/agents/:id/versions/:number', async (req, res) => res.json(await repo.version((await workspace(req)).tenant.id, String(req.params.id), versionNumber(req.params.number))));
+  app.post('/api/agents/:id/versions/:number/retry', async (req, res) => {
+    const tenantId = (await workspace(req)).tenant.id;
+    await mutateAgent(req, async actor => { await repo.agent(actor.tenant.id, String(req.params.id)); });
+    res.json(await publications.prepare(tenantId, String(req.params.id), versionNumber(req.params.number), true, async () => { await authorizeAgentWrite(req, tenantId); }));
+  });
+  app.post('/api/agents/:id/versions/:number/activate', async (req, res) => {
+    const tenantId = (await workspace(req)).tenant.id, agentId = String(req.params.id);
+    await publications.activate(tenantId, agentId, versionNumber(req.params.number), async () => { await authorizeAgentWrite(req, tenantId); }); res.json({ activeVersion: (await repo.agent(tenantId, agentId)).publishedVersion });
+  });
+  app.post('/api/agents/:id/unpublish', async (req, res) => { await mutateAgent(req, actor => repo.unpublish(actor.tenant.id, String(req.params.id))); res.json({ activeVersion: null }); });
   const previewSchema = z.object({ question: z.string().trim().min(1).max(500), version: z.number().int().positive().optional() }).strict();
   app.post('/api/agents/:id/knowledge-preview', async (req, res) => {
     const actor = (await workspace(req)), agentId = String(req.params.id), agent = (await repo.agent(actor.tenant.id, agentId)), input = previewSchema.parse(req.body), number = input.version ?? agent.publishedVersion;
@@ -169,7 +192,7 @@ export async function createApp(options: AppOptions) {
     const day = `${new Date().toISOString().slice(0, 10)}T00:00:00.000Z`;
     const rows = (await repo.rows('SELECT status,COUNT(*) AS count,ROUND(AVG(duration_ms)) AS averageDurationMs FROM runs WHERE tenant_id=? AND agent_id=? AND created_at>=? GROUP BY status', actor.tenant.id, agentId, day));
     const workspaceRuns = Number((await repo.row('SELECT COUNT(*) AS count FROM runs WHERE tenant_id=? AND created_at>=?', actor.tenant.id, day))!.count);
-    res.json({ periodStart: day, statuses: rows, workspaceUsage: { runs: workspaceRuns, dailyLimit: dailyRunLimit, remaining: Math.max(0, dailyRunLimit - workspaceRuns) } });
+    res.json({ periodStart: day, statuses: rows.map(row => ({ ...row, count: Number(row.count), averageDurationMs: row.averageDurationMs === null ? null : Number(row.averageDurationMs) })), workspaceUsage: { runs: workspaceRuns, dailyLimit: dailyRunLimit, remaining: Math.max(0, dailyRunLimit - workspaceRuns) } });
   });
   app.get('/api/agents/:id/diagnostics', async (req, res) => {
     const tenantId = (await workspace(req)).tenant.id, agent = (await repo.agent(tenantId, String(req.params.id)));
@@ -201,12 +224,13 @@ export async function createApp(options: AppOptions) {
   const syncKnowledge = async (req: Request, res: Response) => {
     const tenantId = (await workspace(req)).tenant.id, agentId = String(req.params.id);
     if (req.path.endsWith('/graph-sync') && !knowledgeProvider) throw new AppError(503, 'TigerGraph is not configured. Select a knowledge provider before syncing.');
+    await mutateAgent(req, async actor => { await repo.agent(actor.tenant.id, agentId); });
     const agent = await repo.agent(tenantId, agentId), input = z.object({ version: z.number().int().positive().optional() }).strict().parse(req.body ?? {});
     const number = input.version ?? agent.publishedVersion;
     if (!number) throw new AppError(400, 'Publish a candidate first.');
     const snapshot = await repo.version(tenantId, agentId, number);
     requireKnowledgeProvider(snapshot.version.graphSource, knowledgeProviders);
-    const result = await publications.prepare(tenantId, agentId, number);
+    const result = await publications.prepare(tenantId, agentId, number, true, async () => { await authorizeAgentWrite(req, tenantId); });
     if (result.version.status !== 'ready') throw new AppError(502, result.version.error ?? 'Knowledge preparation failed.');
     res.json({ synced: true, source: result.version.graphSource, version: result.version.number, vertices: result.vertices, edges: result.edges, chunks: result.chunks });
   };
@@ -326,7 +350,9 @@ export async function createApp(options: AppOptions) {
         action = { ...plan.action, receiptId, requiresConfirmation: true };
       }
       const ids = new Set(plan.citationIds);
-      const selected = citations.filter(c => ids.has(c.documentId)).filter((c, index, all) => all.findIndex(x => x.documentId === c.documentId) === index);
+      // A cited document may contribute several distinct, validated excerpts. Keep
+      // those excerpts so the displayed evidence still covers a multi-part answer.
+      const selected = citations.filter(c => ids.has(c.documentId)).filter((c, index, all) => all.findIndex(x => x.documentId === c.documentId && x.excerpt === c.excerpt) === index);
       const result: RunResult = { runId, answer: plan.answer, steps: plan.steps, action, citations: selected, provider: options.provider.id ?? 'codex', version: published.version, knowledge, ...(input.journey ? { journey: { id: input.journey.id, revision: input.journey.revision, disposition: plan.journeyDisposition ?? (plan.steps.length ? 'continue' : 'needs_input') } } : {}) };
       controller.signal.throwIfAborted();
       (await repo.transaction(async () => {
@@ -369,7 +395,7 @@ export async function createApp(options: AppOptions) {
   });
   app.get('/health', (_req, res) => res.json({ ok: true, service: 'guidekit', mode: 'local' }));
   app.get('/ready', async (_req, res) => {
-    let database = false; try { database = (await repo.row('SELECT 1 AS ok FROM schema_migrations LIMIT 1'))?.ok === 1; } catch { /* Report only readiness, never database paths. */ }
+    let database = false; try { database = (await repo.row(`SELECT 1 AS ok FROM ${repo.dialect === 'postgres' ? 'guidekit_schema_migrations' : 'schema_migrations'} LIMIT 1`))?.ok === 1; } catch { /* Report only readiness, never database paths. */ }
     const runtime = await options.provider.status().catch(() => ({ available: false, authenticated: false }));
     const knowledge = await (async () => {
       // Readiness concerns active publications. A retained historical TigerGraph
@@ -379,7 +405,7 @@ export async function createApp(options: AppOptions) {
       if ([...required].some(source => source !== 'local' && !knowledgeProviders.some(provider => provider.id === source))) return false;
       const selected = knowledgeProviders.filter(provider => required.has(provider.id) || provider === knowledgeProvider);
       return (await Promise.all(selected.map(provider => provider.status().then(status => status.connected).catch(() => false)))).every(Boolean);
-    })();
+    })().catch(() => false);
     const ok = database && runtime.available && runtime.authenticated && knowledge;
     res.status(ok ? 200 : 503).json({ ok, checks: { database, runtime: runtime.available && runtime.authenticated, knowledge, graph: knowledge }, provider: options.provider.id ?? 'codex' });
   });

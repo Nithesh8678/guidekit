@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createServer } from 'node:http';
-import { createHmac } from 'node:crypto';
+import { createHmac, randomUUID } from 'node:crypto';
+import { Pool } from 'pg';
+import { AsyncRepository } from '../apps/server/src/repository.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -9,28 +11,46 @@ import { hash } from '@node-rs/argon2';
 import { createApp } from '../apps/server/src/app.js';
 import type { AccountDeliveryMessage } from '../apps/server/src/accounts.js';
 
+// Opt-in live PostgreSQL verification uses a new disposable schema for each test.
+// Normal local/CI runs keep the SQLite fixture and never connect to a remote DB.
+async function isolatedAccountRepository(dir: string) {
+  const value = process.env.GUIDEKIT_TEST_POSTGRES_URL;
+  if (!value) return { repository: undefined, async close() {} };
+  const direct = new URL(value);
+  if (direct.hostname.endsWith('.neon.tech')) direct.hostname = direct.hostname.replace('-pooler.', '.');
+  if (direct.searchParams.get('sslmode') === 'require') direct.searchParams.set('sslmode', 'verify-full');
+  const owner = new Pool({ connectionString: direct.toString(), max: 1 }), schema = `gk_http_${randomUUID().replaceAll('-', '')}`;
+  try {
+    await owner.query(`CREATE SCHEMA ${schema}`);
+    const runtime = new URL(direct); runtime.searchParams.set('options', `-c search_path=${schema}`);
+    const repository = await AsyncRepository.open({ dir, connectionString: runtime.toString(), migrate: true });
+    return { repository, async close() { await owner.query(`DROP SCHEMA ${schema} CASCADE`); await owner.end(); } };
+  } catch (error) { await owner.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`); await owner.end(); throw error; }
+}
+
 async function fixture() {
   const dir = await mkdtemp(join(tmpdir(), 'guidekit-account-races-')), origins = new Set<string>(), messages: AccountDeliveryMessage[] = [];
+  const database = await isolatedAccountRepository(dir);
   let statusGate: (() => Promise<void>) | undefined;
-  const core = (await createApp({ dataDir: dir, adminOrigins: origins, testing: true,
+  const core = (await createApp({ dataDir: dir, repository: database.repository, adminOrigins: origins, testing: true,
     delivery: { mode: 'local', async deliver(message) { messages.push(message); } },
     provider: { async status() { await statusGate?.(); return { provider: 'codex', available: true, authenticated: true, message: 'Explicit account race fixture' }; }, async infer() { throw new Error('Account race tests never call inference.'); }, async close() {} }
   }));
   const server = createServer(core.app); await new Promise<void>(accept => server.listen(0, '127.0.0.1', accept));
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`; origins.add(base);
-  async function request(path: string, cookie = '', body?: unknown) {
-    const response = await fetch(`${base}${path}`, { method: body === undefined ? 'GET' : 'POST', headers: { Origin: base, Cookie: cookie, 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) });
+  async function request(path: string, cookie = '', body?: unknown, method = body === undefined ? 'GET' : 'POST') {
+    const response = await fetch(`${base}${path}`, { method, headers: { Origin: base, Cookie: cookie, 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) });
     return { status: response.status, data: await response.json() as any, cookie: response.headers.get('set-cookie')?.split(';')[0] ?? cookie };
   }
-  async function staleSession(userId: string, epoch: number) {
+  async function staleSession(userId: string, epoch: number, tenantId?: string) {
     // Model an in-flight session touch restoring a pre-revocation row. A live epoch check
     // must reject it even though its cookie signature and former identity are valid.
     const id = `race_${userId}`, expires = Date.now() + 60_000;
-    (await core.repo.db.prepare('INSERT OR REPLACE INTO dashboard_sessions VALUES (?,?,?)').run(id, JSON.stringify({ userId, authEpoch: epoch, cookie: { path: '/', expires: new Date(expires).toISOString() } }), expires));
+    (await core.repo.db.prepare('INSERT OR REPLACE INTO dashboard_sessions VALUES (?,?,?)').run(id, JSON.stringify({ userId, tenantId, authEpoch: epoch, cookie: { path: '/', expires: new Date(expires).toISOString() } }), expires));
     const signature = createHmac('sha256', core.repo.sessionSecret).update(id).digest('base64').replace(/=+$/, '');
     return `gk.sid=${encodeURIComponent(`s:${id}.${signature}`)}`;
   }
-  async function close() { await core.close(); server.closeAllConnections(); await new Promise<void>(accept => server.close(() => accept())); await rm(dir, { recursive: true, force: true }); }
+  async function close() { await core.close(); server.closeAllConnections(); await new Promise<void>(accept => server.close(() => accept())); await database.close(); await rm(dir, { recursive: true, force: true }); }
   return { core, request, staleSession, messages, close, holdStatus: (gate: () => Promise<void>) => { statusGate = gate; } };
 }
 const passwordHash = (value: string) => hash(value, { memoryCost: 19456, timeCost: 2, parallelism: 1 });
@@ -115,17 +135,46 @@ test('concurrent password recovery can consume a reset link only once', async ()
   } finally { await state.close(); }
 });
 
-test('parallel invitations enforce the pending capacity within a tenant transaction', async () => {
+test('concurrent invitations cannot exceed the pending capacity within a tenant transaction', async () => {
   const state = await fixture();
   try {
     const owner = await state.core.repo.register({ email: 'parallel-invite@example.invalid', name: 'Invitation owner', companyName: 'Invitations' }, 'synthetic-no-login-hash');
     const cookie = await state.staleSession(owner.user.id, 0);
-    const responses = await Promise.all(Array.from({ length: 31 }, (_, index) => state.request('/api/workspace/invitations', cookie, { email: `invited-${index}@example.invalid`, role: 'viewer' })));
-    assert.equal(responses.filter(response => response.status === 201).length, 30);
-    assert.equal(responses.filter(response => response.status === 409).length, 1);
-    assert.equal((await state.core.repo.row("SELECT COUNT(*) AS count FROM account_tokens WHERE tenant_id=? AND purpose='invite' AND consumed_at IS NULL", owner.tenant.id))!.count, 30);
+    // Start immediately below the limit so this verifies the race at the boundary,
+    // independently of remote pool throughput or HTTP load-test assumptions.
+    const seeded = Array.from({ length: 29 }, (_, index) => [`seed_${index}`, `synthetic_hash_${index}`, 'invite', null, owner.tenant.id, `invited-${index}@example.invalid`, JSON.stringify({ role: 'viewer' }), Date.now() + 60000, new Date().toISOString()]);
+    await state.core.repo.db.prepare(`INSERT INTO account_tokens VALUES ${seeded.map(() => '(?,?,?,?,?,?,?,?,NULL,?)').join(',')}`).run(...seeded.flat());
+    const responses = await Promise.all([29, 30].map(index => state.request('/api/workspace/invitations', cookie, { email: `invited-${index}@example.invalid`, role: 'viewer' })));
+    assert.deepEqual(responses.map(response => response.status).sort(), [201, 409]);
+    assert.equal(Number((await state.core.repo.row("SELECT COUNT(*) AS count FROM account_tokens WHERE tenant_id=? AND purpose='invite' AND consumed_at IS NULL", owner.tenant.id))!.count), 30);
     // Rotating an existing invitation does not occupy an additional capacity slot.
     assert.equal((await state.request('/api/workspace/invitations', cookie, { email: 'invited-0@example.invalid', role: 'editor' })).status, 201);
-    assert.equal((await state.core.repo.row("SELECT COUNT(*) AS count FROM account_tokens WHERE tenant_id=? AND purpose='invite' AND consumed_at IS NULL", owner.tenant.id))!.count, 30);
+    assert.equal(Number((await state.core.repo.row("SELECT COUNT(*) AS count FROM account_tokens WHERE tenant_id=? AND purpose='invite' AND consumed_at IS NULL", owner.tenant.id))!.count), 30);
   } finally { await state.close(); }
+});
+
+
+test('an editor downgraded while a write is awaiting authorization cannot mutate the workspace', async () => {
+  const state = await fixture(); let release!: () => void, entered!: () => void;
+  const held = new Promise<void>(accept => { release = accept; }), captured = new Promise<void>(accept => { entered = accept; });
+  const original = state.core.repo.workspace.bind(state.core.repo);
+  try {
+    const owner = await state.core.repo.register({ email: 'permission-owner@example.invalid', name: 'Permission owner', companyName: 'Permissions' }, 'synthetic-no-login-hash');
+    const editor = await state.core.repo.register({ email: 'permission-editor@example.invalid', name: 'Permission editor', companyName: 'Editor' }, 'synthetic-no-login-hash');
+    await state.core.repo.db.prepare('INSERT INTO memberships VALUES (?,?,?,?)').run(editor.user.id, owner.tenant.id, 'editor', new Date().toISOString());
+    const ownerCookie = await state.staleSession(owner.user.id, 0), editorCookie = await state.staleSession(editor.user.id, 0, owner.tenant.id);
+    let intercepted = false;
+    state.core.repo.workspace = async (userId, tenantId) => {
+      const result = await original(userId, tenantId);
+      if (!intercepted && userId === editor.user.id && result?.tenant.id === owner.tenant.id && result.role === 'editor') { intercepted = true; entered(); await held; }
+      return result;
+    };
+    const pending = state.request('/api/agents', editorCookie, { name: 'Denied guide', companyName: 'Permissions', allowedOrigins: ['http://127.0.0.1:4411'] });
+    await captured;
+    // Use the real owner endpoint to revoke permission after the in-flight write
+    // captured an editor role, without relying on timing or database mocks.
+    const downgrade = await state.request(`/api/workspace/members/${editor.user.id}`, ownerCookie, { role: 'viewer' }, 'PATCH'); assert.equal(downgrade.status, 200);
+    release(); assert.equal((await pending).status, 403);
+    assert.equal((await state.core.repo.listAgents(owner.tenant.id)).length, 0);
+  } finally { release(); state.core.repo.workspace = original; await state.close(); }
 });

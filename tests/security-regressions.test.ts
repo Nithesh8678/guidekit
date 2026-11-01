@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, access } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:http';
+import { execFile } from 'node:child_process';
 import { compileInputSchema } from '../packages/contracts/src/schema.js';
 import { createApp } from '../apps/server/src/app.js';
 import { Repository } from '../apps/server/src/database.js';
@@ -64,4 +65,22 @@ test('late provider completion after cancellation cannot issue an action receipt
     assert.equal((await core.repo.row('SELECT status,response FROM runs'))?.response, null);
     assert.equal((await core.repo.row('SELECT COUNT(*) AS n FROM receipts'))?.n, 0);
   } finally { await core.close(); server.closeAllConnections(); await new Promise<void>(accept => server.close(() => accept())); await rm(directory, { recursive: true, force: true }); }
+});
+
+
+test('startup rejects invalid database configuration without exposing transport credentials or opening a fallback', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'guidekit-startup-rejection-'));
+  try {
+    const result = await new Promise<{ code: number; stdout: string; stderr: string }>((accept, reject) => {
+      execFile(process.execPath, ['--import', 'tsx', 'apps/server/src/index.ts'], { timeout: 10000, env: { ...process.env, GUIDEKIT_PROVIDER: 'codex', GUIDEKIT_KNOWLEDGE_PROVIDER: 'local', GUIDEKIT_DATA_DIR: directory, GUIDEKIT_DATABASE_URL: 'http://synthetic-user:synthetic-startup-password@example.invalid/', GUIDEKIT_PORT: '4940', GUIDEKIT_DEMO_PORT: '4941', GUIDEKIT_SECOND_DEMO_PORT: '4942' } }, (error, stdout, stderr) => {
+        const code = error?.code ?? 0;
+        if (typeof code !== 'number') return reject(error);
+        accept({ code, stdout, stderr });
+      });
+    });
+    assert.equal(result.code, 1); assert.equal(result.stdout, ''); assert.match(result.stderr, /could not start during database verification/);
+    assert.doesNotMatch(result.stderr, /synthetic-user|synthetic-startup-password|example\.invalid|http:/);
+    await assert.rejects(access(join(directory, '.service.lock')));
+    await assert.rejects(access(join(directory, 'guidekit.sqlite')));
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });

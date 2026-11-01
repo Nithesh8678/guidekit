@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
+import { randomUUID } from 'node:crypto';
+import { Pool } from 'pg';
+import { AsyncRepository } from '../apps/server/src/repository.js';
 import { mkdtemp, rm, readdir, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -8,10 +11,28 @@ import { createApp } from '../apps/server/src/app.js';
 import { digest } from '../apps/server/src/database.js';
 import { localAccountDelivery, type AccountDeliveryMessage } from '../apps/server/src/accounts.js';
 
+// Opt-in live PostgreSQL verification uses a new disposable schema for each test.
+// Normal local/CI runs keep the SQLite fixture and never connect to a remote DB.
+async function isolatedAccountRepository(dir: string) {
+  const value = process.env.GUIDEKIT_TEST_POSTGRES_URL;
+  if (!value) return { repository: undefined, async close() {} };
+  const direct = new URL(value);
+  if (direct.hostname.endsWith('.neon.tech')) direct.hostname = direct.hostname.replace('-pooler.', '.');
+  if (direct.searchParams.get('sslmode') === 'require') direct.searchParams.set('sslmode', 'verify-full');
+  const owner = new Pool({ connectionString: direct.toString(), max: 1 }), schema = `gk_http_${randomUUID().replaceAll('-', '')}`;
+  try {
+    await owner.query(`CREATE SCHEMA ${schema}`);
+    const runtime = new URL(direct); runtime.searchParams.set('options', `-c search_path=${schema}`);
+    const repository = await AsyncRepository.open({ dir, connectionString: runtime.toString(), migrate: true });
+    return { repository, async close() { await owner.query(`DROP SCHEMA ${schema} CASCADE`); await owner.end(); } };
+  } catch (error) { await owner.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`); await owner.end(); throw error; }
+}
+
 const config = { name: 'Workspace guide', companyName: 'Company', allowedOrigins: ['http://127.0.0.1:4411'] };
 test('account recovery, organization membership and authorization use expiring single-use links and live roles', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'guidekit-accounts-')), origins = new Set<string>(), messages: AccountDeliveryMessage[] = [];
-  const core = (await createApp({ dataDir: dir, adminOrigins: origins, testing: true, delivery: { mode: 'local', deliver: async message => { messages.push(message); } }, provider: { status: async () => ({ provider: 'codex', available: true, authenticated: true, message: 'Test provider' }), infer: async () => { throw new Error('No inference in account tests'); }, close: async () => {} } }));
+  const database = await isolatedAccountRepository(dir);
+  const core = (await createApp({ dataDir: dir, repository: database.repository, adminOrigins: origins, testing: true, delivery: { mode: 'local', deliver: async message => { messages.push(message); } }, provider: { status: async () => ({ provider: 'codex', available: true, authenticated: true, message: 'Test provider' }), infer: async () => { throw new Error('No inference in account tests'); }, close: async () => {} } }));
   const server = createServer(core.app); await new Promise<void>(accept => server.listen(0, '127.0.0.1', accept));
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`; origins.add(base);
   async function request(path: string, cookie = '', body?: unknown, method = body === undefined ? 'GET' : 'POST') {
@@ -22,6 +43,7 @@ test('account recovery, organization membership and authorization use expiring s
   let owner = '', secondSession = '', otherOwner = '', viewer = '', viewerId = '', agentId = '', tenantId = '';
   const ownerEmail = 'owner@example.invalid', initialPassword = 'initial-test-password', changedPassword = 'changed-test-password';
   try {
+    assert.equal((await request('/ready')).status, 200);
     await t.test('registers owners, profile updates preserve the account, and wrong credentials cannot change password', async () => {
       const a = await request('/api/auth/register', '', { email: ownerEmail, name: 'Test owner', companyName: 'Company A', password: initialPassword }); owner = a.cookie; tenantId = a.data.workspace.tenant.id;
       assert.equal(a.status, 201); assert.equal(a.data.workspace.role, 'owner'); assert.equal(a.data.workspace.user.emailVerified, false);
@@ -102,7 +124,7 @@ test('account recovery, organization membership and authorization use expiring s
       const another = await request('/api/auth/login', '', { email: ownerEmail, password: 'recovered-test-password' }); const revoked = await request('/api/account/revoke-sessions', owner, {}); owner = revoked.cookie;
       assert.equal((await request('/api/auth/me', another.cookie)).data.workspace, null); assert.ok((await request('/api/auth/me', owner)).data.workspace);
     });
-  } finally { await core.close(); server.closeAllConnections(); await new Promise<void>(accept => server.close(() => accept())); await rm(dir, { recursive: true, force: true }); }
+  } finally { await core.close(); server.closeAllConnections(); await new Promise<void>(accept => server.close(() => accept())); await database.close(); await rm(dir, { recursive: true, force: true }); }
 });
 
 test('local account delivery stores links only in private ignored data storage', async () => {

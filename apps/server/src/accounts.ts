@@ -99,7 +99,7 @@ export function registerAccounts(app: Express, repo: AsyncRepository, options: {
     // Capacity, current permissions and token rotation share a tenant lock; delivery is
     // deliberately after commit so no network operation holds a database transaction.
     const invitation = await repo.transaction(async () => {
-      await repo.lockTenant(actor.tenant.id); await admin(req);
+      await repo.lockTenant(actor.tenant.id); await repo.lockUser(actor.user.id); await admin(req);
       if (await repo.row('SELECT u.id FROM users u JOIN memberships m ON m.user_id=u.id WHERE u.email=? AND m.tenant_id=?', input.email, actor.tenant.id)) throw new AppError(409, 'This account is already a workspace member.');
       const previous = await repo.row("SELECT id FROM account_tokens WHERE tenant_id=? AND email=? AND purpose='invite' AND consumed_at IS NULL AND expires>?", actor.tenant.id, input.email, Date.now());
       if (!previous && Number((await repo.row("SELECT COUNT(*) AS count FROM account_tokens WHERE tenant_id=? AND purpose='invite' AND consumed_at IS NULL AND expires>?", actor.tenant.id, Date.now()))!.count) >= 30) throw new AppError(409, 'This workspace has 30 pending invitations. Revoke one before inviting again.');
@@ -112,7 +112,7 @@ export function registerAccounts(app: Express, repo: AsyncRepository, options: {
     catch { await repo.db.prepare('UPDATE account_tokens SET consumed_at=? WHERE id=?').run(now(), invitation.id); throw new AppError(503, 'Account delivery is unavailable. Check the configured delivery adapter.'); }
     res.status(201).json({ id: invitation.id, delivery: delivery.mode });
   });
-  app.delete('/api/workspace/invitations/:id', async (req, res) => { const actor = await admin(req); await repo.transaction(async () => { await repo.lockTenant(actor.tenant.id); await admin(req); if (!(await repo.db.prepare("UPDATE account_tokens SET consumed_at=? WHERE id=? AND tenant_id=? AND purpose='invite' AND consumed_at IS NULL").run(now(), String(req.params.id), actor.tenant.id)).changes) throw new AppError(404, 'Invitation not found.'); await repo.audit(actor.tenant.id, actor.user.id, 'workspace.invitation_revoked', String(req.params.id)); }); res.json({ ok: true }); });
+  app.delete('/api/workspace/invitations/:id', async (req, res) => { const actor = await admin(req); await repo.transaction(async () => { await repo.lockTenant(actor.tenant.id); await repo.lockUser(actor.user.id); await admin(req); if (!(await repo.db.prepare("UPDATE account_tokens SET consumed_at=? WHERE id=? AND tenant_id=? AND purpose='invite' AND consumed_at IS NULL").run(now(), String(req.params.id), actor.tenant.id)).changes) throw new AppError(404, 'Invitation not found.'); await repo.audit(actor.tenant.id, actor.user.id, 'workspace.invitation_revoked', String(req.params.id)); }); res.json({ ok: true }); });
   app.post('/api/auth/invitations/preview', authLimit, async (req, res) => { const input = z.object({ token }).strict().parse(req.body), record = await findToken(input.token, 'invite'); res.json({ email: record.email, companyName: (await repo.row('SELECT name FROM tenants WHERE id=?', String(record.tenant_id)))!.name, role: JSON.parse(String(record.payload)).role }); });
   app.post('/api/auth/invitations/accept', authLimit, async (req, res) => {
     const input = z.object({ token, name: z.string().trim().min(2).max(100).optional(), password: password.optional() }).strict().parse(req.body), record = await findToken(input.token, 'invite');
@@ -133,7 +133,7 @@ export function registerAccounts(app: Express, repo: AsyncRepository, options: {
   app.patch('/api/workspace/members/:id', async (req, res) => {
     const actor = await admin(req), targetId = String(req.params.id), input = z.object({ role }).strict().parse(req.body);
     await repo.transaction(async () => {
-      await repo.lockTenant(actor.tenant.id); const latest = await admin(req), target = await repo.row('SELECT role FROM memberships WHERE user_id=? AND tenant_id=?', targetId, actor.tenant.id);
+      await repo.lockTenant(actor.tenant.id); await repo.lockUser(actor.user.id); const latest = await admin(req), target = await repo.row('SELECT role FROM memberships WHERE user_id=? AND tenant_id=?', targetId, actor.tenant.id);
       if (!target) throw new AppError(404, 'Member not found.');
       if (target.role === 'owner' || targetId === actor.user.id || (latest.role === 'admin' && target.role === 'admin')) throw new AppError(403, 'Owners and your own membership cannot be changed here. Only owners can manage other admins.');
       await repo.db.prepare('UPDATE memberships SET role=? WHERE user_id=? AND tenant_id=?').run(input.role, targetId, actor.tenant.id); await repo.audit(actor.tenant.id, actor.user.id, 'workspace.role_changed', targetId, { role: input.role });
@@ -142,7 +142,7 @@ export function registerAccounts(app: Express, repo: AsyncRepository, options: {
   app.delete('/api/workspace/members/:id', async (req, res) => {
     const actor = await admin(req), targetId = String(req.params.id);
     await repo.transaction(async () => {
-      await repo.lockTenant(actor.tenant.id); const latest = await admin(req), target = await repo.row('SELECT role FROM memberships WHERE user_id=? AND tenant_id=?', targetId, actor.tenant.id);
+      await repo.lockTenant(actor.tenant.id); await repo.lockUser(actor.user.id); const latest = await admin(req), target = await repo.row('SELECT role FROM memberships WHERE user_id=? AND tenant_id=?', targetId, actor.tenant.id);
       if (!target) throw new AppError(404, 'Member not found.');
       if (target.role === 'owner' || targetId === actor.user.id || (latest.role === 'admin' && target.role === 'admin')) throw new AppError(403, 'This membership cannot be removed by your account.');
       await repo.db.prepare('DELETE FROM memberships WHERE user_id=? AND tenant_id=?').run(targetId, actor.tenant.id); await repo.audit(actor.tenant.id, actor.user.id, 'workspace.member_removed', targetId);
