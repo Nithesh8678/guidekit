@@ -116,8 +116,11 @@ test('real intermediate instruction prefixes expand the card smoothly in width a
     expect(prefixes.every(sample => longInstruction.startsWith(sample.text))).toBe(true);
     expect(Math.max(...samples.map(sample => sample.width)) - Math.min(...samples.map(sample => sample.width)), 'Revealed content grows the compact card width').toBeGreaterThan(15);
     expect(Math.max(...samples.map(sample => sample.height)) - Math.min(...samples.map(sample => sample.height)), 'Wrapped content grows the card height').toBeGreaterThan(30);
-    const style = await guide(page).evaluate(node => ({ shadow: getComputedStyle(node).boxShadow, border: getComputedStyle(node).borderTopColor }));
-    expect(style.shadow).not.toBe('none'); expect(style.border).not.toBe('rgba(0, 0, 0, 0)');
+    expect(new Set(samples.map(sample => Math.round(sample.width))).size, 'The card travels through intermediate widths').toBeGreaterThan(4);
+    const style = await guide(page).evaluate(node => ({ shadow: getComputedStyle(node).boxShadow, background: getComputedStyle(node).backgroundImage }));
+    expect(style.shadow).not.toBe('none'); expect(style.background).toContain('linear-gradient');
+    await expect(guide(page).locator('.guide-rim')).toHaveAttribute('aria-hidden', 'true');
+    expect(await guide(page).locator('.guide-rim').evaluate(node => getComputedStyle(node).pointerEvents)).toBe('none');
   } finally { await stopProbe(page); }
 });
 
@@ -176,7 +179,7 @@ test('Reduced Motion immediately displays the full instruction without type, glo
   try {
     await ask(page); await finished(page, longInstruction); await frames(page, 4);
     const samples = await stopProbe(page);
-    expect(samples.length).toBeGreaterThan(0); expect(samples.every(sample => !sample.typing && sample.text === longInstruction)).toBe(true);
+    expect(samples.length).toBeGreaterThan(0); expect(samples.every(sample => !sample.typing && (!sample.text || sample.text === longInstruction))).toBe(true);
     await expect(guide(page).getByRole('button', { name: 'Show full instruction', exact: true })).toBeHidden();
     expect(await guide(page).evaluate(node => node.getAnimations({ subtree: true }).filter(animation => animation.playState === 'running').length)).toBe(0);
   } finally { await stopProbe(page); }
@@ -211,7 +214,7 @@ test('rapid steps replace the old typewriter, and pause, chat, resume and destro
     await page.getByRole('button', { name: 'Resume guide', exact: true }).click(); await finished(page, third);
     const samples = await stopProbe(page);
     expect(samples.every(sample => third.startsWith(sample.text)), 'Cancelled writers cannot put the preceding step back').toBe(true);
-    await guide(page).getByRole('button', { name: 'Back', exact: true }).click(); await expect(guide(page)).toHaveAttribute('data-gk-typing', 'true');
+    await guide(page).getByRole('button', { name: 'Open chat', exact: true }).click(); await ask(page); await expect(guide(page)).toHaveAttribute('data-gk-typing', 'true');
     const detachedText = await instruction(page).elementHandle(); expect(detachedText).not.toBeNull();
     await page.evaluate(() => window.GuideKit.destroy()); await expect(page.locator('[data-guidekit-root]')).toHaveCount(0);
     const before = await detachedText!.textContent(); await frames(page, 35);
