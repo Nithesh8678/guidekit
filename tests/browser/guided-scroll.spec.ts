@@ -320,7 +320,10 @@ test('changing the step during a reveal cancels the old destination and presents
   await page.emulateMedia({ reducedMotion: 'no-preference' }); await openFixture(page); await arrange(page, 'window');
   const asks: string[] = []; page.on('request', request => { if (request.url().endsWith('/api/embed/session/ask')) asks.push(request.url()); });
   await ask(page); await revealStarted(page);
-  await guide(page).getByRole('button', { name: 'Next', exact: true }).evaluate(button => (button as HTMLButtonElement).click());
+  // Explicit host-observation fixture: this public callback reports a verified
+  // intermediate step while its reveal is still running. It does not execute
+  // an action or claim that a contact was saved.
+  await page.evaluate(() => window.GuideKit.reportStepResult('contact-name', { success: true, scope: 'step' }));
   await expect(guide(page).getByText('Step 2 of 4', { exact: true })).toBeVisible(); await settled(page, 'contact-company');
   await expect(shape(page)).toHaveAttribute('data-gk-mark', /contact-company/);
   const frames = await subsequentFrames(page, 30);

@@ -54,10 +54,17 @@ async function openFixture(page: Page, adaptive = true) {
   await page.getByRole('button', { name: 'Open Observed guide', exact: true }).click();
   await expect(chat(page)).toBeVisible();
 }
-async function manuallyAdvanceToButton(page: Page) {
-  await guide(page).getByRole('button', { name: 'Next', exact: true }).click(); await step(page, 2);
-  await guide(page).getByRole('button', { name: 'Next', exact: true }).click(); await step(page, 3);
-  await guide(page).getByRole('button', { name: 'Next', exact: true }).click(); await step(page, 4);
+async function observeFieldsToSubmit(page: Page) {
+  // The guide follows trusted host edits rather than a navigation control or
+  // a call into its private session. Each field remains under visitor control.
+  await nameField(page).fill('Observed Host Name'); await step(page, 2);
+  await companyField(page).fill('Observed Host Company'); await step(page, 3);
+  const status = page.locator('[data-guidekit-id="contact-status"]');
+  await status.focus(); await status.press('q');
+  await expect(status).toHaveValue('Qualified'); await step(page, 4);
+}
+async function noManualNavigation(page: Page) {
+  await expect(guide(page).getByRole('button', { name: /^(Back|Next|Finish guide|Automatic progress)$/ })).toHaveCount(0);
 }
 
 test('observed input moves the guide without stealing focus, and only verified host save completes it', async ({ page }) => {
@@ -66,7 +73,7 @@ test('observed input moves the guide without stealing focus, and only verified h
   page.on('request', request => { if (request.url().includes('/api/embed/')) requests.push({ url: request.url(), body: request.postData() ?? '' }); });
   await page.locator('input[name="email"]').fill('private-guidance-marker@example.test');
   await askForGuide(page);
-  await expect(guide(page).getByRole('button', { name: 'Automatic progress', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await noManualNavigation(page);
   await nameField(page).click();
   await nameField(page).fill('Observed Name Private Marker');
   await page.waitForTimeout(900); await step(page, 1);
@@ -96,18 +103,22 @@ test('observed input moves the guide without stealing focus, and only verified h
   expect(JSON.stringify(requests)).not.toMatch(/Observed Name Private Marker|Observed Company Private Marker|private-guidance-marker/);
 });
 
-test('pause, automatic progress toggle, back and manual finish remain under visitor control', async ({ page }) => {
+test('guidance follows edits automatically while pause, resume and stop stay under visitor control', async ({ page }) => {
   await openFixture(page); await askForGuide(page);
+  await noManualNavigation(page);
   await guide(page).getByRole('button', { name: 'Pause guide', exact: true }).click();
   await nameField(page).fill('Paused Name'); await page.waitForTimeout(quietWindow); await step(page, 1);
   await guide(page).getByRole('button', { name: 'Resume guide', exact: true }).click();
-  const automatic = guide(page).getByRole('button', { name: 'Automatic progress', exact: true });
-  await automatic.click(); await expect(automatic).toHaveAttribute('aria-pressed', 'false');
-  await nameField(page).fill('Manual Name'); await page.waitForTimeout(quietWindow); await step(page, 1);
-  await guide(page).getByRole('button', { name: 'Next', exact: true }).click(); await step(page, 2);
-  await guide(page).getByRole('button', { name: 'Back', exact: true }).click(); await step(page, 1);
-  await manuallyAdvanceToButton(page);
-  await guide(page).getByRole('button', { name: 'Finish guide', exact: true }).click();
+  await step(page, 2); await expect(nameField(page)).toBeFocused();
+  await companyField(page).fill('Automatic Company'); await step(page, 3);
+  const status = page.locator('[data-guidekit-id="contact-status"]');
+  await status.focus(); await status.press('q'); await expect(status).toHaveValue('Qualified'); await step(page, 4);
+  await noManualNavigation(page);
+  // Correcting an earlier field restores attention there, then returns to the
+  // unfinished save control without Back or Next and without creating a record.
+  await companyField(page).fill('Revised Automatic Company'); await step(page, 2);
+  await step(page, 4); await expect(companyField(page)).toBeFocused();
+  await guide(page).getByRole('button', { name: 'Stop visual guidance', exact: true }).click();
   await expect(guide(page)).toHaveCount(0); await expect(chat(page)).toBeVisible();
   await expect(page.locator('#contacts-list tr')).toHaveCount(0);
 });
@@ -199,8 +210,7 @@ test('Open chat preserves a paused guide, while stop, Escape and destroy cancel 
 
 test('a verified host result received while chat is open completes safely when the paused guide resumes', async ({ page }) => {
   await openFixture(page);
-  await nameField(page).fill('Deferred Verified Name'); await companyField(page).fill('Deferred Verified Company');
-  await askForGuide(page); await manuallyAdvanceToButton(page);
+  await askForGuide(page); await observeFieldsToSubmit(page);
   await guide(page).getByRole('button', { name: 'Open chat', exact: true }).click();
   await expect(chat(page)).toBeVisible(); await expect(guide(page)).toBeHidden();
   // The real host validates and saves this fixture contact, then calls
@@ -218,8 +228,7 @@ test('a verified host result received while chat is open completes safely when t
 
 test('a loading submit control can change meaning and disappear while its real host result is pending', async ({ page }) => {
   await openFixture(page);
-  await nameField(page).fill('Async Verified Name'); await companyField(page).fill('Async Verified Company');
-  await askForGuide(page); await manuallyAdvanceToButton(page);
+  await askForGuide(page); await observeFieldsToSubmit(page);
   await page.locator('#contact-form').evaluate(form => form.addEventListener('submit', event => { event.preventDefault(); event.stopImmediatePropagation(); }, { capture: true, once: true }));
   await page.locator('[data-guidekit-id="create-contact"]').click();
   await page.locator('[data-guidekit-id="create-contact"]').evaluate(button => {
@@ -287,7 +296,7 @@ test('retained SVG follows scroll, resize and an ancestor transform without bloc
   await page.setViewportSize({ width: 1100, height: 760 });
   await expect.poll(() => annotationError(page)).toBeLessThan(1.2); alignment.push(await annotationError(page));
   const secondFrames = frameIntervals(page, 1_500);
-  await guide(page).getByRole('button', { name: 'Next', exact: true }).click(); await step(page, 2);
+  await nameField(page).fill('Retained Annotation Name'); await step(page, 2);
   intervals.push(...await secondFrames); await expect.poll(() => annotationError(page, 'contact-company')).toBeLessThan(1.2);
   alignment.push(await annotationError(page, 'contact-company'));
   expect(await annotation(page).evaluate((node, original) => node === original, root)).toBe(true);
@@ -371,17 +380,18 @@ test('speech beats release drawing on playback start, bound fallback, and ignore
   await page.waitForTimeout(500); await expect(shape(page)).toBeHidden();
   await page.evaluate(() => (window as unknown as BeatWindow).__guidekitBeatDouble.fire(0, 'start'));
   await expect(shape(page)).toBeVisible(); await expect(shape(page)).toHaveAttribute('data-gk-mark', /contact-name/);
-  await guide(page).getByRole('button', { name: 'Next', exact: true }).click(); await step(page, 2);
+  await nameField(page).fill('Speech Beat Name'); await step(page, 2);
   await expect.poll(() => page.evaluate(() => (window as unknown as BeatWindow).__guidekitBeatDouble.texts.length)).toBe(2);
   await page.evaluate(() => { const beats = (window as unknown as BeatWindow).__guidekitBeatDouble; beats.fire(0, 'start'); beats.fire(0, 'end'); });
   await page.waitForTimeout(200); await expect(shape(page)).toBeHidden();
   await page.evaluate(() => (window as unknown as BeatWindow).__guidekitBeatDouble.fire(1, 'start'));
   await expect(shape(page)).toBeVisible(); await expect(shape(page)).toHaveAttribute('data-gk-mark', /contact-company/);
-  await guide(page).getByRole('button', { name: 'Next', exact: true }).click(); await step(page, 3);
+  await companyField(page).fill('Speech Beat Company'); await step(page, 3);
   await expect(shape(page)).toBeHidden();
   await expect(shape(page)).toBeVisible({ timeout: 4_000 });
   await expect(shape(page)).toHaveAttribute('data-gk-mark', /contact-status/);
-  await guide(page).getByRole('button', { name: 'Next', exact: true }).click(); await step(page, 4);
+  const status = page.locator('[data-guidekit-id="contact-status"]');
+  await status.focus(); await status.press('q'); await expect(status).toHaveValue('Qualified'); await step(page, 4);
   await expect.poll(() => page.evaluate(() => (window as unknown as BeatWindow).__guidekitBeatDouble.texts.length)).toBe(4);
   await guide(page).getByRole('button', { name: 'Stop visual guidance', exact: true }).click();
   await page.evaluate(() => { const beats = (window as unknown as BeatWindow).__guidekitBeatDouble; beats.fire(3, 'start'); beats.fire(3, 'end'); beats.fire(2, 'error'); });
