@@ -4,12 +4,13 @@ import type { RunResult } from '../../packages/contracts/src/index.js';
 const endpoint = 'http://127.0.0.1:4510';
 const website = 'http://127.0.0.1:4511';
 const guide = (page: Page) => page.getByRole('region', { name: 'Visual guidance' });
+const toolbar = (page: Page) => guide(page).locator('.guide-toolbar');
 const chat = (page: Page) => page.getByRole('dialog', { name: 'Website assistant', includeHidden: true });
 const instruction = (page: Page) => guide(page).locator('.guide-instruction');
 const accessible = (page: Page) => guide(page).locator('.guide-instruction-accessible');
 const longInstruction = 'Enter the full name you want to save for this contact. Take your time and check the spelling before continuing. The guide stays beside the field while you work, and it will move to the company field after you finish. You can pause, open chat, or show the complete instruction at any point. Nothing is submitted by this explanation; you stay in control of the contact details and the final save.';
 
-interface CardFrame { text: string; accessible: string; typing: boolean; width: number; height: number; scroll: string; step: string; stepOpacity: number; stepTransform: string; stepState: string; chrome?: { textHeight: number; lineHeight: number; outside: string[] }; }
+interface CardFrame { text: string; accessible: string; typing: boolean; width: number; height: number; scroll: string; arrival: string; cursor: string; inkReady: boolean; step: string; stepOpacity: number; stepTransform: string; stepState: string; chrome?: { textHeight: number; lineHeight: number; outside: string[] }; }
 interface CardProbe { frames: CardFrame[]; running: boolean; }
 type ProbeWindow = Window & { __guidekitCardProbe: CardProbe };
 
@@ -35,7 +36,7 @@ async function openFixture(page: Page, texts: string[], belowPage = false, singl
     const response = await route.fetch();
     expect(response.status()).toBe(200);
     const run = await response.json() as RunResult;
-    run.steps = (singleStep ? run.steps.slice(0, 1) : run.steps).map((step, index) => ({ ...step, text: texts[index] ?? 'Continue to this control.' }));
+    run.steps = (singleStep ? run.steps.slice(0, 1) : run.steps).map((step, index) => ({ ...step, annotation: 'ring', text: texts[index] ?? 'Continue to this control.' }));
     await route.fulfill({ response, json: run });
   });
   const auth = await page.request.post(`${endpoint}/api/auth/register`, { headers: { Origin: endpoint }, data: { email: `card-${crypto.randomUUID()}@example.test`, name: 'Card Tester', companyName: 'Card Workspace', password: 'Synthetic-card-password-42' } });
@@ -76,16 +77,18 @@ async function startProbe(page: Page, inspectChrome = false) {
         const bounds = card.getBoundingClientRect();
         let chrome: CardFrame['chrome'];
         if (inspectChrome) {
-          const pause = card.querySelector<HTMLElement>('.guide-tools [aria-label="Pause guide"]')!;
+          const controls = card.querySelector<HTMLElement>('.guide-toolbar')!, controlBounds = controls.getBoundingClientRect();
+          const pause = controls.querySelector<HTMLElement>('[aria-label="Pause guide"]')!;
           const range = document.createRange(); range.selectNodeContents(pause);
-          const outside = [...card.querySelectorAll<HTMLElement>('.guide-tools button')].flatMap(button => {
+          const outside = [...controls.querySelectorAll<HTMLElement>('button')].filter(button => !button.hidden).flatMap(button => {
             const control = button.getBoundingClientRect();
-            return control.left < bounds.left - 1 || control.right > bounds.right + 1 || control.top < bounds.top - 1 || control.bottom > bounds.bottom + 1 ? [button.getAttribute('aria-label') ?? button.textContent ?? ''] : [];
+            return control.left < controlBounds.left - 1 || control.right > controlBounds.right + 1 || control.top < controlBounds.top - 1 || control.bottom > controlBounds.bottom + 1 ? [button.getAttribute('aria-label') ?? button.textContent ?? ''] : [];
           });
           chrome = { textHeight: range.getBoundingClientRect().height, lineHeight: parseFloat(getComputedStyle(pause).lineHeight), outside };
         }
         const label = card.querySelector<HTMLElement>('.guide-label')!;
-        probe.frames.push({ text: card.querySelector('.guide-instruction')?.textContent ?? '', accessible: card.querySelector('.guide-instruction-accessible')?.textContent ?? '', typing: card.dataset.gkTyping === 'true', width: bounds.width, height: bounds.height, scroll: card.dataset.gkScrollState ?? '', step: label.textContent ?? '', stepOpacity: Number(getComputedStyle(label).opacity), stepTransform: getComputedStyle(label).transform, stepState: card.dataset.gkStepState ?? '', ...(chrome ? { chrome } : {}) });
+        const paths = [...root!.querySelectorAll('[data-gk-shape] path[stroke-dashoffset]')];
+        probe.frames.push({ text: card.querySelector('.guide-instruction')?.textContent ?? '', accessible: card.querySelector('.guide-instruction-accessible')?.textContent ?? '', typing: card.dataset.gkTyping === 'true', width: bounds.width, height: bounds.height, scroll: card.dataset.gkScrollState ?? '', arrival: card.dataset.gkArrival ?? '', cursor: root?.querySelector('[data-gk-cursor]')?.getAttribute('data-gk-cursor-location') ?? '', inkReady: paths.length > 0 && paths.every(path => Number(path.getAttribute('stroke-dashoffset')) <= .001), step: label.textContent ?? '', stepOpacity: Number(getComputedStyle(label).opacity), stepTransform: getComputedStyle(label).transform, stepState: card.dataset.gkStepState ?? '', ...(chrome ? { chrome } : {}) });
       }
       if (probe.running) requestAnimationFrame(frame);
     };
@@ -117,22 +120,28 @@ async function finished(page: Page, text: string) {
   await expect(guide(page)).toHaveAttribute('data-gk-typing', 'false');
 }
 
-test('real intermediate instruction prefixes expand the card smoothly in width and height', async ({ page }) => {
+test('real intermediate instruction prefixes grow a compact amber label after cursor and mark arrival', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   await openFixture(page, [longInstruction]); await startProbe(page);
   try {
     await ask(page); await finished(page, longInstruction); await frames(page, 12);
-    const samples = (await stopProbe(page)).filter(sample => sample.text.length > 0);
+    const captured = await stopProbe(page), samples = captured.filter(sample => sample.text.length > 0);
     const prefixes = samples.filter(sample => sample.typing && sample.text.length < longInstruction.length);
     expect(new Set(prefixes.map(sample => sample.text)).size, 'Text is revealed through real intermediate prefixes').toBeGreaterThan(5);
     expect(prefixes.every(sample => longInstruction.startsWith(sample.text))).toBe(true);
+    const pending = captured.filter(sample => sample.arrival === 'pending');
+    expect(pending.length, 'Observe the real flight and mark-drawing phase').toBeGreaterThan(3);
+    expect(pending.every(sample => !sample.text && !sample.typing), 'No prefix starts before actual cursor and mark arrival').toBe(true);
+    expect(prefixes.every(sample => sample.arrival === 'ready' && sample.cursor === 'target' && sample.inkReady), 'The cursor has landed and target strokes are complete before any typed prefix').toBe(true);
     expect(Math.max(...samples.map(sample => sample.width)) - Math.min(...samples.map(sample => sample.width)), 'Revealed content grows the compact card width').toBeGreaterThan(15);
     expect(Math.max(...samples.map(sample => sample.height)) - Math.min(...samples.map(sample => sample.height)), 'Wrapped content grows the card height').toBeGreaterThan(30);
     expect(new Set(samples.map(sample => Math.round(sample.width))).size, 'The card travels through intermediate widths').toBeGreaterThan(4);
-    const style = await guide(page).evaluate(node => ({ shadow: getComputedStyle(node).boxShadow, background: getComputedStyle(node).backgroundImage }));
-    expect(style.shadow).not.toBe('none'); expect(style.background).toContain('linear-gradient');
-    await expect(guide(page).locator('.guide-rim')).toHaveAttribute('aria-hidden', 'true');
-    expect(await guide(page).locator('.guide-rim').evaluate(node => getComputedStyle(node).pointerEvents)).toBe('none');
+    const style = await guide(page).locator('.guide-surface').evaluate(node => ({ shadow: getComputedStyle(node).boxShadow, background: getComputedStyle(node).backgroundColor, color: getComputedStyle(node).color }));
+    expect(style.shadow).not.toBe('none'); expect(style.background).not.toBe('rgb(255, 255, 255)'); expect(style.background).not.toBe('rgba(0, 0, 0, 0)'); expect(style.color).not.toBe(style.background);
+    const textStyle = await instruction(page).evaluate(node => ({ font: parseFloat(getComputedStyle(node).fontSize), line: parseFloat(getComputedStyle(node).lineHeight), transform: getComputedStyle(node).transform }));
+    expect(textStyle.font).toBeGreaterThanOrEqual(12); expect(textStyle.line).toBeGreaterThanOrEqual(textStyle.font * 1.4); expect(textStyle.transform).toBe('none');
+    expect(Math.max(...samples.map(sample => sample.width))).toBeLessThanOrEqual(320);
+    await expect(guide(page).locator('.guide-progress')).toHaveCount(0);
     const screenshot = test.info().outputPath('adaptive-guide-card-desktop.png');
     await page.screenshot({ path: screenshot });
     await test.info().attach('Adaptive guide card', { path: screenshot, contentType: 'image/png' });
@@ -159,15 +168,16 @@ test('compact instructions stay smaller and a 320px viewport contains long unbro
   expect(long!.height).toBeGreaterThan(compact!.height + 25);
   expect(long!.x).toBeGreaterThanOrEqual(0); expect(long!.x + long!.width).toBeLessThanOrEqual(320);
   expect(long!.y).toBeGreaterThanOrEqual(0); expect(long!.y + long!.height).toBeLessThanOrEqual(740);
-  const overflow = await guide(page).evaluate(node => ({ card: node.scrollWidth - node.clientWidth, text: node.querySelector('.guide-instruction')!.scrollWidth - node.querySelector('.guide-instruction')!.clientWidth }));
+  const overflow = await guide(page).evaluate(node => ({ card: node.querySelector('.guide-surface')!.scrollWidth - node.querySelector('.guide-surface')!.clientWidth, text: node.querySelector('.guide-instruction')!.scrollWidth - node.querySelector('.guide-instruction')!.clientWidth }));
   expect(overflow.card).toBeLessThanOrEqual(1); expect(overflow.text).toBeLessThanOrEqual(1);
+  const strip = await toolbar(page).boundingBox();
   for (const label of ['Pause guide', 'Open chat', 'Stop visual guidance']) {
     const control = guide(page).getByRole('button', { name: label, exact: true }); await expect(control).toBeInViewport({ ratio: 1 });
-    const box = await control.boundingBox(); expect(box!.x).toBeGreaterThanOrEqual(long!.x); expect(box!.x + box!.width).toBeLessThanOrEqual(long!.x + long!.width + 1);
+    const box = await control.boundingBox(); expect(box!.x).toBeGreaterThanOrEqual(strip!.x); expect(box!.x + box!.width).toBeLessThanOrEqual(strip!.x + strip!.width + 1);
   }
 });
 
-test('a one-step guide has no wizard navigation and keeps its Pause control inside the compact typing card', async ({ page }) => {
+test('a one-step guide separates its compact label from its keyboard controls without wizard navigation', async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 740 }); await page.emulateMedia({ reducedMotion: 'no-preference' });
   const text = 'Enter your name.';
   await openFixture(page, [text], false, true); await startProbe(page, true);
@@ -177,7 +187,9 @@ test('a one-step guide has no wizard navigation and keeps its Pause control insi
     const samples = (await stopProbe(page)).filter(sample => sample.typing && sample.text.length > 0);
     expect(samples.some(sample => sample.text.length < 7), 'Observe the short initial prefix, before full text can widen the card').toBe(true);
     expect(samples.every(sample => sample.chrome && Number.isFinite(sample.chrome.lineHeight) && sample.chrome.textHeight <= sample.chrome.lineHeight + 1), 'The actual Pause text range occupies at most one line during typing').toBe(true);
-    expect(samples.flatMap(sample => sample.chrome?.outside ?? []), 'The real header controls stay within the rendered card throughout typing').toEqual([]);
+    expect(samples.flatMap(sample => sample.chrome?.outside ?? []), 'The real controls stay within their independent strip throughout typing').toEqual([]);
+    const label = await guide(page).boundingBox(), strip = await toolbar(page).boundingBox();
+    expect(Math.min(label!.x + label!.width, strip!.x + strip!.width) - Math.max(label!.x, strip!.x) <= 0 || Math.min(label!.y + label!.height, strip!.y + strip!.height) - Math.max(label!.y, strip!.y) <= 0, 'The controls do not occupy or obscure the instruction label').toBe(true);
   } finally { await stopProbe(page); }
 });
 
@@ -190,8 +202,8 @@ test('a 180px visual viewport keeps real Pause, Resume, chat and stop controls r
   // keyboard; it deliberately does not claim physical mobile-keyboard testing.
   await page.setViewportSize({ width: 320, height: 180 });
   await expect.poll(async () => {
-    const bounds = await guide(page).boundingBox();
-    return !!bounds && bounds.x >= 0 && bounds.y >= 0 && bounds.x + bounds.width <= 320 && bounds.y + bounds.height <= 180;
+    const boxes = await Promise.all([guide(page).boundingBox(), toolbar(page).boundingBox()]);
+    return boxes.every(bounds => !!bounds && bounds.x >= 0 && bounds.y >= 0 && bounds.x + bounds.width <= 320 && bounds.y + bounds.height <= 180);
   }).toBe(true);
   const traversal: { key: string; focused: string }[] = [];
   const tabTo = async (name: string, key: 'Tab' | 'Shift+Tab' = 'Tab') => {
@@ -291,6 +303,16 @@ test('host geometry and same-step observation refreshes do not restart an instru
     const samples = await stopProbe(page), lengths = samples.map(sample => sample.text.length);
     expect(lengths.every((length, index) => index === 0 || length >= lengths[index - 1]!), 'A same-step refresh never clears or retypes its prefix').toBe(true);
     expect(samples.every(sample => longInstruction.startsWith(sample.text))).toBe(true); expect(requests).toHaveLength(1);
+    const settled = await guide(page).evaluate(async node => {
+      let mutations = 0; const before = node.getBoundingClientRect();
+      const observer = new MutationObserver(records => { mutations += records.length; });
+      observer.observe(node, { childList: true, characterData: true, subtree: true, attributes: true, attributeFilter: ['style', 'class', 'data-gk-typing'] });
+      await new Promise<void>(resolve => { let remaining = 40; const frame = () => { if (--remaining <= 0) resolve(); else requestAnimationFrame(frame); }; requestAnimationFrame(frame); });
+      observer.disconnect(); const after = node.getBoundingClientRect();
+      return { mutations, movement: Math.max(Math.abs(before.left - after.left), Math.abs(before.top - after.top), Math.abs(before.width - after.width), Math.abs(before.height - after.height)) };
+    });
+    expect(settled.mutations, 'A stationary label neither retypes nor rewrites its DOM in a render loop').toBe(0);
+    expect(settled.movement).toBeLessThan(1);
   } finally { await stopProbe(page); }
 });
 
@@ -332,4 +354,37 @@ test('smoothly revealing an offscreen control finishes before instruction typing
     expect(samples.some(sample => sample.scroll === 'ready' && sample.typing && sample.text.length > 0)).toBe(true);
     expect(await page.evaluate(() => scrollY)).toBeGreaterThan(4000);
   } finally { await stopProbe(page); }
+});
+
+test('independent rings and step badges stay beside unobscured controls on desktop and mobile edges', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'no-preference' }); await openFixture(page, ['Enter the contact name here.'], false, true);
+  const layouts = [{ width: 1280, height: 900, mobile: false }, { width: 320, height: 600, mobile: true }];
+  for (const layout of layouts) {
+    await page.setViewportSize({ width: layout.width, height: layout.height });
+    await page.evaluate(mobile => {
+      const name = document.querySelector<HTMLElement>('[data-guidekit-id="contact-name"]')!.closest('label')! as HTMLElement;
+      const company = document.querySelector<HTMLElement>('[data-guidekit-id="contact-company"]')!.closest('label')! as HTMLElement;
+      Object.assign(name.style, { left: mobile ? '70px' : '0', top: '100px' });
+      // On desktop, this known field occupies the preferred right-hand label
+      // slot. On mobile, keep it below the active field near the right edge.
+      Object.assign(company.style, { left: mobile ? '0' : '260px', top: mobile ? '340px' : '100px' });
+      document.querySelector<HTMLElement>('[data-guidekit-id="contact-status"]')!.closest('label')!.style.top = mobile ? '440px' : '300px';
+      document.querySelector<HTMLElement>('[data-guidekit-id="create-contact"]')!.style.top = mobile ? '540px' : '400px';
+    }, layout.mobile);
+    await ask(page); await finished(page, 'Enter the contact name here.'); await frames(page, 12);
+    const ring = page.locator('[data-guidekit-root] [data-gk-shape="ring"]'), badge = page.locator('[data-guidekit-root] [data-gk-step-badge][data-gk-step-number="1"]');
+    await expect(ring).toBeVisible(); await expect(badge).toBeVisible(); await expect(badge).toContainText('1'); await expect(badge).toBeInViewport({ ratio: 1 });
+    expect(await badge.evaluate(node => getComputedStyle(node).pointerEvents), 'The badge cannot consume the visitor’s clicks').toBe('none');
+    expect(await ring.evaluate(node => !!node.querySelector('[data-gk-step-badge]')), 'The requested ring remains independent of its numbered badge').toBe(false);
+    const geometry = await guide(page).evaluate(node => {
+      const label = node.getBoundingClientRect(), toolbar = node.querySelector('.guide-toolbar')!.getBoundingClientRect();
+      const overlap = (first: DOMRect, second: DOMRect) => Math.max(0, Math.min(first.right, second.right) - Math.max(first.left, second.left)) * Math.max(0, Math.min(first.bottom, second.bottom) - Math.max(first.top, second.top));
+      const obstacles = [...document.querySelectorAll<HTMLElement>('[data-guidekit-id]')].filter(control => control.getClientRects().length && !control.closest('[data-guidekit-private]')).filter(control => { const box = control.getBoundingClientRect(); return box.top >= 0 && box.bottom <= innerHeight && box.left >= 0 && box.right <= innerWidth; });
+      const target = document.querySelector('[data-guidekit-id="contact-name"]')!.getBoundingClientRect();
+      return { overlaps: obstacles.filter(control => overlap(label, control.getBoundingClientRect()) > 1 || overlap(toolbar, control.getBoundingClientRect()) > 1).map(control => control.dataset.guidekitId), gap: Math.hypot(Math.max(0, target.left - label.right, label.left - target.right), Math.max(0, target.top - label.bottom, label.top - target.bottom)), labelInside: label.left >= 0 && label.right <= innerWidth && label.top >= 0 && label.bottom <= innerHeight };
+    });
+    expect(geometry.overlaps, 'Instruction and controls leave active and nearby known controls usable').toEqual([]);
+    expect(geometry.gap, 'The instruction remains adjacent to its grounded target').toBeLessThan(90); expect(geometry.labelInside).toBe(true);
+    await toolbar(page).getByRole('button', { name: 'Stop visual guidance', exact: true }).click(); await expect(chat(page)).toBeVisible();
+  }
 });
