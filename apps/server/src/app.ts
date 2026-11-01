@@ -233,6 +233,12 @@ export function createApp(options: AppOptions) {
     try { options.provider.prepare?.(); } catch { /* An inference still verifies readiness before any turn. */ }
     res.json({ token, expiresAt, agent: { id: agentId, version: published.version, name: published.config.name, companyName: published.config.companyName, greeting: published.config.greeting, accentColor: published.config.accentColor, allowedActions: published.config.allowedActions } });
   });
+  app.post('/api/embed/session/prepare', (req, res) => {
+    embedSession(req);
+    z.object({}).strict().parse(req.body ?? {});
+    try { options.provider.prepare?.(); } catch { /* Preparation does not replace inference-time checks. */ }
+    res.json({ ok: true });
+  });
   const askLimit = rateLimit({ windowMs: 600_000, limit: options.testing ? 300 : 16, standardHeaders: 'draft-8', legacyHeaders: false, message: { error: 'Question limit reached. Try again in a few minutes.' } });
   app.post('/api/embed/session/ask', askLimit, async (req, res) => {
     const sessionRow = embedSession(req), input = askSchema.parse(req.body);

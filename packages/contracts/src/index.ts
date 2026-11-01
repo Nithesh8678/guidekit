@@ -38,7 +38,7 @@ export const pageContextSchema = z.object({
   actions: z.array(actionDescriptorSchema).max(30),
   context: z.record(z.string(), z.unknown()).default({})
 }).strict().superRefine((page, ctx) => {
-  if (page.guideTargets && JSON.stringify(page.guideTargets).length > 16000) ctx.addIssue({ code: 'custom', path: ['guideTargets'], message: 'The public guide target catalog is too large.' });
+  if (page.guideTargets && new TextEncoder().encode(JSON.stringify(page.guideTargets)).byteLength > 16384) ctx.addIssue({ code: 'custom', path: ['guideTargets'], message: 'The public guide target catalog is too large.' });
   for (const [name, targets] of [['targets', page.targets], ['guideTargets', page.guideTargets ?? []]] as const) {
     const ids = new Set<string>();
     for (const target of targets) {

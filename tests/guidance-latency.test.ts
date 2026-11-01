@@ -43,9 +43,9 @@ test('task evidence cache clones validated results, isolates every scope, expire
 test('HTTP planner accepts declared later controls, requires a visible first step, and exposes duration-only diagnostics', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'guidekit-catalog-http-'));
   let nextSteps = [open.id, future.id];
-  let lastPrompt = '';
+  let lastPrompt = '', prepareCalls = 0;
   const core = createApp({ dataDir: directory, testing: true, adminOrigins: new Set(), provider: {
-    status: async () => ({ provider: 'codex', available: true, authenticated: true, message: 'Explicit fixture.' }), close: async () => {},
+    status: async () => ({ provider: 'codex', available: true, authenticated: true, message: 'Explicit fixture.' }), close: async () => {}, prepare() { prepareCalls++; },
     infer: async input => {
       lastPrompt = input.prompt;
       input.onTiming?.({ phase: 'inference', durationMs: 12, elapsedMs: 12 });
@@ -64,6 +64,12 @@ test('HTTP planner accepts declared later controls, requires a visible first ste
     core.repo.addDocument(owner.tenant.id, agent.id, { title: 'Details', content: 'Open Details to reveal Save details.' }); core.repo.publish(owner.tenant.id, agent.id);
     const started = await fetch(`${base}/api/embed/${agent.id}/session`, { method: 'POST', headers: { Origin: website, 'Content-Type': 'application/json' }, body: '{}' });
     const { token } = await started.json() as { token: string };
+    assert.equal(prepareCalls, 1);
+    const prepare = (origin: string, auth: string, body: unknown = {}) => fetch(`${base}/api/embed/session/prepare`, { method: 'POST', headers: { Origin: origin, 'Content-Type': 'application/json', Authorization: `Bearer ${auth}` }, body: JSON.stringify(body) });
+    assert.equal((await prepare(website, 'invalid')).status, 401); assert.equal(prepareCalls, 1);
+    assert.equal((await prepare('https://foreign.test', token)).status, 403); assert.equal(prepareCalls, 1);
+    assert.equal((await prepare(website, token, { prompt: 'must not be accepted' })).status, 400); assert.equal(prepareCalls, 1);
+    assert.equal((await prepare(website, token)).status, 200); assert.equal(prepareCalls, 2);
     const ask = (id: string, overrides = {}) => fetch(`${base}/api/embed/session/ask`, { method: 'POST', headers: { Origin: website, 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ page, message: 'Show how to edit details', requestId: id, ...overrides }) });
     const response = await ask('catalog_batch'); assert.equal(response.status, 200);
     assert.deepEqual((await response.json() as { steps: { targetId: string }[] }).steps.map(step => step.targetId), [open.id, future.id]);
