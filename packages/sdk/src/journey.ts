@@ -62,6 +62,8 @@ export class JourneyCoordinator {
   private disposition: 'continue' | 'needs_input' | 'done' = 'continue';
   private planTargets = new Set<string>();
   private planTargetIndices = new Map<number, string>();
+  private planIdentities = new Map<string, string>();
+  private seenPlanTargets = new Set<string>();
 
   constructor(goal: string, private readonly callbacks: Callbacks, options: { id?: string; completed?: JourneyEvidence[]; maxContinuations?: number } = {}) {
     this.maxContinuations = continuationLimit(options.maxContinuations);
@@ -86,6 +88,8 @@ export class JourneyCoordinator {
     this.disposition = metadata?.disposition ?? 'continue';
     this.planTargets = new Set(plan.run.steps.map(step => step.targetId));
     this.planTargetIndices = new Map(plan.run.steps.map((step, index) => [index, step.targetId]));
+    this.planIdentities = new Map([...(plan.page.guideTargets ?? []), ...plan.page.targets].filter(target => this.planTargets.has(target.id)).map(target => [target.id, `${target.label}:${target.role}`]));
+    this.seenPlanTargets = new Set(plan.page.targets.filter(target => this.planTargets.has(target.id)).map(target => target.id));
     this.callbacks.onChange?.();
     if (!plan.run.steps.length && !plan.run.action) this.end();
   }
@@ -126,7 +130,8 @@ export class JourneyCoordinator {
     const changedRoute = routeKey !== this.routeKey;
     const previous = new Map(this.baseline.targets.map(target => [target.id, `${target.label}:${target.role}`]));
     const next = new Map(page.targets.map(target => [target.id, `${target.label}:${target.role}`]));
-    const lostPlannedControl = [...this.planTargets].some(id => previous.get(id) !== next.get(id));
+    const lostPlannedControl = [...this.planTargets].some(id => next.has(id) ? next.get(id) !== this.planIdentities.get(id) : this.seenPlanTargets.has(id));
+    for (const id of this.planTargets) if (next.has(id) && next.get(id) === this.planIdentities.get(id)) this.seenPlanTargets.add(id);
     // A plan can contain several already-grounded controls. Extra rows, menus
     // or host-state changes do not invalidate those steps: GuidanceSession can
     // advance them locally without another model round trip. A changed route

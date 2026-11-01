@@ -1,6 +1,6 @@
 import type { PageContext, PageTarget } from '../../contracts/src/index';
 import type { CompiledAction } from './security';
-import { publicLabel, safeContext, validId } from './security';
+import { publicLabel, record, safeContext, validId } from './security';
 import { routeKey } from './scene';
 
 const privateSelector = '[data-guidekit-private], [data-guidekit-root], [aria-hidden="true"], [inert]';
@@ -50,9 +50,26 @@ function roleFor(element: HTMLElement): string {
   return 'region';
 }
 
+/** Host-authored public metadata only; it grants no permission or DOM access. */
+export function parseGuideTargets(value: unknown, mode: 'auto' | 'explicit'): PageTarget[] {
+  if (value === undefined) return [];
+  if (mode !== 'explicit') throw new Error('GuideKit guideTargets requires explicit target mode.');
+  if (!Array.isArray(value) || value.length > 64) throw new Error('GuideKit guideTargets must contain at most 64 public controls.');
+  const seen = new Set<string>();
+  const targets: PageTarget[] = value.map(target => {
+    if (!record(target) || !Object.keys(target).every(key => ['id', 'label', 'role', 'description'].includes(key)) || !validId(target.id) || seen.has(target.id) || typeof target.label !== 'string' || !target.label.trim() || target.label.length > 160 || /[\u0000-\u001f\u007f]/.test(target.label) || typeof target.role !== 'string' || !target.role.trim() || target.role.length > 40 || /[\u0000-\u001f\u007f]/.test(target.role) || target.description !== undefined && (typeof target.description !== 'string' || target.description.length > 250 || /[\u0000-\u001f\u007f]/.test(target.description))) throw new Error('GuideKit guideTargets needs unique IDs and bounded public labels, roles and descriptions.');
+    seen.add(target.id);
+    return { id: target.id, label: publicLabel(target.label.trim()).slice(0, 160), role: target.role.trim(), ...(target.description !== undefined ? { description: publicLabel(target.description).slice(0, 250) } : {}) };
+  });
+  if (new TextEncoder().encode(JSON.stringify(targets)).byteLength > 16_384) throw new Error('GuideKit guideTargets must fit within 16 KB.');
+  return targets;
+}
+
 export class ContextCollector {
-  constructor(private readonly targetMode: 'auto' | 'explicit' = 'auto') {
+  private readonly catalog = new Map<string, PageTarget>();
+  constructor(private readonly targetMode: 'auto' | 'explicit' = 'auto', guideTargets?: readonly PageTarget[]) {
     if (!['auto', 'explicit'].includes(targetMode)) throw new Error('GuideKit targetMode must be auto or explicit.');
+    for (const target of parseGuideTargets(guideTargets, targetMode)) this.catalog.set(target.id, target);
   }
   private sequence = 0;
   private ids = new WeakMap<HTMLElement, string>();
@@ -83,6 +100,8 @@ export class ContextCollector {
       if (this.targets.has(id)) continue;
       this.targets.set(id, element); if (explicit) this.explicit.add(id);
       this.identities.set(id, this.identity(element));
+      const expected = this.catalog.get(id);
+      if (expected && (expected.label !== label || expected.role !== roleFor(element))) throw new Error('A visible GuideKit control does not match its public guideTargets metadata.');
       const rawDescription = element.getAttribute('data-guidekit-description');
       const description = rawDescription ? publicLabel(rawDescription).slice(0, 250) : undefined;
       targets.push({ id, label, role: roleFor(element), ...(description ? { description } : {}) });
@@ -91,15 +110,19 @@ export class ContextCollector {
     return {
       url: url.href.replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, 'redacted').slice(0, 1800), title: publicLabel(document.title).slice(0, 200), targets,
       actions: [...actions].filter(([name]) => allowedActions.includes(name)).slice(0, 30).map(([name, { definition }]) => ({ name, description: definition.description, inputSchema: definition.inputSchema, requiresConfirmation: true })),
-      context: safeContext(context)
+      context: safeContext(context),
+      ...(this.catalog.size ? { guideTargets: [...this.catalog.values()].map(target => ({ ...target })) } : {})
     };
   }
   resolve(id: string): HTMLElement | null {
     if (this.documentPath !== `${location.origin}${location.pathname}` || this.documentRoute !== routeKey()) return null;
     const target = this.targets.get(id);
-    if (!this.explicit.has(id)) return this.targetMode !== 'explicit' && target && isSafeTarget(target) && this.identity(target) === this.identities.get(id) ? target : null;
+    const deferred = !this.explicit.has(id) ? this.catalog.get(id) : undefined;
+    if (!this.explicit.has(id) && !deferred) return this.targetMode !== 'explicit' && target && isSafeTarget(target) && this.identity(target) === this.identities.get(id) ? target : null;
     const matches = Array.from(document.querySelectorAll('[data-guidekit-id]')).filter(element => element.getAttribute('data-guidekit-id') === id);
-    if (matches.length !== 1 || !isSafeTarget(matches[0]!) || this.identity(matches[0]!) !== this.identities.get(id)) return null;
+    const identity = deferred ? `${deferred.role}:${deferred.label}` : this.identities.get(id);
+    if (matches.length !== 1 || !isSafeTarget(matches[0]!) || this.identity(matches[0]!) !== identity) return null;
+    if (deferred) { this.explicit.add(id); this.identities.set(id, identity!); }
     this.targets.set(id, matches[0]!); return matches[0]!;
   }
 }

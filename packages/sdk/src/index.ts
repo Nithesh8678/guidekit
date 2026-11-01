@@ -34,7 +34,7 @@ export function stopVoice(): void { instance?.stopVoice(); }
 export function reportStepResult(targetId: string, result: import('./types').GuideStepResult): void { instance?.reportStepResult(targetId, result); }
 export function destroy(): void { instance?.destroy(); instance = null; }
 
-export const SDK_CAPABILITIES: GuideKitAPI['capabilities'] = Object.freeze({ apiVersion: 1, explicitTargets: true, adaptiveJourneys: true, hostWorkflowProgress: true });
+export const SDK_CAPABILITIES: GuideKitAPI['capabilities'] = Object.freeze({ apiVersion: 1, explicitTargets: true, adaptiveJourneys: true, hostWorkflowProgress: true, guideTargetCatalog: true });
 export const GuideKit: GuideKitAPI = { capabilities: SDK_CAPABILITIES, mount, registerAction, setContext, open, close, startVoice, stopVoice, reportStepResult, destroy };
 
 if (typeof window !== 'undefined' && typeof document !== 'undefined') {

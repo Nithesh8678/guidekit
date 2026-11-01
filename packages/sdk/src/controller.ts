@@ -1,7 +1,7 @@
 import type { PageContext, PublicAgent, RunResult } from '../../contracts/src/index';
 import type { GuideContextOptions, GuideKitInstance, GuideStepResult, MountOptions, RegisteredAction } from './types';
 import { compileAction, endpointOrigin, parsePublicAgent, parseRun, record, safeContext, validId, type CompiledAction } from './security';
-import { ContextCollector } from './context';
+import { ContextCollector, parseGuideTargets } from './context';
 import { View, type ActionCard, type GuideHooks } from './view';
 import { Voice } from './voice';
 import { continuationLimit, JourneyCoordinator, parseJourneyMemory, semanticRevision, type JourneyMemory, type JourneyPlan, type JourneyRequest } from './journey';
@@ -35,6 +35,7 @@ export class Assistant implements GuideKitInstance {
   private connecting: Promise<Session> | null = null;
   private explicitContext: Record<string, unknown> = {};
   private explicitContextKey = '{}';
+  private readonly guideTargets: NonNullable<MountOptions['guideTargets']>;
   private contextRevision: string | undefined;
   private active: AbortController | null = null;
   private pending: PendingAction | null = null;
@@ -52,6 +53,7 @@ export class Assistant implements GuideKitInstance {
   constructor(private readonly options: MountOptions) {
     if (!validId(options.agentId)) throw new Error('GuideKit needs a valid published agent ID.');
     if (options.targetMode !== undefined && !['auto', 'explicit'].includes(options.targetMode)) throw new Error('GuideKit targetMode must be auto or explicit.');
+    this.guideTargets = parseGuideTargets(options.guideTargets, options.targetMode ?? 'auto');
     continuationLimit(options.journey?.maxContinuations);
     this.endpoint = endpointOrigin(options.endpoint);
     for (const [name, action] of Object.entries(options.actions ?? {})) this.registerAction(name, action);
@@ -125,7 +127,7 @@ export class Assistant implements GuideKitInstance {
   async getPageContext(): Promise<PageContext> {
     return this.collectPageContext(this.collector());
   }
-  private collector(): ContextCollector { return new ContextCollector(this.options.targetMode); }
+  private collector(): ContextCollector { return new ContextCollector(this.options.targetMode, this.guideTargets.length ? this.guideTargets : undefined); }
   private async collectPageContext(collector: ContextCollector, signal?: AbortSignal): Promise<PageContext> {
     const session = await this.ensureSession();
     signal?.throwIfAborted();
@@ -157,8 +159,7 @@ export class Assistant implements GuideKitInstance {
       if (this.destroyed || generation !== this.generation || controller.signal.aborted) return null;
       if (`${location.origin}${location.pathname}` !== documentPath || routeKey() !== documentRoute) { if (journey?.active) { this.sceneObserver?.refresh(); return null; } throw new Error('The page changed while the assistant was thinking. Ask again for the current page.'); }
       if (result.version !== session.agent.version) throw new Error('The assistant version changed unexpectedly. Reload this page to reconnect.');
-      const knownTargets = new Set(page.targets.map(target => target.id));
-      if (result.steps.some(step => !knownTargets.has(step.targetId))) throw new Error('The assistant referred to a control that was not shared. Ask again for the current page.');
+      this.validatePlanTargets(result, page);
       if (contextRevision !== this.contextRevision) throw new Error('The website workflow changed while the assistant was thinking. Ask again for the current state.');
       const plan: JourneyPlan = { run: result, page, resolve: id => collector.resolve(id), routeKey: routeKey(), contextRevision };
       journey?.adopt(plan); this.renderPlan(plan, journey);
@@ -224,8 +225,14 @@ export class Assistant implements GuideKitInstance {
       const fresh = await this.collectPageContext(this.collector(), signal); signal.throwIfAborted();
       this.journey?.observe(fresh, routeKey(), this.contextRevision); throw new DOMException('The scene changed.', 'AbortError');
     }
-    if (run.version !== session.agent.version || run.steps.some(step => !page.targets.some(target => target.id === step.targetId))) throw new Error('The next guide did not match this page or published assistant.');
+    if (run.version !== session.agent.version) throw new Error('The next guide did not match this page or published assistant.');
+    this.validatePlanTargets(run, page);
     return { run, page, routeKey: route, contextRevision, resolve: id => collector.resolve(id) };
+  }
+  private validatePlanTargets(run: RunResult, page: PageContext): void {
+    const visible = new Set(page.targets.map(target => target.id));
+    const known = new Set([...visible, ...(page.guideTargets ?? []).map(target => target.id)]);
+    if (run.steps.some(step => !known.has(step.targetId)) || run.steps[0] && !visible.has(run.steps[0].targetId)) throw new Error('The assistant referred to a control that was not shared or is not ready. Ask again for the current page.');
   }
   private renderPlan(plan: JourneyPlan, journey: JourneyCoordinator | null): void {
     const { run, page, resolve } = plan;
@@ -234,18 +241,22 @@ export class Assistant implements GuideKitInstance {
     // Preserve the original safe control's native-submit boundary even if its
     // result arrives while paused, without a captured click, or after removal.
     const finalTarget = run.steps.length ? resolve(run.steps.at(-1)!.targetId) : null;
-    const finalNativeSubmit = Boolean(finalTarget && 'form' in finalTarget && (finalTarget as HTMLButtonElement).form && ['submit', 'image'].includes((finalTarget as HTMLButtonElement).type));
+    let finalNativeSubmit = Boolean(finalTarget && 'form' in finalTarget && (finalTarget as HTMLButtonElement).form && ['submit', 'image'].includes((finalTarget as HTMLButtonElement).type));
     let submitting = false;
-    const progress: NonNullable<GuideHooks['progress']> = (index, step, evidence) => { if (!current()) return; const target = page.targets.find(target => target.id === step.targetId); if (target) { journey!.record(index, { targetId: target.id, label: target.label, role: target.role, evidence }); this.sceneObserver?.refresh(); } };
+    const progress: NonNullable<GuideHooks['progress']> = (index, step, evidence) => { if (!current()) return; const target = page.targets.find(target => target.id === step.targetId) ?? page.guideTargets?.find(target => target.id === step.targetId); if (target) { journey!.record(index, { targetId: target.id, label: target.label, role: target.role, evidence }); this.sceneObserver?.refresh(); } };
     const hooks: GuideHooks | undefined = journey ? {
       progress,
       state: state => {
         if (!current()) return;
+        // A catalog's final control may mount after the plan was adopted. Once
+        // observed, retain the same native-submit boundary even while paused
+        // or if the host later removes/relabels that control during saving.
+        if (state.index === run.steps.length - 1 && state.target && 'form' in state.target && (state.target as HTMLButtonElement).form && ['submit', 'image'].includes((state.target as HTMLButtonElement).type)) finalNativeSubmit = true;
         if (!state.confirmationPending) submitting = false;
         else if (state.target && 'form' in state.target && (state.target as HTMLButtonElement).form && ['submit', 'image'].includes((state.target as HTMLButtonElement).type)) submitting = true;
         journey!.setPaused(state.paused); journey!.setAwaitingHost(state.hostPending || state.confirmationPending && (submitting || !journey!.canContinue));
         if (state.confirmationPending && !state.hostPending && journey!.canContinue && !submitting) { progress(state.index, state.step, 'observed'); journey!.expectTransition(); }
-        if (!state.paused) this.sceneObserver?.refresh();
+        this.sceneObserver?.refresh();
       },
       finish: result => {
         if (!current()) return false;

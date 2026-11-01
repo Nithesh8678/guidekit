@@ -1,4 +1,4 @@
-import type { PageContext, PublicAgent, RunResult } from '../../contracts/src/index';
+import type { PageContext, PageTarget, PublicAgent, RunResult } from '../../contracts/src/index';
 
 export interface ActionResult { success: boolean; message: string; }
 /** Local host observation for a guided step. This does not authorize or execute an action. */
@@ -37,6 +37,9 @@ export interface MountOptions {
   endpoint: string;
   /** Explicit mode shares only host-authored data-guidekit-id controls. Defaults to auto. */
   targetMode?: 'auto' | 'explicit';
+  /** Optional public metadata for up to 64 future controls. Requires explicit mode.
+   * A control resolves only when its unique ID, label and role safely appear. */
+  guideTargets?: PageTarget[];
   actions?: Record<string, RegisteredAction>;
   /** Supply deliberately public, small application context. Never include secrets. */
   getContext?(): Record<string, unknown> | Promise<Record<string, unknown>>;
@@ -61,7 +64,7 @@ export interface GuideKitInstance {
   getPageContext(): Promise<PageContext>;
 }
 export interface GuideKitAPI {
-  readonly capabilities: Readonly<{ apiVersion: 1; explicitTargets: true; adaptiveJourneys: true; hostWorkflowProgress: true }>;
+  readonly capabilities: Readonly<{ apiVersion: 1; explicitTargets: true; adaptiveJourneys: true; hostWorkflowProgress: true; guideTargetCatalog: true }>;
   mount(options: MountOptions): GuideKitInstance;
   registerAction(name: string, action: RegisteredAction): void;
   setContext(context: Record<string, unknown>, options?: GuideContextOptions): void;
