@@ -289,6 +289,7 @@ export class View {
       card.style.maxHeight = `${Math.max(100, height - edge * 2)}px`; card.style.overflowY = 'auto';
       const current = state.target ? resolve(state.step.targetId) : null;
       if (current !== state.target) { session.refresh(); return; }
+      beginReveal();
       const rect = current?.getBoundingClientRect(), clipped = current ? revealedBounds(current) : null;
       const targetVisible = !!current && !!clipped && targetRevealed(current);
       if (!state.paused && !state.waiting) hint.textContent = reveal?.active ? 'Scrolling to this step…' : targetVisible ? state.hint : 'Scroll to this control to continue. I’ll point when it’s visible.';
@@ -357,6 +358,18 @@ export class View {
         markReady = true; if (reason === 'unavailable') { this.handlers.guidePause?.(); motion.setActivity('pointing'); } schedulePosition();
       });
     };
+    const beginReveal = () => {
+      const update = state;
+      if (!update?.target || update.waiting || update.paused || this.guideChatOpen || document.hidden || revealIndex === update.index && revealTarget === update.target) return;
+      revealIndex = update.index; revealTarget = update.target;
+      const index = update.index, target = update.target;
+      reveal = new GuidedReveal(target, () => resolve(update.step.targetId), () => !disposed && state?.index === index && state.target === target && !state.paused && !this.guideChatOpen, reduced, result => {
+        if (disposed || state?.index !== index || state.target !== target) return;
+        card.dataset.gkScrollState = result; hint.textContent = state.hint; schedulePosition();
+      });
+      reveal.start();
+      if (reveal.active) { card.dataset.gkScrollState = 'revealing'; hint.textContent = 'Scrolling to this step…'; motion.setVisible(false); }
+    };
     // WAAPI-only movement emits no DOM mutation or CSS transition event. A
     // four-Hz local check notices it and enables frame tracking while moving.
     const groundingPoll = setInterval(() => {
@@ -392,16 +405,7 @@ export class View {
         }
         if (!this.guideChatOpen) { this.panel.hidden = true; this.launcher.hidden = true; card.hidden = false; }
         if (focusFirst && update.target?.matches('input:not(:disabled),textarea:not(:disabled),select:not(:disabled)')) update.target.focus({ preventScroll: true });
-        if (update.target && !update.waiting && !update.paused && !this.guideChatOpen && !document.hidden && (revealIndex !== update.index || revealTarget !== update.target)) {
-          revealIndex = update.index; revealTarget = update.target;
-          const index = update.index, target = update.target;
-          reveal = new GuidedReveal(target, () => resolve(update.step.targetId), () => !disposed && state?.index === index && state.target === target && !state.paused && !this.guideChatOpen, reduced, result => {
-            if (disposed || state?.index !== index || state.target !== target) return;
-            card.dataset.gkScrollState = result; hint.textContent = state.hint; schedulePosition();
-          });
-          reveal.start();
-          if (reveal.active) { card.dataset.gkScrollState = 'revealing'; hint.textContent = 'Scrolling to this step…'; motion.setVisible(false); }
-        }
+        beginReveal();
         if (update.paused) { reveal?.cancel(); ++narration; lastNarrated = -1; markReady = false; lastPresented = -1; beats.cancel(); if (ownsMotion) motion.erase({ animate: false, preserveCursor: true }); this.handlers.guidePause?.(); }
         schedulePosition(changedStep && lastIndex >= 0); lastIndex = update.index;
       },

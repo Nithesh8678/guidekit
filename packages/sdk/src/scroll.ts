@@ -78,7 +78,7 @@ function plannedMoves(target: HTMLElement): Move[] {
     const root = document.scrollingElement ?? document.documentElement;
     const maxX = port.element ? Math.max(0, port.element.scrollWidth - port.element.clientWidth) : Math.max(0, root.scrollWidth - document.documentElement.clientWidth);
     const maxY = port.element ? Math.max(0, port.element.scrollHeight - port.element.clientHeight) : Math.max(0, root.scrollHeight - document.documentElement.clientHeight);
-    const rtl = port.element && getComputedStyle(port.element).direction === 'rtl';
+    const rtl = getComputedStyle(port.element ?? document.documentElement).direction === 'rtl';
     return { ...port, fromLeft: port.element?.scrollLeft ?? window.scrollX, fromTop: port.element?.scrollTop ?? window.scrollY, minLeft: rtl ? -maxX : 0, maxLeft: rtl ? 0 : maxX, maxTop: maxY };
   });
   for (let index = 0; index < chain.length; index++) {
