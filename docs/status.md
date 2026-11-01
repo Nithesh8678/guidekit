@@ -1,5 +1,15 @@
 # GuideKit status
 
+## Spatial guidance presentation — 2026-11-01
+
+SDK `0.4.5-alpha.1`, release `3ba65d0e268fb3e4a456872a`, replaces the persistent guidance card with a compact amber instruction label, a separate numbered badge and the selected target mark. Pause/Resume, help, chat and stop occupy a separate small strip. Scrolling settles before cursor flight; the cursor lands and the target stroke completes before typed text appears. Visible Unicode graphemes drive real label dimensions. Sixteen bounded placement candidates account for known public controls, the target, badge and essential feedback. No screenshot capture, new dependency, arbitrary page text collection or per-frame model request is added.
+
+The automatic trusted-event and verified-host workflow remains intact, with no Back/Next/Finish controls. Same-step geometry updates do not replay typing; Reduced Motion settles immediately. Hidden first flights resume their valid reveal, and visible pending/failure feedback participates in control placement. Stop/destroy remove owned badges and pending work. The [reference report](spatial-guidance.md) distinguishes observed official demonstrations, shipped-resource clues and original browser choices; exact current native HeyClicky parity is not claimed.
+
+Local typecheck, production build and **282** default unit/HTTP/runtime/SDK checks passed with 12 explicit opt-in skips. Browser regressions cover real cursor/stroke/text ordering, amber contrast, badge composition, public-control avoidance, independent keyboard-accessible controls, hidden-flight recovery, Unicode, stationary no-churn, cancellation, automatic workflows and host verification. Exact final browser and remote CI results belong to [draft PR15](https://github.com/Nithesh8678/guidekit/pull/15).
+
+A separate actual Cutroom run used real subscription inference, PostgreSQL company knowledge and **one** model request for three local steps: width, height and frame rate, including smooth panel scrolling. An independent authenticated API GET confirmed revision 8 at 1280 × 720 and 24 fps with the existing two-second title preserved and no media assets/clips added. The guide honestly distinguished observed completion from host-confirmed success. Private evidence is under `.data/evidence/spatial-guide-*`. Cutroom adapter source remains unchanged; this stays on the existing feature branch for later review and merge.
+
 ## Automatic observed guidance — 2026-11-01
 
 SDK `0.4.4-alpha.1`, release `5a6e46cb1a16e8f84987dbc7`, keeps the animated step number and typed instruction as the focus of the glowing adaptive card. Back, Next, Finish and automatic-mode controls are removed. Pause/Resume, chat and stop remain in its header. Known nonprivate page controls drive progress through trusted edits, native selections, deliberate valid dropdown exits, navigation and verified host results. Merely focusing a field, changing values through script, entering GuideKit chrome or finishing an animation cannot complete a step. Existing dropdown selections can be accepted through a fresh trusted Tab/click departure without changing a correct default.
