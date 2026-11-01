@@ -12,7 +12,7 @@ Preparation embeds exact source chunks locally using the pinned Apache-2.0 MiniL
 
 Retrieval combines full-text matches with exact, tenant/agent/version-scoped cosine similarity and reciprocal rank fusion. Exact scoped search avoids premature shared HNSW indexes and their filter/recall tradeoffs. Up to two complementary passages from a document may contribute within the eight-citation total. All excerpts must match the immutable source. The English model and initial similarity threshold require representative customer evaluation; there is no universal relevance or language-coverage guarantee.
 
-The knowledge role is refused if it owns tables, can bypass RLS, has schema-administration privileges or inherits a privileged role. Forced RLS and restrictive scope policies protect every knowledge table. Scope comes from authenticated server state and is set transaction-locally, never from model output. The product application role is separately checked for privileged flags and table ownership. Product authorization stays in the server; knowledge RLS is an additional boundary.
+The knowledge role is refused if it owns tables, can bypass RLS, has schema-administration privileges or inherits a privileged role. Forced RLS and restrictive scope policies protect publication, document and chunk tables; the schema-version marker is read-only metadata. Scope comes from authenticated server state and is set transaction-locally, never from model output. The product application role is separately checked for privileged flags and table ownership. Product authorization stays in the server; knowledge RLS is an additional boundary.
 
 ## Provisioning
 
