@@ -152,7 +152,10 @@ test('guidance follows edits automatically while pause, resume and stop stay und
   await guide(page).getByRole('button', { name: 'Pause guide', exact: true }).click();
   await nameField(page).fill('Paused Name'); await page.waitForTimeout(quietWindow); await step(page, 1);
   await guide(page).getByRole('button', { name: 'Resume guide', exact: true }).click();
-  await step(page, 2); await expect(nameField(page)).toBeFocused();
+  await step(page, 2);
+  // The visitor moved focus to Resume. Automatic progression keeps it on that
+  // same header button (now Pause), rather than returning to a previous field.
+  await expect(guide(page).getByRole('button', { name: 'Pause guide', exact: true })).toBeFocused();
   await companyField(page).fill('Automatic Company'); await step(page, 3);
   const status = page.locator('[data-guidekit-id="contact-status"]');
   await status.focus(); await status.press('q'); await expect(status).toHaveValue('Qualified'); await step(page, 4);
