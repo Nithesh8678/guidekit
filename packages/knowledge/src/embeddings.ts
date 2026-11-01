@@ -43,6 +43,7 @@ export function createLocalEmbeddingProvider(options: { cacheDir?: string; local
       if (closed) fail('embedding_failed', 'The embedding provider is closed.');
       if (!Array.isArray(texts) || texts.length < 1 || texts.length > 16 || texts.some(text => typeof text !== 'string' || !text.trim() || text.includes('\0') || text.length > 3200) || Buffer.byteLength(JSON.stringify(texts)) > 64_000) fail('invalid_input', 'Embedding input exceeds the bounded text batch.');
       if (pending >= 8) fail('embedding_failed', 'The embedding worker is busy. Retry shortly.');
+      texts = [...texts];
       pending++;
       const job = tail.then(async () => {
         try {

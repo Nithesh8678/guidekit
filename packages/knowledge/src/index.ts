@@ -1,7 +1,7 @@
 /** Server-only tenant-scoped PostgreSQL keyword + exact vector retrieval. */
 import { Pool, type PoolClient } from 'pg';
 import type { KnowledgeProvider, KnowledgeScope, KnowledgeSnapshot } from './types.js';
-import { buildSnapshot, digest, fail, identifier, KnowledgeError, validateScope } from './chunks.js';
+import { buildSnapshot, fail, identifier, KnowledgeError, validateScope } from './chunks.js';
 import { createLocalEmbeddingProvider, EMBEDDING_DIMENSIONS, normalizedVectors, type EmbeddingProvider } from './embeddings.js';
 import { KNOWLEDGE_SCHEMA_VERSION } from './schema.js';
 export { KnowledgeError, chunkSource } from './chunks.js';
@@ -35,6 +35,7 @@ export function createPostgresKnowledgeProvider(config?: PostgresKnowledgeConfig
   if (config.maxPoolSize !== undefined && (!Number.isInteger(config.maxPoolSize) || config.maxPoolSize < 1 || config.maxPoolSize > 10)) fail('invalid_config', 'Knowledge pool size must be between 1 and 10.');
   const embeddings = config.embeddings ?? createLocalEmbeddingProvider({ cacheDir: config.cacheDir, localFilesOnly: config.localFilesOnly });
   if (!embeddings.model || embeddings.model.length > 300 || embeddings.dimensions !== EMBEDDING_DIMENSIONS) fail('invalid_config', 'Knowledge embeddings require a versioned 384-dimensional model.');
+  const embeddingModel = embeddings.model;
   const pool = new Pool({ connectionString: url.toString(), max: config.maxPoolSize ?? 4, connectionTimeoutMillis: 10_000, idleTimeoutMillis: 30_000, query_timeout: 30_000, statement_timeout: 20_000, application_name: 'guidekit-knowledge' });
   // A transient idle-pool error must not crash the server or print a connection string.
   pool.on('error', () => undefined);
@@ -66,7 +67,7 @@ export function createPostgresKnowledgeProvider(config?: PostgresKnowledgeConfig
   function verifyVersion(row: Record<string, unknown> | undefined, manifest?: string): boolean {
     if (!row) return false;
     if (manifest && row.manifest !== manifest) fail('snapshot_conflict', 'This published version already has different knowledge. Publish a new version.');
-    if (row.embedding_model !== embeddings.model || row.dimensions !== EMBEDDING_DIMENSIONS) fail('snapshot_conflict', 'This publication uses another embedding model. Publish a new version before changing models.');
+    if (row.embedding_model !== embeddingModel || row.dimensions !== EMBEDDING_DIMENSIONS) fail('snapshot_conflict', 'This publication uses another embedding model. Publish a new version before changing models.');
     return row.ready === true;
   }
   return {
@@ -78,7 +79,8 @@ export function createPostgresKnowledgeProvider(config?: PostgresKnowledgeConfig
       } catch (error) { return { source: 'postgres', configured: true, connected: false, mode: 'hybrid', message: safeError(error).message }; }
     },
     async syncVersion(input: KnowledgeSnapshot) {
-      const built = buildSnapshot(input, embeddings.model), active = syncing.get(built.key);
+      input = { ...input, tenantId: input.tenantId, agentId: input.agentId, version: input.version };
+      const built = buildSnapshot(input, embeddingModel), active = syncing.get(built.key);
       if (active) { if (active.manifest !== built.manifest) fail('snapshot_conflict', 'This published version is preparing different knowledge. Publish a new version.'); return active.promise; }
       const sync = async () => {
         const ready = await scoped(input, async client => verifyVersion(await readVersion(client, input), built.manifest));
@@ -92,7 +94,7 @@ export function createPostgresKnowledgeProvider(config?: PostgresKnowledgeConfig
           await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [built.key]);
           if (verifyVersion(await readVersion(client, input), built.manifest)) return { chunks: built.chunks.length };
           const scope = scopeValues(input);
-          await client.query('INSERT INTO guidekit_knowledge.versions(tenant_id,agent_id,version,manifest,embedding_model,dimensions,chunk_count,allowed_actions) VALUES($1,$2,$3,$4,$5,384,$6,$7::jsonb)', [...scope, built.manifest, embeddings.model, built.chunks.length, JSON.stringify(built.actions)]);
+          await client.query('INSERT INTO guidekit_knowledge.versions(tenant_id,agent_id,version,manifest,embedding_model,dimensions,chunk_count,allowed_actions) VALUES($1,$2,$3,$4,$5,384,$6,$7::jsonb)', [...scope, built.manifest, embeddingModel, built.chunks.length, JSON.stringify(built.actions)]);
           for (const document of built.documents) await client.query('INSERT INTO guidekit_knowledge.documents(tenant_id,agent_id,version,document_id,title,content,content_hash) VALUES($1,$2,$3,$4,$5,$6,$7)', [...scope, document.id, document.title, document.content, document.hash]);
           for (let offset = 0; offset < built.chunks.length; offset += 40) {
             const values: unknown[] = [...scope], rows: string[] = [];
@@ -113,6 +115,7 @@ export function createPostgresKnowledgeProvider(config?: PostgresKnowledgeConfig
       try { return await promise; } finally { if (syncing.get(built.key)?.promise === promise) syncing.delete(built.key); }
     },
     async retrieve(input) {
+      input = { ...input };
       validateScope(input);
       if (typeof input.question !== 'string' || !input.question.trim() || input.question.length > 3000 || input.question.includes('\0')) fail('invalid_input', 'A retrieval question must contain 1–3000 characters.');
       const limit = input.limit ?? 8;
@@ -125,7 +128,7 @@ export function createPostgresKnowledgeProvider(config?: PostgresKnowledgeConfig
         if (!verifyVersion(await readVersion(client, input))) fail('not_ready', 'This publication is unavailable.');
         const result = await client.query(`WITH scoped AS MATERIALIZED (
           SELECT c.* FROM guidekit_knowledge.chunks c WHERE c.tenant_id=$1 AND c.agent_id=$2 AND c.version=$3
-        ), query AS (SELECT websearch_to_tsquery('english',$4) || websearch_to_tsquery('simple',$4) AS q),
+        ), query AS (SELECT to_tsquery('english',coalesce((SELECT string_agg(quote_literal(term),' | ') FROM (SELECT unnest(tsvector_to_array(to_tsvector('english',$4))) AS term LIMIT 32) terms),'')) AS q),
         lexical AS (SELECT document_id,ordinal,row_number() OVER(ORDER BY ts_rank_cd(lexical,q) DESC,document_id,ordinal) AS rank FROM scoped,query WHERE lexical @@ q ORDER BY ts_rank_cd(lexical,q) DESC,document_id,ordinal LIMIT $6),
         semantic AS (SELECT document_id,ordinal,row_number() OVER(ORDER BY embedding <=> $5::vector,document_id,ordinal) AS rank FROM scoped WHERE 1-(embedding <=> $5::vector)>=0.35 ORDER BY embedding <=> $5::vector,document_id,ordinal LIMIT $6),
         fused AS (SELECT coalesce(l.document_id,s.document_id) AS document_id,coalesce(l.ordinal,s.ordinal) AS ordinal,coalesce(1.0/(60+l.rank),0)+coalesce(1.0/(60+s.rank),0) AS score FROM lexical l FULL OUTER JOIN semantic s USING(document_id,ordinal)),
