@@ -10,6 +10,30 @@ work.
 
 The selected product data and retrieval path is PostgreSQL with pgvector; see [setup and cutover](postgres-migration.md). The SQLite procedures below apply only when SQLite is explicitly selected. After PostgreSQL cutover, backing up the old SQLite file does not back up new application writes. Keep the direct migration/backup credential separate from restricted runtime credentials, and take a complete PostgreSQL backup including the knowledge index. The original SQLite archive is a pre-cutover recovery point, not an ongoing PostgreSQL backup.
 
+## Complete PostgreSQL backup and recovery
+
+Use the separate direct operator credential for an online, repeatable-read snapshot. The runtime credential intentionally cannot read every tenant's knowledge. The archive includes product records, import history, all immutable source documents and embedding vectors, plus the local session signing secret. It is a bounded logical application archive, not a cluster image, role export or point-in-time recovery service.
+
+```sh
+node --env-file=OPERATOR_ENV --import tsx scripts/postgres-archive.ts backup \
+  --data-dir .data --dest .backups/postgres-manual
+```
+
+The destination must be new and outside the data directory. Directories are mode `0700`, files `0600`, and the archive contains an ignore marker. Every table and file has a verified content hash. These archives contain account hashes, company data, sessions and credentials; use encrypted off-device storage with a separate access policy. Checksums detect corruption, not an untrusted sender. Environment files, model account credentials, account-delivery outbox and media are excluded. This archive does include the PostgreSQL knowledge index.
+
+For a recovery drill, first provision a separate empty database, create its schemas with `scripts/postgres-schema.ts`, and point `RECOVERY_OPERATOR_ENV` at that database. Choose a new local data directory and an unused verification port. Never reuse the live database URL for a drill.
+
+```sh
+node --env-file=RECOVERY_OPERATOR_ENV --import tsx scripts/postgres-schema.ts
+node --env-file=RECOVERY_OPERATOR_ENV --import tsx scripts/postgres-archive.ts restore \
+  --archive .backups/postgres-manual --data-dir .data-recovered \
+  --apply --offline --port 4428
+```
+
+Restore verifies the archive before importing, refuses nonempty targets, holds an exclusive sibling restore lock, checks that the target service is offline, and validates every restored row hash before commit. Generated search fields are recomputed and checked; knowledge versions become ready only after their documents and vectors exist. Existing secrets are never overwritten. If a connection fails during the final commit acknowledgement, retain the staged secret and inspect the database before retrying. There is no force-overwrite path. Start recovery with restricted runtime URLs for the recovered database, the matching recovered data directory and prepared embedding cache; verify readiness, sign-in, publication history and grounded retrieval separately.
+
+`npm run backup` selects the configured product database and requires `GUIDEKIT_DATABASE_URL_DIRECT` for PostgreSQL. `npm run restore` recognizes the archive format and rejects a SQLite restore while PostgreSQL is selected. An explicitly isolated legacy environment is required for the pre-cutover SQLite archive. See [migration and rollback](postgres-migration.md) before changing stores after new writes.
+
 ## Online SQLite backup
 
 ```sh

@@ -39,7 +39,7 @@ The schema command installs versioned schemas and explicit runtime grants. The a
 1. Stop GuideKit and verify its actual service port is offline. Take a new verified `createBackup` archive with the original `session.secret`. Keep a private copy of the original runtime environment.
 2. Preview the import. It validates the archive, known schema, all table columns and scoped relationships without contacting PostgreSQL.
 3. Import into the empty dedicated PostgreSQL database. One transaction, table locks and complete row-content hashes protect the transfer. An identical replay is accepted only while the imported contents are still identical; later edits intentionally invalidate replay. No target rows are truncated or overwritten.
-4. Prepare every ready publication's PostgreSQL index. Only after all preparations succeed does one metadata transaction switch the retrieval source. Immutable content and active version pointers stay unchanged. Failed candidates remain failed and are retried separately through the normal publication flow.
+4. Prepare every ready publication's PostgreSQL index. Only after all preparations succeed does one metadata transaction switch the retrieval source. Immutable content and active version pointers stay unchanged. Failed candidates retain their original provider and history. With PostgreSQL selected, publish a new candidate to prepare that content in PostgreSQL; retrying an old TigerGraph candidate still requires the explicitly enabled legacy TigerGraph provider. A retry never silently switches providers.
 5. Start with the runtime environment, verify `/ready`, existing sign-in, publication history, source previews, and a real SDK workflow. Reconnect hosts to the newly built SDK because older SDKs reject unknown evidence sources.
 
 ```sh
@@ -52,6 +52,10 @@ node --env-file=RUNTIME_ENV --import tsx scripts/migrate-knowledge.ts \
 ```
 
 The original SQLite database and TigerGraph workspace are not deleted. Before accepting new writes, rollback can restore the original runtime environment and server release against the unchanged SQLite data. After PostgreSQL accepts new writes, simply selecting SQLite would lose those writes; stop traffic and reconcile or restore a verified PostgreSQL backup instead. Do not run both stores as independent live writers.
+
+## Ongoing recovery
+
+The [complete PostgreSQL backup and restore procedure](operations.md#complete-postgresql-backup-and-recovery) covers product records, immutable source text, semantic vectors, import history and the signing secret in one consistent snapshot. Operator credentials stay separate from the runtime. Recovery accepts only an empty separately initialized database and validates all restored row hashes before commit. Keep the pre-cutover SQLite archive for its original point in time; it does not contain later PostgreSQL writes.
 
 ## Checks and limits
 
