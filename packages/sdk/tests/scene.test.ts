@@ -6,8 +6,9 @@ import { SceneObserver } from '../src/scene';
 const page: PageContext = { url: 'https://host.test/editor', title: 'Editor', targets: [], actions: [], context: {} };
 const settled = async () => { for (let index = 0; index < 8; index++) await Promise.resolve(); };
 function environment() {
+  let mutate: (() => void) | undefined;
   class ElementDouble { parentElement = null; closest() { return null; } }
-  class ObserverDouble { observe() {} disconnect() {} }
+  class ObserverDouble { constructor(callback: (records: Array<{ target: ElementDouble }>) => void) { mutate = () => callback([{ target: new ElementDouble() }]); } observe() {} disconnect() {} }
   const events = { addEventListener() {}, removeEventListener() {} };
   const doc = { ...events, hidden: false, documentElement: new ElementDouble() };
   const route = { origin: 'https://host.test', pathname: '/editor', search: '', hash: '' };
@@ -15,7 +16,7 @@ function environment() {
   for (const [key, value] of Object.entries({ document: doc, window: events, location: route, Element: ElementDouble, MutationObserver: ObserverDouble })) {
     descriptors.set(key, Object.getOwnPropertyDescriptor(globalThis, key)); Object.defineProperty(globalThis, key, { value, configurable: true });
   }
-  return { doc, route, restore: () => { for (const [key, descriptor] of descriptors) { if (descriptor) Object.defineProperty(globalThis, key, descriptor); else Reflect.deleteProperty(globalThis, key); } } };
+  return { doc, route, mutate: () => mutate?.(), restore: () => { for (const [key, descriptor] of descriptors) { if (descriptor) Object.defineProperty(globalThis, key, descriptor); else Reflect.deleteProperty(globalThis, key); } } };
 }
 
 test('fresh async scene reads debounce, abort obsolete snapshots, and discard completion after destroy', async context => {
@@ -51,10 +52,28 @@ test('continuous render notifications cannot starve a local scene read beyond 50
   const observer = new SceneObserver(() => { reads++; return page; }, () => { deliveries++; });
   try {
     observer.refresh();
-    for (let index = 0; index < 6; index++) { context.mock.timers.tick(80); observer.refresh(); await settled(); }
+    for (let index = 0; index < 6; index++) { context.mock.timers.tick(80); state.mutate(); await settled(); }
     assert.equal(reads, 0); context.mock.timers.tick(19); await settled(); assert.equal(reads, 0);
     context.mock.timers.tick(1); await settled(); assert.equal(reads, 1); assert.equal(deliveries, 1);
     context.mock.timers.tick(500); await settled(); assert.equal(reads, 1);
     observer.refresh(); observer.destroy(); context.mock.timers.tick(1000); await settled(); assert.equal(reads, 1);
+  } finally { observer.destroy(); state.restore(); context.mock.timers.reset(); }
+});
+
+test('soft DOM storms let asynchronous context finish with fresh targets and queue one follow-up; explicit refresh remains hard', async context => {
+  context.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] }); const state = environment();
+  const reads: Array<{ signal: AbortSignal; release(): void }> = [], snapshots: string[] = []; let label = 'before';
+  const observer = new SceneObserver(async signal => {
+    await new Promise<void>(release => reads.push({ signal, release }));
+    return { ...page, targets: [{ id: 'current', label, role: 'button' }] };
+  }, snapshot => snapshots.push(snapshot.targets[0]!.label));
+  try {
+    observer.refresh(); context.mock.timers.tick(180); await settled(); assert.equal(reads.length, 1);
+    for (let index = 0; index < 7; index++) { context.mock.timers.tick(16); label = `render_${index}`; state.mutate(); }
+    assert.equal(reads[0]!.signal.aborted, false); reads[0]!.release(); await settled(); assert.deepEqual(snapshots, ['render_6']);
+    context.mock.timers.tick(179); await settled(); assert.equal(reads.length, 1);
+    context.mock.timers.tick(1); await settled(); assert.equal(reads.length, 2);
+    observer.refresh(); assert.equal(reads[1]!.signal.aborted, true); label = 'explicit-new-state'; reads[1]!.release(); await settled(); assert.equal(snapshots.length, 1);
+    context.mock.timers.tick(180); await settled(); reads[2]!.release(); await settled(); assert.deepEqual(snapshots, ['render_6', 'explicit-new-state']);
   } finally { observer.destroy(); state.restore(); context.mock.timers.reset(); }
 });

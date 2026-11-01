@@ -33,11 +33,12 @@ document.querySelector('[data-guidekit-id="open"]').addEventListener('click', ()
 });
 const script = document.createElement('script'); script.src = '${endpoint}/sdk.js';
 script.onload = async () => {
- fixture.assistant = window.GuideKit.mount({ agentId: 'latency_fixture', endpoint: '${endpoint}', targetMode: 'explicit', ...(options.has('noCatalog') ? {} : { guideTargets: catalog }), voice: { provider: 'disabled' }, getContext: async () => { fixture.reads++; if (options.has('churn')) await new Promise(resolve => setTimeout(resolve, 50)); return { publicWorkflow: 'create-item' }; } });
+ fixture.assistant = window.GuideKit.mount({ agentId: 'latency_fixture', endpoint: '${endpoint}', targetMode: 'explicit', ...(options.has('noCatalog') ? {} : { guideTargets: catalog }), voice: { provider: 'disabled' }, getContext: async () => { fixture.reads++; if (options.has('churn') || options.has('domChurn')) await new Promise(resolve => setTimeout(resolve, options.has('domChurn') ? 100 : 50)); return { publicWorkflow: 'create-item' }; } });
  fixture.assistant.setContext({}, { revision: 0 }); await fixture.assistant.ready;
  const root = document.querySelector('[data-guidekit-root]').shadowRoot;
  new MutationObserver(() => { const guide = root.querySelector('[aria-label="Visual guidance"]'); if (fixture.clickAt && !fixture.nextAt && guide && guide.textContent.includes('Enter the public name.')) fixture.nextAt = performance.now(); }).observe(root, { subtree: true, childList: true, characterData: true });
  if (options.has('churn')) { const timer = setInterval(() => fixture.assistant.setContext({}, { revision: 0 }), 16); fixture.stopChurn = () => clearInterval(timer); }
+ if (options.has('domChurn')) { const render = document.createElement('span'); render.setAttribute('aria-hidden', 'true'); document.body.append(render); let tick = 0; const timer = setInterval(() => { render.textContent = String(++tick); }, 16); fixture.stopChurn = () => clearInterval(timer); }
 }; document.body.append(script);
 `;
 
@@ -97,6 +98,17 @@ test('identical revision-aware host renders do not starve asynchronous scene col
   expect(requests).toHaveLength(2); expect(result.elapsedMs).toBeLessThan(1500); expect(result.contextReads).toBeLessThan(12);
   await testInfo.attach('render-churn-latency.json', { contentType: 'application/json', body: JSON.stringify(result) });
   console.log('Render-churn continuation:', JSON.stringify(result));
+});
+
+test('continuous DOM renders coalesce around asynchronous context reads and still deliver the next scene', async ({ page }, testInfo) => {
+  await start(page, 'noCatalog=1&domChurn=1'); await page.locator('[data-guidekit-id="open"]').click();
+  await expect(guide(page)).toContainText('Enter the public name.');
+  const result = await page.evaluate(() => ({ elapsedMs: window.guideKitLatency.nextAt - window.guideKitLatency.clickAt, contextReads: window.guideKitLatency.reads }));
+  await page.evaluate(() => window.guideKitLatency.stopChurn());
+  expect(requests).toHaveLength(2); expect(requests[1]!.page.targets.some(target => target.id === 'name')).toBe(true);
+  expect(result.elapsedMs).toBeLessThan(1800); expect(result.contextReads).toBeLessThan(12);
+  await testInfo.attach('dom-storm-latency.json', { contentType: 'application/json', body: JSON.stringify(result) });
+  console.log('DOM-storm continuation:', JSON.stringify(result));
 });
 
 test('catalog resolution refuses private, duplicate, mismatched and changed-route controls', async ({ page }) => {
