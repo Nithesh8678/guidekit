@@ -22,6 +22,18 @@ Only `infer()` success records live verification. A 90-second timeout and caller
 AbortSignal terminate inference. Codex stderr and account metadata are never
 forwarded to the UI or logs.
 
+`infer({ onTiming })` can report duration-only phase diagnostics: `startup`,
+`restrictions`, `authentication`, `catalog`, `thread`, `inference`, and `cleanup`.
+Each event contains only `phase`, `durationMs`, and `elapsedMs`; it contains no
+prompt, model output, account identity, paths, or credentials. Startup includes
+private-directory preparation, process launch, and initialization. The inference
+phase ends at completed model output, separately from subprocess/state cleanup.
+Completed, failed, and cancelled phases are measured, and observer exceptions do
+not change inference or enforcement. The separately enabled hosted provider
+reports its `inference` phase only. These measurements describe runtime phases;
+website collection, retrieval, rendering, and host outcomes require separate
+measurement.
+
 This is a local single-owner demo integration. It must not be exposed as a
 shared hosted service using the owner's subscription.
 

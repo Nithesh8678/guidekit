@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createCodexProvider } from './index.js';
+import { createCodexProvider, type InferenceTiming } from './index.js';
 
 const schema = { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'], additionalProperties: false };
 
@@ -101,5 +101,61 @@ test('cancellation stops the subprocess and leaves live status unverified', asyn
       await assert.rejects(provider.infer({ prompt: 'fixture prompt', schema, signal: controller.signal }), { name: 'AbortError' });
       assert.match((await provider.status()).message, /not yet been verified/);
     } finally { clearTimeout(timer); await provider.close(); }
+  });
+});
+
+test('phase timings contain only numeric durations and preserve completed inference', async () => {
+  await fixture('success', async (bin, cwd) => {
+    const provider = createCodexProvider({ bin, cwd }), events: InferenceTiming[] = [];
+    try {
+      const result = await provider.infer({ prompt: 'fixture prompt', schema, onTiming: event => events.push(event) });
+      assert.deepEqual(JSON.parse(result), { answer: 'verified' });
+      assert.deepEqual(events.map(event => event.phase), ['startup', 'restrictions', 'authentication', 'catalog', 'thread', 'inference', 'cleanup']);
+      for (const [index, event] of events.entries()) {
+        assert.deepEqual(Object.keys(event).sort(), ['durationMs', 'elapsedMs', 'phase']);
+        assert.ok(Number.isInteger(event.durationMs) && event.durationMs >= 0);
+        assert.ok(Number.isInteger(event.elapsedMs) && event.elapsedMs >= event.durationMs);
+        if (index) assert.ok(event.elapsedMs >= events[index - 1]!.elapsedMs);
+      }
+      assert.equal(JSON.stringify(events).includes('fixture'), false);
+      assert.equal(JSON.stringify(events).includes(cwd), false);
+    } finally { await provider.close(); }
+  });
+});
+
+test('throwing timing observers cannot bypass restrictions or replace successful output', async () => {
+  for (const mode of ['success', 'capability']) await fixture(mode, async (bin, cwd) => {
+    const provider = createCodexProvider({ bin, cwd });
+    try {
+      const result = provider.infer({ prompt: 'fixture prompt', schema, onTiming: () => { throw new Error('private diagnostic failure'); } });
+      if (mode === 'success') assert.deepEqual(JSON.parse(await result), { answer: 'verified' });
+      else await assert.rejects(result, /shell_tool/);
+    } finally { await provider.close(); }
+  });
+});
+
+test('cancelled model work records inference and cleanup phases without output or cancellation details', async () => {
+  await fixture('wait', async (bin, cwd) => {
+    const provider = createCodexProvider({ bin, cwd }), events: InferenceTiming[] = [], controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await assert.rejects(provider.infer({ prompt: 'fixture prompt', schema, signal: controller.signal, onTiming: event => {
+        events.push(event);
+        if (event.phase === 'thread') timer = setTimeout(() => controller.abort('private cancellation details'), 20);
+      } }), { name: 'AbortError' });
+      assert.deepEqual(events.map(event => event.phase), ['startup', 'restrictions', 'authentication', 'catalog', 'thread', 'inference', 'cleanup']);
+      assert.equal(JSON.stringify(events).includes('private'), false);
+      assert.match((await provider.status()).message, /not yet been verified/);
+    } finally { if (timer) clearTimeout(timer); await provider.close(); }
+  });
+});
+
+test('a restriction failure records its completed phases and still performs cleanup', async () => {
+  await fixture('capability', async (bin, cwd) => {
+    const provider = createCodexProvider({ bin, cwd }), events: InferenceTiming[] = [];
+    try {
+      await assert.rejects(provider.infer({ prompt: 'fixture prompt', schema, onTiming: event => events.push(event) }), /shell_tool/);
+      assert.deepEqual(events.map(event => event.phase), ['startup', 'restrictions', 'cleanup']);
+    } finally { await provider.close(); }
   });
 });

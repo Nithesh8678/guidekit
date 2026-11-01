@@ -1,5 +1,6 @@
 import type { RuntimeStatus } from '../../contracts/src/index.js';
 import type { InferenceInput } from './index.js';
+import { inferenceTimer } from './timing.js';
 
 export interface OpenAIProviderOptions {
   /** Explicit opt-in. Supplying credentials alone never enables network access. */
@@ -143,15 +144,18 @@ export function createOpenAIProvider(options: OpenAIProviderOptions = {}): OpenA
     async infer(input: InferenceInput): Promise<string> {
       const issue = configuration(); if (issue) throw new ProviderError(issue);
       if (input.signal?.aborted) throw cancelled();
+      const measure = inferenceTimer(input.onTiming);
       if (typeof input.prompt !== 'string' || !input.prompt.trim() || input.prompt.length > 180_000) throw new ProviderError('Inference prompt is empty or too large.');
       let schema: string;
       try { schema = JSON.stringify(input.schema); } catch { throw new ProviderError('Inference schema is invalid.'); }
       if (!record(input.schema) || input.schema.type !== 'object' || input.schema.additionalProperties !== false || !schema || Buffer.byteLength(schema) > 32_768) throw new ProviderError('Inference requires a bounded strict object schema.');
       const body = JSON.stringify({ model, instructions: INSTRUCTIONS, input: [{ role: 'user', content: input.prompt }], store: false, stream: false, tools: [], tool_choice: 'none', max_output_tokens: 8192, text: { format: { type: 'json_schema', name: 'guidekit_plan', strict: true, schema: JSON.parse(schema) } } });
-      const result = await request('/responses', { method: 'POST', body }, INFERENCE_TIMEOUT, MAX_RESPONSE, input.signal);
-      if (closed) throw new ProviderError('Runtime provider is closed.');
-      if (input.signal?.aborted) throw cancelled();
-      const text = completedText(result);
+      const text = await measure('inference', async () => {
+        const result = await request('/responses', { method: 'POST', body }, INFERENCE_TIMEOUT, MAX_RESPONSE, input.signal);
+        if (closed) throw new ProviderError('Runtime provider is closed.');
+        if (input.signal?.aborted) throw cancelled();
+        return completedText(result);
+      });
       lastLiveAt = new Date().toISOString(); cachedStatus = null;
       return text;
     },
