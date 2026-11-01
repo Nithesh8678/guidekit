@@ -6,9 +6,10 @@ import { View } from '../src/view';
 const run = { runId: 'run_1', answer: 'Billing statements support CSV export.', steps: [], action: null, citations: [{ documentId: 'invoice', title: 'Invoice help', excerpt: 'Invoice belongs to billing.' }, { documentId: 'export', title: 'Statement export', excerpt: 'Billing statements support CSV export.' }], provider: 'codex', version: 1 };
 const path = { nodes: ['invoice', 'billing', 'export'], relation: 'Documents share a concept through their source chunks.' };
 
-test('optional knowledge evidence accepts local, TigerGraph and legacy responses within bounds', () => {
+test('optional knowledge evidence accepts PostgreSQL, local, TigerGraph and legacy responses within bounds', () => {
   assert.equal(parseRun(run).knowledge, undefined);
   assert.deepEqual(parseRun({ ...run, knowledge: { source: 'local', paths: [] } }).knowledge, { source: 'local', paths: [] });
+  assert.deepEqual(parseRun({ ...run, knowledge: { source: 'postgres', paths: [] } }).knowledge, { source: 'postgres', paths: [] });
   const knowledge = { source: 'tigergraph', paths: [path] };
   assert.deepEqual(parseRun({ ...run, knowledge }).knowledge, knowledge);
   assert.equal(parseRun({ ...run, knowledge: { source: 'tigergraph', paths: Array.from({ length: 32 }, () => ({ nodes: ['invoice', 'x'.repeat(64), 'export'], relation: 'r'.repeat(300) })) } }).knowledge!.paths.length, 32);
@@ -58,6 +59,8 @@ test('view maps citation titles and renders graph paths as safe text with a trut
     assert.equal(empty.allText, 'Knowledge retrieved with TigerGraph');
     const local = new TextElement('div'); view.knowledgeEvidence(local as unknown as HTMLElement, { source: 'local', paths: [] }, []);
     assert.equal(local.children.length, 0);
+    const postgres = new TextElement('div'); view.knowledgeEvidence(postgres as unknown as HTMLElement, { source: 'postgres', paths: [] }, run.citations);
+    assert.equal(postgres.allText, 'Grounded in published company knowledge'); assert.ok(!postgres.allText.includes('relationship'));
   } finally {
     if (previous) Object.defineProperty(globalThis, 'document', previous); else Reflect.deleteProperty(globalThis, 'document');
   }

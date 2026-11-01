@@ -202,6 +202,9 @@ export class View {
     this.messages.append(message); this.scroll(); return message;
   }
   knowledgeEvidence(container: HTMLElement, knowledge: RunResult['knowledge'], citations: Citation[]): void {
+    if (knowledge?.source === 'postgres') {
+      container.append(element('div', 'sources', 'Grounded in published company knowledge')); this.scroll(); return;
+    }
     if (knowledge?.source !== 'tigergraph') return;
     const titles = new Map(citations.map(citation => [citation.documentId, citation.title]));
     // Show useful connections between cited sources, without self loops or internal IDs.
