@@ -6,7 +6,7 @@ import { MotionDirector, type MotionPoint } from './motion';
 import type { VoiceSettingsHandlers, VoiceSettingsState } from './voices';
 import { GuidedReveal, revealedBounds, targetRevealed } from './scroll';
 import { isSafeTarget } from './context';
-import { placeGuidanceLabel, type PlacementBox } from './placement';
+import { placeGuidanceControls, placeGuidanceLabel, type PlacementBox } from './placement';
 import { instructionDuration, instructionGraphemes } from './instruction';
 
 const styles = `
@@ -395,23 +395,18 @@ export class View {
       const result = boxes.sort((a, b) => Math.hypot(a.left + a.width / 2 - center.left, a.top + a.height / 2 - center.top) - Math.hypot(b.left + b.width / 2 - center.left, b.top + b.height / 2 - center.top)).slice(0, 22);
       obstacleCache = { target: current, key, at: now, boxes: result }; return result;
     };
-    const placeToolbar = (area: ReturnType<typeof viewport>, target: PlacementBox | null, nearby: PlacementBox[]) => {
+    const placeToolbar = (area: ReturnType<typeof viewport>, target: PlacementBox | null, nearby: PlacementBox[]): PlacementBox[] => {
       toolbar.style.maxWidth = `${Math.max(1, area.width - 24)}px`;
-      assist.style.maxWidth = `${Math.max(1, area.width - 24)}px`; assist.style.maxHeight = `${Math.max(48, area.height - 80)}px`;
-      const width = toolbar.offsetWidth, height = toolbar.offsetHeight;
-      const corners = [[area.left + area.width - width - 12, area.top + area.height - height - 12], [area.left + 12, area.top + area.height - height - 12], [area.left + area.width - width - 12, area.top + 12], [area.left + 12, area.top + 12]];
-      let best = Infinity, picked = corners[0]!;
-      for (const [index, candidate] of corners.entries()) {
-        const box = { left: candidate[0]!, top: candidate[1]!, width, height };
-        const cover = (obstacle: PlacementBox) => Math.max(0, Math.min(box.left + width, obstacle.left + obstacle.width + 8) - Math.max(box.left, obstacle.left - 8)) * Math.max(0, Math.min(box.top + height, obstacle.top + obstacle.height + 8) - Math.max(box.top, obstacle.top - 8));
-        const score = (target ? cover(target) * 10000 : 0) + nearby.reduce((sum, obstacle) => sum + cover(obstacle), 0) * 3000 + index;
-        if (score < best) { best = score; picked = candidate; }
+      assist.style.maxWidth = `${Math.max(1, area.width - 24)}px`; assist.style.maxHeight = `${Math.max(1, area.height - 80)}px`;
+      const position = placeGuidanceControls({ width: toolbar.offsetWidth, height: toolbar.offsetHeight }, area, target, nearby, assist.hidden ? undefined : { width: assist.offsetWidth, height: assist.offsetHeight });
+      toolbar.style.left = `${position.left}px`; toolbar.style.top = `${position.top}px`; toolbar.style.right = 'auto'; toolbar.style.bottom = 'auto';
+      if (position.assist) {
+        assist.style.maxHeight = `${position.assist.height}px`; assist.style.left = `${position.assist.left - position.left}px`; assist.style.top = `${position.assist.top - position.top}px`; assist.style.right = 'auto'; assist.style.bottom = 'auto';
       }
-      toolbar.style.left = `${picked[0]}px`; toolbar.style.top = `${picked[1]}px`; toolbar.style.right = 'auto'; toolbar.style.bottom = 'auto';
-      const below = picked[1]! < area.top + area.height / 2;
-      assist.style.top = below ? 'calc(100% + 8px)' : 'auto'; assist.style.bottom = below ? 'auto' : 'calc(100% + 8px)';
-      const alignLeft = picked[0]! < area.left + area.width / 2; assist.style.left = alignLeft ? '0' : 'auto'; assist.style.right = alignLeft ? 'auto' : '0';
-      return { left: picked[0]!, top: picked[1]!, width, height };
+      const strip = toolbar.getBoundingClientRect(), feedback = assist.hidden ? null : assist.getBoundingClientRect();
+      // Reserve actual laid-out bounds before nearby controls, so the helper's
+      // bounded obstacle list can never drop essential status or stop controls.
+      return [{ left: strip.left, top: strip.top, width: strip.width, height: strip.height }, ...(feedback?.width && feedback.height ? [{ left: feedback.left, top: feedback.top, width: feedback.width, height: feedback.height }] : [])];
     };
     const position = () => {
       frame = 0; if (disposed || this.guideChatOpen || !state) return;
@@ -427,7 +422,7 @@ export class View {
       const targetVisible = !!current && !!clipped && targetRevealed(current);
       if (!state.paused && !state.waiting) hint.textContent = reveal?.active ? 'Scrolling to this step…' : targetVisible ? state.hint : 'Scroll to this control to continue. I’ll point when it’s visible.';
       updateHelp();
-      const nearby = current ? publicObstacles(current, area) : [], toolbarBox = placeToolbar(area, targetVisible && rect ? rect : null, nearby);
+      const nearby = current ? publicObstacles(current, area) : [], toolbarBoxes = placeToolbar(area, targetVisible && rect ? rect : null, nearby);
       lastBox = rect ? `${rect.left},${rect.top},${rect.width},${rect.height}` : '';
       let cardLeft = area.left + width - cardWidth - edge, cardTop = area.top + height - cardHeight - edge;
       if (rect && clipped && !reveal?.active) {
@@ -451,7 +446,7 @@ export class View {
         if (visible && arrivalReady) startInstruction();
         motion.setVisible(visible && !state.paused);
         const badge = motion.element.querySelector('[data-gk-step-badge]')?.getBoundingClientRect();
-        const reserved = [toolbarBox, ...(badge?.width && badge.height ? [{ left: badge.left - 3, top: badge.top - 3, width: badge.width + 6, height: badge.height + 6 }] : []), ...nearby];
+        const reserved = [...toolbarBoxes, ...(badge?.width && badge.height ? [{ left: badge.left - 3, top: badge.top - 3, width: badge.width + 6, height: badge.height + 6 }] : []), ...nearby];
         const position = placeGuidanceLabel(rect, { width: cardWidth, height: cardHeight }, area, reserved, placementSide);
         cardLeft = position.left; cardTop = position.top; placementSide = position.anchor;
       } else motion.setVisible(false);
