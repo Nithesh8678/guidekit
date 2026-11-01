@@ -4,6 +4,7 @@ import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Pool } from 'pg';
+import { randomBytes } from 'node:crypto';
 import type { SessionData } from 'express-session';
 import type { AgentConfig } from '../packages/contracts/src/index.js';
 import { AsyncRepository, RepositorySessionStore } from '../apps/server/src/repository.js';
@@ -119,7 +120,7 @@ for (const dialect of ['sqlite', 'postgres'] as const) {
       });
       await t.test('session signing secret persists across verified database reopen', async () => {
         const secret = await readFile(join(state.directory, 'session.secret'), 'utf8');
-        const another = await AsyncRepository.open({ dir: state.directory, connectionString: state.connectionString });
+        const another = await AsyncRepository.open({ dir: state.directory, connectionString: state.connectionString, migrate: dialect === 'postgres' });
         try { assert.equal(another.sessionSecret, secret); assert.equal(another.sessionSecret, repo.sessionSecret); assert.equal((await another.workspace(a.user.id))?.tenant.id, a.tenant.id); }
         finally { await another.close(); }
       });
@@ -162,4 +163,24 @@ test('pool acquisition overload is a safe retryable error while constraint codes
   assert.doesNotMatch(unavailable.message, /sensitive/);
   const duplicate = Object.assign(new Error('duplicate'), { code: '23505' });
   assert.equal(postgresError(duplicate), duplicate);
+});
+
+
+test('real PostgreSQL runtime rejects owners and accepts a dedicated unprivileged role', { skip: !testURL, timeout: 120_000 }, async () => {
+  const state = await fixture('postgres');
+  const role = `gk_runtime_${crypto.randomUUID().replaceAll('-', '')}`, password = randomBytes(24).toString('hex');
+  const owner = new Pool({ connectionString: state.connectionString, max: 1 });
+  let roleCreated = false, runtime: AsyncRepository | undefined;
+  try {
+    await assert.rejects(AsyncRepository.open({ dir: state.directory, connectionString: state.connectionString }), /separate restricted role/);
+    await owner.query(`CREATE ROLE ${role} LOGIN PASSWORD '${password}' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE`); roleCreated = true;
+    const schema = (await owner.query('SELECT current_schema() AS schema')).rows[0].schema as string;
+    await owner.query(`GRANT USAGE ON SCHEMA ${schema} TO ${role}; GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA ${schema} TO ${role}; GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA ${schema} TO ${role}`);
+    const url = new URL(state.connectionString!); url.username = role; url.password = password;
+    runtime = await AsyncRepository.open({ dir: state.directory, connectionString: url.toString() });
+    const account = await runtime.register({ email: 'restricted-runtime@example.invalid', name: 'Restricted owner', companyName: 'Restricted tenant' }, 'synthetic-hash');
+    assert.equal((await runtime.workspace(account.user.id))?.tenant.id, account.tenant.id);
+    assert.equal((await runtime.row("SELECT has_schema_privilege(current_user,current_schema(),'CREATE')::int AS allowed"))?.allowed, 0);
+    await assert.rejects(runtime.db.exec('CREATE TABLE forbidden_runtime_ddl (id TEXT)'), /permission denied/);
+  } finally { await runtime?.close(); await state.close(); if (roleCreated) await owner.query(`DROP ROLE ${role}`); await owner.end(); }
 });

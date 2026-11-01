@@ -27,6 +27,19 @@ export function postgresSQL(input: string): string {
   return result;
 }
 
+/** The web application may never use a migration/owner connection. */
+export async function assertRuntimeRole(client: Pick<PoolClient, 'query'>): Promise<void> {
+  const result = await client.query(`SELECT r.rolsuper,r.rolbypassrls,r.rolcreatedb,r.rolcreaterole,
+    EXISTS(SELECT 1 FROM pg_roles p WHERE (p.rolsuper OR p.rolbypassrls OR p.rolcreatedb OR p.rolcreaterole) AND pg_has_role(current_user,p.oid,'MEMBER')) AS privileged_member,
+    EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+      WHERE n.nspname=current_schema() AND c.relkind IN ('r','p')
+      AND c.relname IN ('tenants','users','dashboard_sessions','agents','documents','versions','publication_states','knowledge_fts','embed_sessions','runs','receipts','memberships','account_tokens','audit_events','guidekit_schema_migrations')
+      AND pg_has_role(current_user,c.relowner,'MEMBER')) AS owns_product_tables
+    FROM pg_roles r WHERE r.rolname=current_user`);
+  const role = result.rows[0];
+  if (!role || role.rolsuper || role.rolbypassrls || role.rolcreatedb || role.rolcreaterole || role.privileged_member || role.owns_product_tables) throw new Error('PostgreSQL application access requires a separate restricted role without database ownership or privileged memberships. Use the explicit owner migration path for administration.');
+}
+
 /** Infrastructure failures use bounded public messages; SQL constraint codes remain available internally. */
 export function postgresError(error: unknown): unknown {
   const code = (error as { code?: string })?.code;
@@ -40,7 +53,7 @@ export class PostgresDriver implements SQLDriver {
   private readonly storage = transactionStorage<PoolClient>();
   private closed = false;
   private constructor(private readonly pool: Pool) {}
-  static async open(connectionString: string, migrate = false): Promise<PostgresDriver> {
+  static async open(connectionString: string, migrate = false, adminOperation = false): Promise<PostgresDriver> {
     const url = new URL(connectionString);
     if (!['postgres:', 'postgresql:'].includes(url.protocol)) throw new Error('Use a PostgreSQL connection URL.');
     const local = ['localhost', '127.0.0.1', '[::1]', '::1'].includes(url.hostname);
@@ -54,7 +67,7 @@ export class PostgresDriver implements SQLDriver {
     // Idle connection errors must not become uncaught process exceptions. Next requests fail normally.
     pool.on('error', () => {});
     const driver = new PostgresDriver(pool);
-    try { const client = await pool.connect(); try { if (migrate) await migratePostgres(client); else await verifyPostgres(client); } finally { client.release(); } return driver; }
+    try { const client = await pool.connect(); try { if (migrate) await migratePostgres(client); else { await verifyPostgres(client); if (!adminOperation) await assertRuntimeRole(client); } } finally { client.release(); } return driver; }
     catch (error) { await pool.end(); throw error; }
   }
   private async query(sql: string, values: SQLValue[] = []): Promise<QueryResult> {

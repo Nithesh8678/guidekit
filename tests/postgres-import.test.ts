@@ -87,7 +87,7 @@ test('real PostgreSQL import verifies every field, preserves sessions and is saf
     await source.backup(); const originalBytes = await readFile(join(source.archive, 'guidekit.sqlite'));
     const imported = await importSQLiteArchive({ archive: source.archive, connectionString: target.connectionString, apply: true });
     assert.equal(imported.applied, true); assert.equal(imported.idempotent, false);
-    driver = await PostgresDriver.open(target.connectionString);
+    driver = await PostgresDriver.open(target.connectionString, false, true);
     const user = await driver.prepare('SELECT * FROM users WHERE id=?').get(source.owner.user.id);
     assert.equal(user?.password_hash, 'synthetic-password-hash-preserved-verbatim'); assert.equal(user?.auth_epoch, 7);
     assert.equal((await driver.prepare('SELECT data FROM dashboard_sessions').get())?.data, source.session);
