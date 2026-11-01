@@ -16,7 +16,7 @@ Snapshots hold at most 40 documents, 2 MB of source text, 30 allowed action name
 
 The content/action/model manifest is deterministic. Identical sync calls are idempotent; a different manifest for an existing version requires a new publication. Embeddings finish before the write transaction. The manifest, documents, chunks and ready state commit atomically, so a failed batch never exposes a partial publication. Ready snapshots have database immutability guards. Application publication/job state persists separately and retains actionable retry errors after interruption.
 
-Queries combine bounded stemmed keyword matches with exact cosine search over only the requested tenant/agent/version. The semantic candidate floor is 0.35; reciprocal rank fusion merges and deduplicates sources. This is an initial retrieval configuration to evaluate on customer questions, not an established accuracy guarantee. No shared approximate global index is used. PostgreSQL evidence returns `source: 'postgres'`, grounded citations, and `paths: []`; it does not invent graph relationships.
+Queries combine bounded stemmed keyword matches with exact cosine search over only the requested tenant/agent/version. The semantic candidate floor is 0.35; reciprocal rank fusion merges candidates and retains at most two distinct, non-overlapping chunks per source document within the overall retrieval budget. This is an initial retrieval configuration to evaluate on customer questions, not an established accuracy guarantee. No shared approximate global index is used. PostgreSQL evidence returns `source: 'postgres'`, grounded citations, and `paths: []`; it does not invent graph relationships.
 
 ## Local embedding model
 

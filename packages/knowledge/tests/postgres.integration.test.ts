@@ -80,6 +80,16 @@ test('PostgreSQL hybrid retrieval: immutable atomic snapshots, exact grounded so
       assert.ok((await provider.syncVersion(candidate)).chunks! > 1);
       assert.equal((await provider.retrieve({ ...candidate, question: 'clips' })).citations[0]!.documentId, 'long_source');
     });
+    await t.test('long workflow documents retain two distinct non-overlapping exact chunks within the requested budget', async () => {
+      const content = Array.from({ length: 8 }, (_, index) => (`Chapter${index} describes workflow step${index}. `).repeat(14)).join('\n\n');
+      const candidate = { ...snapshot, version: 5, documents: [{ id: 'workflow', title: 'Complete workflow instructions', content }] };
+      await provider.syncVersion(candidate);
+      const result = await provider.retrieve({ ...candidate, question: 'workflow instructions', limit: 8 });
+      assert.equal(result.citations.length, 2); assert.deepEqual(result.citations.map(citation => citation.documentId), ['workflow', 'workflow']);
+      const [first, second] = result.citations.map(citation => ({ start: content.indexOf(citation.excerpt), length: citation.excerpt.length }));
+      assert.ok(first!.start >= 0 && second!.start >= 0); assert.ok(first!.start + first!.length <= second!.start || second!.start + second!.length <= first!.start);
+      assert.equal((await provider.retrieve({ ...candidate, question: 'workflow instructions', limit: 1 })).citations.length, 1);
+    });
   } finally { await provider.close?.(); await owner.end(); await runtime.end(); }
 });
 
