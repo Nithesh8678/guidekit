@@ -77,16 +77,18 @@ test('logical PostgreSQL archive captures a coherent full snapshot and restores 
       await blocker.query('BEGIN');
       await blocker.query("SELECT pg_advisory_xact_lock(hashtext('guidekit:postgres-restore'))");
       let restoreFailure: unknown;
+      const observationDeadline = performance.now() + 15_000;
       const restoring = restorePostgresBackup({ connectionString: target.url.toString(), archive, dataDir: restoreDir, offline: true, port: await freePort(), knowledgeSchema: target.knowledge });
       void restoring.catch(error => { restoreFailure = error; });
       let gateFailure: unknown;
       try {
-        for (let attempt = 0; ; attempt++) {
+        for (;;) {
           if (restoreFailure) throw restoreFailure;
+          if (performance.now() >= observationDeadline) throw new Error('Restore did not reach its deferred query within 15 seconds.');
           await blocker.query('SELECT pg_stat_clear_snapshot()');
           const deferred = await blocker.query("SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event='advisory' AND query=$1", ["SELECT pg_advisory_xact_lock(hashtext('guidekit:postgres-restore'))"]);
           if (deferred.rows.length) break;
-          if (attempt > 100) throw new Error('Restore did not reach its deferred query.'); await delay(20);
+          await delay(Math.min(20, Math.max(1, observationDeadline - performance.now())));
         }
         const restoreLock = `${restoreDir}.restore.lock`;
         assert.equal(JSON.parse(await readFile(restoreLock, 'utf8')).pid, process.pid);
