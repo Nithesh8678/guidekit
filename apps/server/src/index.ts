@@ -8,6 +8,9 @@ import { createCodexProvider } from '../../../packages/runtime/src/index.js';
 import { createOpenAIProvider } from '../../../packages/runtime/src/openai.js';
 import { createTigerGraphProvider } from '../../../packages/graph/src/index.js';
 import { acquireProcessLock } from './process-lock.js';
+import { AsyncRepository } from './repository.js';
+import { asKnowledgeProvider } from './knowledge.js';
+import { createPostgresKnowledgeProvider } from '../../../packages/knowledge/src/index.js';
 
 const port = Number(process.env.GUIDEKIT_PORT ?? 4410);
 const demoPort = Number(process.env.GUIDEKIT_DEMO_PORT ?? 4411);
@@ -19,14 +22,21 @@ if (!['codex', 'openai'].includes(selectedProvider)) throw new Error('GUIDEKIT_P
 const dataDir = resolve(process.env.GUIDEKIT_DATA_DIR ?? '.data');
 const releaseLock = acquireProcessLock(dataDir);
 process.once('exit', releaseLock);
-const graphValues = [process.env.TIGERGRAPH_BASE_URL, process.env.TIGERGRAPH_GRAPH_NAME, process.env.TIGERGRAPH_TOKEN, process.env.TIGERGRAPH_SECRET, process.env.TIGERGRAPH_RESTPP_PREFIX];
-const graphConfigured = graphValues.some(value => value !== undefined);
-if (graphConfigured && (!process.env.TIGERGRAPH_BASE_URL || (!process.env.TIGERGRAPH_TOKEN && !process.env.TIGERGRAPH_SECRET))) throw new Error('TigerGraph configuration requires TIGERGRAPH_BASE_URL and either TIGERGRAPH_TOKEN or TIGERGRAPH_SECRET; TIGERGRAPH_GRAPH_NAME defaults to GuideKit.');
-const graph = graphConfigured ? createTigerGraphProvider({ baseUrl: process.env.TIGERGRAPH_BASE_URL!, graphName: process.env.TIGERGRAPH_GRAPH_NAME ?? 'GuideKit', token: process.env.TIGERGRAPH_TOKEN, secret: process.env.TIGERGRAPH_SECRET, restppPrefix: process.env.TIGERGRAPH_RESTPP_PREFIX ?? '/restpp' }) : undefined;
+const selectedKnowledge = process.env.GUIDEKIT_KNOWLEDGE_PROVIDER ?? 'local';
+if (!['local', 'postgres', 'tigergraph'].includes(selectedKnowledge)) throw new Error('GUIDEKIT_KNOWLEDGE_PROVIDER must be local, postgres or tigergraph.');
+const legacyGraphEnabled = process.env.GUIDEKIT_LEGACY_TIGERGRAPH_ENABLED === 'true';
+const needsGraph = selectedKnowledge === 'tigergraph' || selectedKnowledge === 'postgres' && legacyGraphEnabled;
+if (needsGraph && (!process.env.TIGERGRAPH_BASE_URL || (!process.env.TIGERGRAPH_TOKEN && !process.env.TIGERGRAPH_SECRET))) throw new Error('The selected TigerGraph compatibility provider requires TIGERGRAPH_BASE_URL and either TIGERGRAPH_TOKEN or TIGERGRAPH_SECRET.');
+if (selectedKnowledge === 'postgres' && !process.env.GUIDEKIT_KNOWLEDGE_DATABASE_URL) throw new Error('PostgreSQL knowledge requires GUIDEKIT_KNOWLEDGE_DATABASE_URL for its restricted knowledge runtime role.');
+const graph = needsGraph ? createTigerGraphProvider({ baseUrl: process.env.TIGERGRAPH_BASE_URL!, graphName: process.env.TIGERGRAPH_GRAPH_NAME ?? 'GuideKit', token: process.env.TIGERGRAPH_TOKEN, secret: process.env.TIGERGRAPH_SECRET, restppPrefix: process.env.TIGERGRAPH_RESTPP_PREFIX ?? '/restpp' }) : undefined;
+const knowledge = selectedKnowledge === 'postgres' ? createPostgresKnowledgeProvider({ connectionString: process.env.GUIDEKIT_KNOWLEDGE_DATABASE_URL!, cacheDir: resolve(dataDir, 'embedding-cache') }) : asKnowledgeProvider(graph);
+// A configured PostgreSQL URL is strict: connection/schema failures abort startup.
+// Schema setup is an explicit operator migration, never a runtime-role privilege.
+const repository = await AsyncRepository.open({ dir: dataDir, connectionString: process.env.GUIDEKIT_DATABASE_URL });
 const provider = selectedProvider === 'openai'
   ? createOpenAIProvider({ enabled: process.env.GUIDEKIT_OPENAI_ENABLED === 'true', apiKey: process.env.OPENAI_API_KEY, model: process.env.GUIDEKIT_OPENAI_MODEL })
   : createCodexProvider({ model: process.env.GUIDEKIT_MODEL, bin: process.env.GUIDEKIT_CODEX_BIN, cwd: resolve(dataDir, 'model-sandbox') });
-const core = createApp({ dataDir, provider, graph, limits: { dailyRuns: capacity('GUIDEKIT_DAILY_RUN_LIMIT', 500), activeSessions: capacity('GUIDEKIT_ACTIVE_SESSION_LIMIT', 100) }, endpointOrigin: `http://127.0.0.1:${port}`, demoOrigins: { crm: `http://127.0.0.1:${demoPort}`, support: `http://127.0.0.1:${secondPort}` }, adminOrigins: new Set([`http://127.0.0.1:${port}`, `http://localhost:${port}`, 'http://127.0.0.1:4413', 'http://localhost:4413']) });
+const core = await createApp({ dataDir, repository, provider, knowledge, graph, limits: { dailyRuns: capacity('GUIDEKIT_DAILY_RUN_LIMIT', 500), activeSessions: capacity('GUIDEKIT_ACTIVE_SESSION_LIMIT', 100) }, endpointOrigin: `http://127.0.0.1:${port}`, demoOrigins: { crm: `http://127.0.0.1:${demoPort}`, support: `http://127.0.0.1:${secondPort}` }, adminOrigins: new Set([`http://127.0.0.1:${port}`, `http://localhost:${port}`, 'http://127.0.0.1:4413', 'http://localhost:4413']) });
 const servers: Server[] = [];
 async function listen(server: Server, serverPort: number) {
   await new Promise<void>((accept, reject) => { server.once('error', reject); server.listen(serverPort, '127.0.0.1', () => { server.off('error', reject); accept(); }); }); servers.push(server);
@@ -43,7 +53,7 @@ try {
     demo.use(express.static(demoDir, { index: false, dotfiles: 'deny' }));
     await listen(createServer(demo), serverPort);
   }
-  console.log(`GuideKit dashboard: http://127.0.0.1:${port}\nCRM demo: http://127.0.0.1:${demoPort}\nSupport demo: http://127.0.0.1:${secondPort}\nSelected provider: ${selectedProvider}. Server stays on loopback. No provider fallback.`);
+  console.log(`GuideKit dashboard: http://127.0.0.1:${port}\nCRM demo: http://127.0.0.1:${demoPort}\nSupport demo: http://127.0.0.1:${secondPort}\nSelected provider: ${selectedProvider}. Knowledge: ${selectedKnowledge}. Database: ${repository.dialect}. Server stays on loopback. No provider fallback.`);
 } catch (error) {
   console.error(error instanceof Error ? error.message : 'Could not start GuideKit.');
   for (const server of servers) server.close(); await core.close(); releaseLock(); process.exitCode = 1;
