@@ -8,7 +8,7 @@ import type { SessionData } from 'express-session';
 import type { AgentConfig } from '../packages/contracts/src/index.js';
 import { AsyncRepository, RepositorySessionStore } from '../apps/server/src/repository.js';
 import { Repository } from '../apps/server/src/database.js';
-import { postgresSQL } from '../apps/server/src/storage/postgres.js';
+import { postgresSQL, postgresError } from '../apps/server/src/storage/postgres.js';
 
 const config: AgentConfig = { name: 'Storage guide', companyName: 'Storage company', description: 'Storage verification', instructions: 'Use published sources.', greeting: 'How can I help?', accentColor: '#365cf5', allowedOrigins: ['http://127.0.0.1:4411'], allowedActions: [] };
 const testURL = process.env.GUIDEKIT_TEST_POSTGRES_URL;
@@ -152,4 +152,14 @@ test('PostgreSQL translation preserves bound values, quoted punctuation and publ
   assert.equal(postgresSQL("UPDATE account_tokens SET consumed_at=? WHERE tenant_id IS ?"), 'UPDATE account_tokens SET consumed_at=$1 WHERE tenant_id IS NOT DISTINCT FROM $2');
   assert.match(postgresSQL('INSERT OR IGNORE INTO memberships VALUES (?,?,?,?)'), /ON CONFLICT DO NOTHING$/);
   assert.throws(() => postgresSQL('INSERT OR REPLACE INTO users VALUES (?)'), /Unsupported SQL replace/);
+});
+
+
+test('pool acquisition overload is a safe retryable error while constraint codes survive', () => {
+  const busy = postgresError(new Error('timeout exceeded when trying to connect')) as { status: number; message: string };
+  assert.equal(busy.status, 503); assert.match(busy.message, /retry shortly/);
+  const unavailable = postgresError(Object.assign(new Error('sensitive connection details'), { code: 'ECONNREFUSED' })) as Error;
+  assert.doesNotMatch(unavailable.message, /sensitive/);
+  const duplicate = Object.assign(new Error('duplicate'), { code: '23505' });
+  assert.equal(postgresError(duplicate), duplicate);
 });

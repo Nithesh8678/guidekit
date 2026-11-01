@@ -133,8 +133,17 @@ export class AsyncRepository {
       const epoch = Number((await this.row('SELECT release_epoch FROM agents WHERE id=?', agentId))!.release_epoch);
       await this.db.prepare('INSERT INTO publication_states (agent_id,version,status,graph_source,error,completed_at,activation_epoch) VALUES (?,?,?,?,NULL,?,?)').run(agentId, number, graphSource === 'local' ? 'ready' : 'preparing', graphSource, graphSource === 'local' ? createdAt : null, epoch);
       if (graphSource === 'local') await this.db.prepare('UPDATE agents SET published_version=? WHERE id=?').run(number, agentId);
-      const insert = this.db.prepare('INSERT INTO knowledge_fts (tenant_id,agent_id,version,document_id,title,content) VALUES (?,?,?,?,?,?)');
-      for (const doc of documents) for (let offset = 0; offset < doc.content.length; offset += 700) await insert.run(tenantId, agentId, number, doc.id, doc.title, doc.content.slice(offset, offset + 900));
+      let chunks: SQLValue[][] = [];
+      const writeChunks = async () => {
+        if (!chunks.length) return;
+        await this.db.prepare(`INSERT INTO knowledge_fts (tenant_id,agent_id,version,document_id,title,content) VALUES ${chunks.map(() => '(?,?,?,?,?,?)').join(',')}`).run(...chunks.flat());
+        chunks = [];
+      };
+      for (const doc of documents) for (let offset = 0; offset < doc.content.length; offset += 700) {
+        chunks.push([tenantId, agentId, number, doc.id, doc.title, doc.content.slice(offset, offset + 900)]);
+        if (chunks.length >= 200) await writeChunks();
+      }
+      await writeChunks();
       return (await this.version(tenantId, agentId, number)).version;
     });
   }

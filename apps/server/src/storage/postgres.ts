@@ -1,4 +1,5 @@
 import { Pool, type PoolClient, type QueryResult } from 'pg';
+import { AppError } from '../database.js';
 import { transactionStorage, type SQLDriver, type SQLStatement, type SQLValue } from './driver.js';
 import { migratePostgres, verifyPostgres } from './postgres-schema.js';
 
@@ -24,6 +25,14 @@ export function postgresSQL(input: string): string {
     else result += character === '?' ? `$${++parameter}` : character;
   }
   return result;
+}
+
+/** Infrastructure failures use bounded public messages; SQL constraint codes remain available internally. */
+export function postgresError(error: unknown): unknown {
+  const code = (error as { code?: string })?.code;
+  const message = error instanceof Error ? error.message : '';
+  if (['ETIMEDOUT','ECONNREFUSED','ECONNRESET','ENOTFOUND','EHOSTUNREACH','53300','57P03'].includes(code ?? '') || code?.startsWith('08') || /^timeout exceeded when trying to connect$/i.test(message) || /^Connection terminated due to connection timeout$/i.test(message)) return new AppError(503, 'The database is temporarily unavailable or busy. Please retry shortly.');
+  return error;
 }
 
 export class PostgresDriver implements SQLDriver {
@@ -52,7 +61,8 @@ export class PostgresDriver implements SQLDriver {
     if (this.closed) throw new Error('Repository is closed.');
     const context = this.storage.getStore();
     if (context && !context.active) throw new Error('Transaction is no longer active.');
-    return (context?.resource ?? this.pool).query(postgresSQL(sql), values);
+    try { return await (context?.resource ?? this.pool).query(postgresSQL(sql), values); }
+    catch (error) { throw postgresError(error); }
   }
   prepare(sql: string): SQLStatement {
     return {
@@ -72,7 +82,8 @@ export class PostgresDriver implements SQLDriver {
       catch (error) { await parent.resource.query(`ROLLBACK TO SAVEPOINT ${name}`); await parent.resource.query(`RELEASE SAVEPOINT ${name}`); throw error; }
     }
     if (this.closed) throw new Error('Repository is closed.');
-    const client = await this.pool.connect();
+    let client: PoolClient;
+    try { client = await this.pool.connect(); } catch (error) { throw postgresError(error); }
     const context = { resource: client, active: true, savepoint: 0 };
     try {
       return await this.storage.run(context, async () => {
@@ -81,7 +92,7 @@ export class PostgresDriver implements SQLDriver {
         catch (error) { await client.query('ROLLBACK'); throw error; }
         finally { context.active = false; }
       });
-    } finally { client.release(); }
+    } finally { context.active = false; client.release(); }
   }
   async close(): Promise<void> { if (!this.closed) { this.closed = true; await this.pool.end(); } }
 }

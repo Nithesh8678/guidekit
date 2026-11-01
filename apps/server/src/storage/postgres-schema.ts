@@ -5,7 +5,7 @@ export async function migratePostgres(client: PoolClient): Promise<void> {
   await client.query('BEGIN');
   try {
     await client.query("SELECT pg_advisory_xact_lock(hashtext('guidekit:product-schema'))");
-    const marker = await client.query("SELECT to_regclass('guidekit_schema_migrations') AS marker");
+    const marker = await client.query("SELECT to_regclass(quote_ident(current_schema()) || '.guidekit_schema_migrations') AS marker");
     if (!marker.rows[0]?.marker) {
       const conflicts = await client.query("SELECT table_name FROM information_schema.tables WHERE table_schema=current_schema() AND table_name IN ('tenants','users','agents','versions','dashboard_sessions','knowledge_fts')");
       if (conflicts.rows.length) throw new Error('This database already contains unmarked product tables. Import into an empty GuideKit database; existing tables were not changed.');
@@ -47,7 +47,7 @@ export async function migratePostgres(client: PoolClient): Promise<void> {
 
 /** Runtime roles only verify compatibility; DDL requires the explicit owner migration path. */
 export async function verifyPostgres(client: PoolClient): Promise<void> {
-  const marker = await client.query("SELECT to_regclass('guidekit_schema_migrations') AS marker");
+  const marker = await client.query("SELECT to_regclass(quote_ident(current_schema()) || '.guidekit_schema_migrations') AS marker");
   if (!marker.rows[0]?.marker) throw new Error('GuideKit PostgreSQL schema is not initialized. Run the owner migration before starting the application.');
   const result = await client.query('SELECT COALESCE(MAX(version),0) AS version FROM guidekit_schema_migrations');
   if (Number(result.rows[0].version) !== 1) throw new Error('This PostgreSQL schema is incompatible. Run a compatible owner migration before starting the application.');
