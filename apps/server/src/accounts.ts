@@ -5,7 +5,7 @@ import { randomBytes } from 'node:crypto';
 import { hash, verify } from '@node-rs/argon2';
 import { z } from 'zod';
 import type { Workspace, WorkspaceRole } from '../../../packages/contracts/src/index.js';
-import { Repository, AppError, digest, newId, now } from './database.js';
+import { AsyncRepository, AppError, digest, newId, now, type Row } from './repository.js';
 
 export interface AccountDeliveryMessage { to: string; purpose: 'reset' | 'verify' | 'invite'; link: string; expiresAt: string; }
 export interface AccountDelivery { readonly mode: 'local' | 'external'; deliver(message: AccountDeliveryMessage): Promise<void>; }
@@ -15,95 +15,138 @@ export function localAccountDelivery(dataDir: string): AccountDelivery {
 }
 const email = z.string().trim().toLowerCase().email().max(200), password = z.string().min(12).max(256), token = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
 const role = z.enum(['admin', 'editor', 'viewer']);
-export function registerAccounts(app: Express, repo: Repository, options: { workspace(req: Request): Workspace; identity(req: Request): string | null; signedIn(req: Request, userId: string, tenantId?: string, expectedEpoch?: number): Promise<void>; authLimit: RequestHandler; origin?: string; delivery: AccountDelivery }) {
+export function registerAccounts(app: Express, repo: AsyncRepository, options: { workspace(req: Request): Promise<Workspace>; identity(req: Request): Promise<string | null>; signedIn(req: Request, userId: string, tenantId?: string, expectedEpoch?: number): Promise<void>; authLimit: RequestHandler; origin?: string; delivery: AccountDelivery }) {
   const { workspace, identity, signedIn, authLimit, delivery } = options;
-  const admin = (req: Request) => { const actor = workspace(req); if (!['owner', 'admin'].includes(actor.role!)) throw new AppError(403, 'Only workspace owners and admins can manage members.'); return actor; };
-  async function issue(purpose: AccountDeliveryMessage['purpose'], address: string, userId: string | null, tenantId: string | null, payload: Record<string, unknown>, origin: string) {
+  const admin = async (req: Request) => { const actor = await workspace(req); if (!['owner', 'admin'].includes(actor.role!)) throw new AppError(403, 'Only workspace owners and admins can manage members.'); return actor; };
+  const origin = (req: Request) => options.origin ?? `${req.protocol}://${req.get('host')}`;
+  async function issue(purpose: AccountDeliveryMessage['purpose'], address: string, userId: string | null, tenantId: string | null, payload: Record<string, unknown>, serviceOrigin: string) {
     const value = randomBytes(32).toString('base64url'), id = newId('tok'), expires = Date.now() + (purpose === 'invite' ? 86_400_000 : 1_800_000);
-    // Rotate previous links of the same purpose; persisted storage contains only the digest.
-    repo.db.prepare('UPDATE account_tokens SET consumed_at=? WHERE purpose=? AND email=? AND tenant_id IS ? AND consumed_at IS NULL').run(now(), purpose, address, tenantId);
-    repo.db.prepare('INSERT INTO account_tokens VALUES (?,?,?,?,?,?,?,?,NULL,?)').run(id, digest(value), purpose, userId, tenantId, address, JSON.stringify(payload), expires, now());
-    try { await delivery.deliver({ to: address, purpose, link: `${origin}/#account/${purpose}?token=${value}`, expiresAt: new Date(expires).toISOString() }); }
-    catch { repo.db.prepare('UPDATE account_tokens SET consumed_at=? WHERE id=?').run(now(), id); throw new AppError(503, 'Account delivery is unavailable. Check the configured delivery adapter.'); }
+    await repo.transaction(async () => {
+      if (tenantId) await repo.lockTenant(tenantId);
+      if (userId) await repo.lockUser(userId);
+      await repo.db.prepare('UPDATE account_tokens SET consumed_at=? WHERE purpose=? AND email=? AND tenant_id IS ? AND consumed_at IS NULL').run(now(), purpose, address, tenantId);
+      await repo.db.prepare('INSERT INTO account_tokens VALUES (?,?,?,?,?,?,?,?,NULL,?)').run(id, digest(value), purpose, userId, tenantId, address, JSON.stringify(payload), expires, now());
+    });
+    try { await delivery.deliver({ to: address, purpose, link: `${serviceOrigin}/#account/${purpose}?token=${value}`, expiresAt: new Date(expires).toISOString() }); }
+    catch { await repo.db.prepare('UPDATE account_tokens SET consumed_at=? WHERE id=?').run(now(), id); throw new AppError(503, 'Account delivery is unavailable. Check the configured delivery adapter.'); }
     return id;
   }
-  function findToken(value: string, purpose: string) {
-    const record = repo.row('SELECT * FROM account_tokens WHERE token_hash=? AND purpose=? AND consumed_at IS NULL AND expires>?', digest(value), purpose, Date.now());
+  async function findToken(value: string, purpose: string): Promise<Row> {
+    const record = await repo.row('SELECT * FROM account_tokens WHERE token_hash=? AND purpose=? AND consumed_at IS NULL AND expires>?', digest(value), purpose, Date.now());
     if (!record) throw new AppError(400, 'This link is invalid, expired or already used. Request a new one.');
     return record;
   }
-  const origin = (req: Request) => options.origin ?? `${req.protocol}://${req.get('host')}`;
-  app.get('/api/account', (req, res) => { const actor = workspace(req); res.json({ workspace: actor, workspaces: repo.rows('SELECT t.id,t.name,m.role FROM memberships m JOIN tenants t ON t.id=m.tenant_id WHERE m.user_id=? ORDER BY m.created_at', actor.user.id), delivery: delivery.mode }); });
-  app.put('/api/account/profile', (req, res) => {
-    const actor = workspace(req), input = z.object({ name: z.string().trim().min(2).max(100) }).strict().parse(req.body);
-    repo.db.prepare('UPDATE users SET name=? WHERE id=?').run(input.name, actor.user.id); repo.audit(actor.tenant.id, actor.user.id, 'account.profile_updated', actor.user.id);
-    res.json({ workspace: repo.workspace(actor.user.id, actor.tenant.id) });
+  // A conditional write, checked within the same transaction as the account mutation,
+  // serializes competing redemptions on PostgreSQL as well as local SQLite.
+  async function claimToken(record: Row): Promise<void> {
+    if (!(await repo.db.prepare('UPDATE account_tokens SET consumed_at=? WHERE id=? AND consumed_at IS NULL AND expires>?').run(now(), String(record.id), Date.now())).changes) throw new AppError(400, 'This link is invalid, expired or already used. Request a new one.');
+  }
+  app.get('/api/account', async (req, res) => { const actor = await workspace(req); res.json({ workspace: actor, workspaces: await repo.rows('SELECT t.id,t.name,m.role FROM memberships m JOIN tenants t ON t.id=m.tenant_id WHERE m.user_id=? ORDER BY m.created_at', actor.user.id), delivery: delivery.mode }); });
+  app.put('/api/account/profile', async (req, res) => {
+    const actor = await workspace(req), input = z.object({ name: z.string().trim().min(2).max(100) }).strict().parse(req.body);
+    await repo.transaction(async () => { await repo.lockUser(actor.user.id); await workspace(req); await repo.db.prepare('UPDATE users SET name=? WHERE id=?').run(input.name, actor.user.id); await repo.audit(actor.tenant.id, actor.user.id, 'account.profile_updated', actor.user.id); });
+    res.json({ workspace: await repo.workspace(actor.user.id, actor.tenant.id) });
   });
-  app.post('/api/account/switch', async (req, res) => { const actor = workspace(req), epoch = Number(req.session.authEpoch ?? 0), input = z.object({ tenantId: z.string().max(160) }).strict().parse(req.body); if (!repo.workspace(actor.user.id, input.tenantId)) throw new AppError(404, 'Workspace not found.'); await signedIn(req, actor.user.id, input.tenantId, epoch); res.json({ workspace: repo.workspace(actor.user.id, input.tenantId) }); });
+  app.post('/api/account/switch', async (req, res) => { const actor = await workspace(req), epoch = Number(req.session.authEpoch ?? 0), input = z.object({ tenantId: z.string().max(160) }).strict().parse(req.body); if (!await repo.workspace(actor.user.id, input.tenantId)) throw new AppError(404, 'Workspace not found.'); await signedIn(req, actor.user.id, input.tenantId, epoch); res.json({ workspace: await repo.workspace(actor.user.id, input.tenantId) }); });
   app.post('/api/account/password', authLimit, async (req, res) => {
-    const actor = workspace(req), input = z.object({ currentPassword: z.string().min(1).max(256), password }).strict().parse(req.body);
-    const record = repo.row('SELECT password_hash,auth_epoch FROM users WHERE id=?', actor.user.id)!;
+    const actor = await workspace(req), input = z.object({ currentPassword: z.string().min(1).max(256), password }).strict().parse(req.body);
+    const record = (await repo.row('SELECT password_hash,auth_epoch FROM users WHERE id=?', actor.user.id))!;
     if (!await verify(String(record.password_hash), input.currentPassword)) throw new AppError(401, 'Current password is incorrect.');
     const nextHash = await hash(input.password, { memoryCost: 19456, timeCost: 2, parallelism: 1 });
-    repo.transaction(() => { if (!repo.db.prepare('UPDATE users SET password_hash=?,auth_epoch=auth_epoch+1 WHERE id=? AND password_hash=? AND auth_epoch=?').run(nextHash, actor.user.id, String(record.password_hash), Number(record.auth_epoch)).changes) throw new AppError(409, 'Account access changed while this request was running. Sign in again.'); repo.db.prepare("DELETE FROM dashboard_sessions WHERE json_extract(data,'$.userId')=?").run(actor.user.id); repo.audit(actor.tenant.id, actor.user.id, 'account.password_changed', actor.user.id); });
+    await repo.transaction(async () => {
+      await repo.lockUser(actor.user.id);
+      if (!(await repo.db.prepare('UPDATE users SET password_hash=?,auth_epoch=auth_epoch+1 WHERE id=? AND password_hash=? AND auth_epoch=?').run(nextHash, actor.user.id, String(record.password_hash), Number(record.auth_epoch))).changes) throw new AppError(409, 'Account access changed while this request was running. Sign in again.');
+      await repo.db.prepare("DELETE FROM dashboard_sessions WHERE json_extract(data,'$.userId')=?").run(actor.user.id); await repo.audit(actor.tenant.id, actor.user.id, 'account.password_changed', actor.user.id);
+    });
     await signedIn(req, actor.user.id, actor.tenant.id, Number(record.auth_epoch) + 1); res.json({ ok: true });
   });
-  app.post('/api/account/revoke-sessions', async (req, res) => { const actor = workspace(req), epoch = Number(req.session.authEpoch ?? 0) + 1; repo.db.prepare('UPDATE users SET auth_epoch=auth_epoch+1 WHERE id=?').run(actor.user.id); repo.db.prepare("DELETE FROM dashboard_sessions WHERE json_extract(data,'$.userId')=?").run(actor.user.id); repo.audit(actor.tenant.id, actor.user.id, 'account.sessions_revoked', actor.user.id); await signedIn(req, actor.user.id, actor.tenant.id, epoch); res.json({ ok: true }); });
-  app.post('/api/account/verification', authLimit, async (req, res) => { const actor = workspace(req); if (!actor.user.emailVerified) await issue('verify', actor.user.email, actor.user.id, actor.tenant.id, {}, origin(req)); res.json({ ok: true, delivery: delivery.mode }); });
-  app.post('/api/auth/verify', authLimit, (req, res) => {
-    const input = z.object({ token }).strict().parse(req.body), record = findToken(input.token, 'verify');
-    repo.transaction(() => { repo.db.prepare('UPDATE users SET verified_at=? WHERE id=?').run(now(), String(record.user_id)); repo.db.prepare('UPDATE account_tokens SET consumed_at=? WHERE id=?').run(now(), String(record.id)); repo.audit(String(record.tenant_id), String(record.user_id), 'account.email_verified', String(record.user_id)); }); res.json({ ok: true });
+  app.post('/api/account/revoke-sessions', async (req, res) => {
+    const actor = await workspace(req), expectedEpoch = Number(req.session.authEpoch ?? 0);
+    await repo.transaction(async () => {
+      await repo.lockUser(actor.user.id);
+      if (!(await repo.db.prepare('UPDATE users SET auth_epoch=auth_epoch+1 WHERE id=? AND auth_epoch=?').run(actor.user.id, expectedEpoch)).changes) throw new AppError(401, 'Account access changed. Sign in again.');
+      await repo.db.prepare("DELETE FROM dashboard_sessions WHERE json_extract(data,'$.userId')=?").run(actor.user.id); await repo.audit(actor.tenant.id, actor.user.id, 'account.sessions_revoked', actor.user.id);
+    });
+    await signedIn(req, actor.user.id, actor.tenant.id, expectedEpoch + 1); res.json({ ok: true });
+  });
+  app.post('/api/account/verification', authLimit, async (req, res) => { const actor = await workspace(req); if (!actor.user.emailVerified) await issue('verify', actor.user.email, actor.user.id, actor.tenant.id, {}, origin(req)); res.json({ ok: true, delivery: delivery.mode }); });
+  app.post('/api/auth/verify', authLimit, async (req, res) => {
+    const input = z.object({ token }).strict().parse(req.body);
+    await repo.transaction(async () => { const record = await findToken(input.token, 'verify'); await repo.lockUser(String(record.user_id)); await claimToken(record); await repo.db.prepare('UPDATE users SET verified_at=? WHERE id=?').run(now(), String(record.user_id)); await repo.audit(String(record.tenant_id), String(record.user_id), 'account.email_verified', String(record.user_id)); }); res.json({ ok: true });
   });
   app.post('/api/auth/forgot-password', authLimit, async (req, res) => {
-    const input = z.object({ email }).strict().parse(req.body), user = repo.row('SELECT id,tenant_id FROM users WHERE email=?', input.email);
-    if (user) { try { await issue('reset', input.email, String(user.id), String(user.tenant_id), {}, origin(req)); } catch { repo.audit(String(user.tenant_id), String(user.id), 'account.delivery_failed', String(user.id), { purpose: 'reset' }); } }
+    const input = z.object({ email }).strict().parse(req.body), user = await repo.row('SELECT id,tenant_id FROM users WHERE email=?', input.email);
+    if (user) { try { await issue('reset', input.email, String(user.id), String(user.tenant_id), {}, origin(req)); } catch { await repo.audit(String(user.tenant_id), String(user.id), 'account.delivery_failed', String(user.id), { purpose: 'reset' }); } }
     res.json({ ok: true, message: 'If an account exists, recovery instructions are queued when the configured delivery adapter is available.', delivery: delivery.mode });
   });
   app.post('/api/auth/reset-password', authLimit, async (req, res) => {
-    const input = z.object({ token, password }).strict().parse(req.body); findToken(input.token, 'reset');
+    const input = z.object({ token, password }).strict().parse(req.body); await findToken(input.token, 'reset');
     const nextHash = await hash(input.password, { memoryCost: 19456, timeCost: 2, parallelism: 1 });
-    repo.transaction(() => { const record = findToken(input.token, 'reset'), userId = String(record.user_id); repo.db.prepare('UPDATE users SET password_hash=?,auth_epoch=auth_epoch+1 WHERE id=?').run(nextHash, userId); repo.db.prepare('UPDATE account_tokens SET consumed_at=? WHERE user_id=? AND purpose=? AND consumed_at IS NULL').run(now(), userId, 'reset'); repo.db.prepare("DELETE FROM dashboard_sessions WHERE json_extract(data,'$.userId')=?").run(userId); repo.audit(String(record.tenant_id), userId, 'account.password_reset', userId); });
+    await repo.transaction(async () => {
+      const record = await findToken(input.token, 'reset'), userId = String(record.user_id); await repo.lockUser(userId); await claimToken(record);
+      await repo.db.prepare('UPDATE users SET password_hash=?,auth_epoch=auth_epoch+1 WHERE id=?').run(nextHash, userId);
+      await repo.db.prepare('UPDATE account_tokens SET consumed_at=? WHERE user_id=? AND purpose=? AND consumed_at IS NULL').run(now(), userId, 'reset');
+      await repo.db.prepare("DELETE FROM dashboard_sessions WHERE json_extract(data,'$.userId')=?").run(userId); await repo.audit(String(record.tenant_id), userId, 'account.password_reset', userId);
+    });
     await new Promise<void>((accept, reject) => req.session.destroy(error => error ? reject(error) : accept())); res.clearCookie('gk.sid').json({ ok: true });
   });
-  app.get('/api/workspace/members', (req, res) => {
-    const actor = workspace(req); res.json({ members: repo.rows('SELECT u.id,u.name,u.email,m.role,m.created_at AS createdAt FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.tenant_id=? ORDER BY m.created_at', actor.tenant.id), invitations: ['owner', 'admin'].includes(actor.role!) ? repo.rows("SELECT id,email,payload,expires FROM account_tokens WHERE tenant_id=? AND purpose='invite' AND consumed_at IS NULL AND expires>? ORDER BY created_at DESC", actor.tenant.id, Date.now()).map(row => ({ id: row.id, email: row.email, role: JSON.parse(String(row.payload)).role, expiresAt: new Date(Number(row.expires)).toISOString() })) : [] });
+  app.get('/api/workspace/members', async (req, res) => {
+    const actor = await workspace(req), invitations = ['owner', 'admin'].includes(actor.role!) ? await repo.rows("SELECT id,email,payload,expires FROM account_tokens WHERE tenant_id=? AND purpose='invite' AND consumed_at IS NULL AND expires>? ORDER BY created_at DESC", actor.tenant.id, Date.now()) : [];
+    res.json({ members: await repo.rows('SELECT u.id,u.name,u.email,m.role,m.created_at AS createdAt FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.tenant_id=? ORDER BY m.created_at', actor.tenant.id), invitations: invitations.map(row => ({ id: row.id, email: row.email, role: JSON.parse(String(row.payload)).role, expiresAt: new Date(Number(row.expires)).toISOString() })) });
   });
   app.post('/api/workspace/invitations', authLimit, async (req, res) => {
-    const actor = admin(req), input = z.object({ email, role }).strict().parse(req.body);
-    if (repo.row('SELECT u.id FROM users u JOIN memberships m ON m.user_id=u.id WHERE u.email=? AND m.tenant_id=?', input.email, actor.tenant.id)) throw new AppError(409, 'This account is already a workspace member.');
-    if (Number(repo.row("SELECT COUNT(*) AS count FROM account_tokens WHERE tenant_id=? AND purpose='invite' AND consumed_at IS NULL AND expires>?", actor.tenant.id, Date.now())!.count) >= 30) throw new AppError(409, 'This workspace has 30 pending invitations. Revoke one before inviting again.');
-    const id = await issue('invite', input.email, null, actor.tenant.id, { role: input.role }, origin(req)); repo.audit(actor.tenant.id, actor.user.id, 'workspace.invited', id, { role: input.role }); res.status(201).json({ id, delivery: delivery.mode });
-  });
-  app.delete('/api/workspace/invitations/:id', (req, res) => { const actor = admin(req); if (!repo.db.prepare("UPDATE account_tokens SET consumed_at=? WHERE id=? AND tenant_id=? AND purpose='invite' AND consumed_at IS NULL").run(now(), String(req.params.id), actor.tenant.id).changes) throw new AppError(404, 'Invitation not found.'); repo.audit(actor.tenant.id, actor.user.id, 'workspace.invitation_revoked', String(req.params.id)); res.json({ ok: true }); });
-  app.post('/api/auth/invitations/preview', authLimit, (req, res) => { const input = z.object({ token }).strict().parse(req.body), record = findToken(input.token, 'invite'); res.json({ email: record.email, companyName: repo.row('SELECT name FROM tenants WHERE id=?', String(record.tenant_id))!.name, role: JSON.parse(String(record.payload)).role }); });
-  app.post('/api/auth/invitations/accept', authLimit, async (req, res) => {
-    const input = z.object({ token, name: z.string().trim().min(2).max(100).optional(), password: password.optional() }).strict().parse(req.body), record = findToken(input.token, 'invite');
-    let user = repo.row('SELECT id,auth_epoch FROM users WHERE email=?', String(record.email)), nextHash: string | undefined;
-    if (user && identity(req) !== user.id) throw new AppError(401, 'Sign in to the invited email account before accepting this invitation.');
-    if (!user) { if (!input.name || !input.password) throw new AppError(400, 'Provide your name and a password to create the invited account.'); nextHash = await hash(input.password, { memoryCost: 19456, timeCost: 2, parallelism: 1 }); }
-    const accepted = repo.transaction(() => {
-      const latest = findToken(input.token, 'invite'), tenantId = String(latest.tenant_id);
-      user = repo.row('SELECT id,auth_epoch FROM users WHERE email=?', String(latest.email));
-      if (user && identity(req) !== user.id) throw new AppError(409, 'Account access changed while accepting. Sign in and retry.');
-      const userId = user ? String(user.id) : newId('usr');
-      if (!user) repo.db.prepare('INSERT INTO users (id,tenant_id,email,name,password_hash,verified_at) VALUES (?,?,?,?,?,?)').run(userId, tenantId, String(latest.email), input.name!, nextHash!, now());
-      repo.db.prepare('INSERT OR IGNORE INTO memberships VALUES (?,?,?,?)').run(userId, tenantId, JSON.parse(String(latest.payload)).role as WorkspaceRole, now());
-      repo.db.prepare('UPDATE users SET verified_at=COALESCE(verified_at,?) WHERE id=?').run(now(), userId);
-      repo.db.prepare('UPDATE account_tokens SET consumed_at=? WHERE id=?').run(now(), String(latest.id)); repo.audit(tenantId, userId, 'workspace.joined', userId); return { userId, tenantId, epoch: Number(user?.auth_epoch ?? 0) };
+    const actor = await admin(req), input = z.object({ email, role }).strict().parse(req.body);
+    // Capacity, current permissions and token rotation share a tenant lock; delivery is
+    // deliberately after commit so no network operation holds a database transaction.
+    const invitation = await repo.transaction(async () => {
+      await repo.lockTenant(actor.tenant.id); await repo.lockUser(actor.user.id); await admin(req);
+      if (await repo.row('SELECT u.id FROM users u JOIN memberships m ON m.user_id=u.id WHERE u.email=? AND m.tenant_id=?', input.email, actor.tenant.id)) throw new AppError(409, 'This account is already a workspace member.');
+      const previous = await repo.row("SELECT id FROM account_tokens WHERE tenant_id=? AND email=? AND purpose='invite' AND consumed_at IS NULL AND expires>?", actor.tenant.id, input.email, Date.now());
+      if (!previous && Number((await repo.row("SELECT COUNT(*) AS count FROM account_tokens WHERE tenant_id=? AND purpose='invite' AND consumed_at IS NULL AND expires>?", actor.tenant.id, Date.now()))!.count) >= 30) throw new AppError(409, 'This workspace has 30 pending invitations. Revoke one before inviting again.');
+      const value = randomBytes(32).toString('base64url'), id = newId('tok'), expires = Date.now() + 86_400_000;
+      await repo.db.prepare("UPDATE account_tokens SET consumed_at=? WHERE purpose='invite' AND email=? AND tenant_id=? AND consumed_at IS NULL").run(now(), input.email, actor.tenant.id);
+      await repo.db.prepare("INSERT INTO account_tokens VALUES (?,?,'invite',NULL,?,?,?,?,NULL,?)").run(id, digest(value), actor.tenant.id, input.email, JSON.stringify({ role: input.role }), expires, now());
+      await repo.audit(actor.tenant.id, actor.user.id, 'workspace.invited', id, { role: input.role }); return { id, value, expires };
     });
-    await signedIn(req, accepted.userId, accepted.tenantId, accepted.epoch); res.json({ workspace: repo.workspace(accepted.userId, accepted.tenantId) });
+    try { await delivery.deliver({ to: input.email, purpose: 'invite', link: `${origin(req)}/#account/invite?token=${invitation.value}`, expiresAt: new Date(invitation.expires).toISOString() }); }
+    catch { await repo.db.prepare('UPDATE account_tokens SET consumed_at=? WHERE id=?').run(now(), invitation.id); throw new AppError(503, 'Account delivery is unavailable. Check the configured delivery adapter.'); }
+    res.status(201).json({ id: invitation.id, delivery: delivery.mode });
   });
-  app.patch('/api/workspace/members/:id', (req, res) => {
-    const actor = admin(req), targetId = String(req.params.id), input = z.object({ role }).strict().parse(req.body), target = repo.row('SELECT role FROM memberships WHERE user_id=? AND tenant_id=?', targetId, actor.tenant.id);
-    if (!target) throw new AppError(404, 'Member not found.');
-    if (target.role === 'owner' || targetId === actor.user.id || (actor.role === 'admin' && target.role === 'admin')) throw new AppError(403, 'Owners and your own membership cannot be changed here. Only owners can manage other admins.');
-    repo.db.prepare('UPDATE memberships SET role=? WHERE user_id=? AND tenant_id=?').run(input.role, targetId, actor.tenant.id); repo.audit(actor.tenant.id, actor.user.id, 'workspace.role_changed', targetId, { role: input.role }); res.json({ ok: true });
+  app.delete('/api/workspace/invitations/:id', async (req, res) => { const actor = await admin(req); await repo.transaction(async () => { await repo.lockTenant(actor.tenant.id); await repo.lockUser(actor.user.id); await admin(req); if (!(await repo.db.prepare("UPDATE account_tokens SET consumed_at=? WHERE id=? AND tenant_id=? AND purpose='invite' AND consumed_at IS NULL").run(now(), String(req.params.id), actor.tenant.id)).changes) throw new AppError(404, 'Invitation not found.'); await repo.audit(actor.tenant.id, actor.user.id, 'workspace.invitation_revoked', String(req.params.id)); }); res.json({ ok: true }); });
+  app.post('/api/auth/invitations/preview', authLimit, async (req, res) => { const input = z.object({ token }).strict().parse(req.body), record = await findToken(input.token, 'invite'); res.json({ email: record.email, companyName: (await repo.row('SELECT name FROM tenants WHERE id=?', String(record.tenant_id)))!.name, role: JSON.parse(String(record.payload)).role }); });
+  app.post('/api/auth/invitations/accept', authLimit, async (req, res) => {
+    const input = z.object({ token, name: z.string().trim().min(2).max(100).optional(), password: password.optional() }).strict().parse(req.body), record = await findToken(input.token, 'invite');
+    const user = await repo.row('SELECT id,auth_epoch FROM users WHERE email=?', String(record.email)); let nextHash: string | undefined;
+    if (user && await identity(req) !== user.id) throw new AppError(401, 'Sign in to the invited email account before accepting this invitation.');
+    if (!user) { if (!input.name || !input.password) throw new AppError(400, 'Provide your name and a password to create the invited account.'); nextHash = await hash(input.password, { memoryCost: 19456, timeCost: 2, parallelism: 1 }); }
+    const accepted = await repo.transaction(async () => {
+      const latest = await findToken(input.token, 'invite'), tenantId = String(latest.tenant_id); await repo.lockTenant(tenantId);
+      const current = await repo.row('SELECT id,auth_epoch FROM users WHERE email=?', String(latest.email)); if (current) await repo.lockUser(String(current.id));
+      if (current && await identity(req) !== current.id) throw new AppError(409, 'Account access changed while accepting. Sign in and retry.');
+      await claimToken(latest); const userId = current ? String(current.id) : newId('usr');
+      if (!current && !(await repo.db.prepare('INSERT OR IGNORE INTO users (id,tenant_id,email,name,password_hash,verified_at) VALUES (?,?,?,?,?,?)').run(userId, tenantId, String(latest.email), input.name!, nextHash!, now())).changes) throw new AppError(409, 'An account was created while accepting. Sign in and retry.');
+      await repo.db.prepare('INSERT OR IGNORE INTO memberships VALUES (?,?,?,?)').run(userId, tenantId, JSON.parse(String(latest.payload)).role as WorkspaceRole, now());
+      await repo.db.prepare('UPDATE users SET verified_at=COALESCE(verified_at,?) WHERE id=?').run(now(), userId); await repo.audit(tenantId, userId, 'workspace.joined', userId); return { userId, tenantId, epoch: Number(current?.auth_epoch ?? 0) };
+    });
+    await signedIn(req, accepted.userId, accepted.tenantId, accepted.epoch); res.json({ workspace: await repo.workspace(accepted.userId, accepted.tenantId) });
   });
-  app.delete('/api/workspace/members/:id', (req, res) => {
-    const actor = admin(req), targetId = String(req.params.id), target = repo.row('SELECT role FROM memberships WHERE user_id=? AND tenant_id=?', targetId, actor.tenant.id);
-    if (!target) throw new AppError(404, 'Member not found.');
-    if (target.role === 'owner' || targetId === actor.user.id || (actor.role === 'admin' && target.role === 'admin')) throw new AppError(403, 'This membership cannot be removed by your account.');
-    repo.db.prepare('DELETE FROM memberships WHERE user_id=? AND tenant_id=?').run(targetId, actor.tenant.id); repo.audit(actor.tenant.id, actor.user.id, 'workspace.member_removed', targetId); res.json({ ok: true });
+  app.patch('/api/workspace/members/:id', async (req, res) => {
+    const actor = await admin(req), targetId = String(req.params.id), input = z.object({ role }).strict().parse(req.body);
+    await repo.transaction(async () => {
+      await repo.lockTenant(actor.tenant.id); await repo.lockUser(actor.user.id); const latest = await admin(req), target = await repo.row('SELECT role FROM memberships WHERE user_id=? AND tenant_id=?', targetId, actor.tenant.id);
+      if (!target) throw new AppError(404, 'Member not found.');
+      if (target.role === 'owner' || targetId === actor.user.id || (latest.role === 'admin' && target.role === 'admin')) throw new AppError(403, 'Owners and your own membership cannot be changed here. Only owners can manage other admins.');
+      await repo.db.prepare('UPDATE memberships SET role=? WHERE user_id=? AND tenant_id=?').run(input.role, targetId, actor.tenant.id); await repo.audit(actor.tenant.id, actor.user.id, 'workspace.role_changed', targetId, { role: input.role });
+    }); res.json({ ok: true });
   });
-  app.get('/api/workspace/audit', (req, res) => { const actor = admin(req); res.json({ events: repo.rows('SELECT id,actor_id AS actorId,event,resource_id AS resourceId,details,created_at AS createdAt FROM audit_events WHERE tenant_id=? ORDER BY created_at DESC LIMIT 200', actor.tenant.id).map(row => ({ ...row, details: JSON.parse(String(row.details)) })) }); });
+  app.delete('/api/workspace/members/:id', async (req, res) => {
+    const actor = await admin(req), targetId = String(req.params.id);
+    await repo.transaction(async () => {
+      await repo.lockTenant(actor.tenant.id); await repo.lockUser(actor.user.id); const latest = await admin(req), target = await repo.row('SELECT role FROM memberships WHERE user_id=? AND tenant_id=?', targetId, actor.tenant.id);
+      if (!target) throw new AppError(404, 'Member not found.');
+      if (target.role === 'owner' || targetId === actor.user.id || (latest.role === 'admin' && target.role === 'admin')) throw new AppError(403, 'This membership cannot be removed by your account.');
+      await repo.db.prepare('DELETE FROM memberships WHERE user_id=? AND tenant_id=?').run(targetId, actor.tenant.id); await repo.audit(actor.tenant.id, actor.user.id, 'workspace.member_removed', targetId);
+    }); res.json({ ok: true });
+  });
+  app.get('/api/workspace/audit', async (req, res) => { const actor = await admin(req); res.json({ events: (await repo.rows('SELECT id,actor_id AS actorId,event,resource_id AS resourceId,details,created_at AS createdAt FROM audit_events WHERE tenant_id=? ORDER BY created_at DESC LIMIT 200', actor.tenant.id)).map(row => ({ ...row, details: JSON.parse(String(row.details)) })) }); });
 }

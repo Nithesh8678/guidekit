@@ -4,10 +4,10 @@
 flowchart LR
   Developer --> Dashboard[Developer dashboard]
   Dashboard --> API[Loopback Node API]
-  API --> DB[(SQLite: tenants, roles, drafts, audit)]
+  API --> DB[(PostgreSQL: tenants, roles, drafts, audit)]
   API --> Candidate[Immutable publication candidate]
-  Candidate --> Prepare[Prepare source index and graph]
-  Prepare --> Graph[(TigerGraph relationships)]
+  Candidate --> Prepare[Prepare immutable chunks and local embeddings]
+  Prepare --> Graph[(PostgreSQL full-text and pgvector index)]
   Prepare --> Ready[Ready version]
   Ready --> Active[Explicit active version pointer]
   Visitor --> SDK[Shared browser SDK]
@@ -35,6 +35,6 @@ The SDK owns one persistent cursor and an interruptible local renderer. A journe
 
 The same SDK serves every company. Public agent IDs select company configuration, knowledge and allowed origins/actions; they never authorize private business operations. Cutroom is a host adapter using its existing authenticated revision/idempotency-aware command API. It excludes media, filenames, account details and private document contents from context. CRM and support remain independent test/demo hosts.
 
-Accounts use Argon2id, persistent HttpOnly sessions, live workspace membership checks and account epochs for revocation. Existing owners migrate without losing login. Invitation/recovery/verification links are hashed, purpose-bound, expiring and single-use; default delivery is a private local outbox. Workspace roles constrain every write. Audit and aggregate latency/failure metrics omit document contents and credentials. Consistent SQLite backups and offline restore guards are separate from graph/model state; see operations guidance for recovery and erasure boundaries.
+Accounts use Argon2id, persistent HttpOnly sessions, live workspace membership checks and account epochs for revocation. Existing owners migrate without losing login. Invitation/recovery/verification links are hashed, purpose-bound, expiring and single-use; default delivery is a private local outbox. Workspace roles constrain every write. Audit and aggregate latency/failure metrics omit document contents and credentials. Complete PostgreSQL application backups include source text, semantic vectors and the signing secret in one snapshot; empty-target restore validates row hashes and holds an exclusive startup lock. Legacy SQLite backups do not include an external TigerGraph workspace. Model login state is separate from both archive formats; see operations guidance for recovery and erasure boundaries.
 
-Trust boundaries are dashboard cookies and exact-origin JSON mutations; visitor bearer sessions and public company context; untrusted knowledge/page content and the model; model JSON and current target/action allowlists; SDK approval and the host's own authorization; and local storage versus external graph/model services. No arbitrary-site, native desktop or canvas interpretation is implied by the website SDK.
+Trust boundaries are dashboard cookies and exact-origin JSON mutations; visitor bearer sessions and public company context; untrusted knowledge/page content and the model; model JSON and current target/action allowlists; SDK approval and the host's own authorization; and the local application versus managed database/model services. No arbitrary-site, native desktop or canvas interpretation is implied by the website SDK.

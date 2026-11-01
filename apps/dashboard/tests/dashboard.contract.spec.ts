@@ -9,12 +9,12 @@ const test = base.extend<{ browserErrors: string[] }>({
   }, { auto: true }]
 });
 
-async function fixture(page: Page, options: { pending?: boolean; legacy?: boolean; history?: boolean; viewer?: boolean; manifest?: 'pinned' | 'invalid' } = {}) {
+async function fixture(page: Page, options: { pending?: boolean; legacy?: boolean; history?: boolean; viewer?: boolean; manifest?: 'pinned' | 'invalid'; postgres?: boolean } = {}) {
   const config: AgentConfig = { name: 'QA Product Guide', companyName: 'Synthetic QA', description: '', instructions: 'Original instructions', greeting: 'Hello', accentColor: '#365cf5', allowedOrigins: ['http://127.0.0.1:4641'], allowedActions: ['create_contact'] };
   const agent: Agent = { ...config, id: 'agt_dashboard', tenantId: 'org_qa', createdAt: '2026-10-29T10:00:00Z', updatedAt: '2026-10-29T10:00:00Z', publishedVersion: 1 };
   let documents: KnowledgeDocument[] = [{ id: 'doc_guide', title: 'Product guide', content: 'Original saved knowledge <script>safe text</script>', createdAt: '2026-10-29T10:00:00Z' }];
   const snapshots = new Map([[1, { config: structuredClone(config), documents: structuredClone(documents) }]]);
-  const versions: PublicationVersion[] = [{ number: 1, createdAt: '2026-10-29T10:00:00Z', documentCount: 1, status: 'ready', graphSource: 'local' }];
+  const versions: PublicationVersion[] = [{ number: 1, createdAt: '2026-10-29T10:00:00Z', documentCount: 1, status: 'ready', graphSource: options.postgres ? 'postgres' : 'local' }];
   if (options.history) { versions.push({ number: 2, createdAt: '2026-10-29T10:05:00Z', documentCount: 1, status: 'ready', graphSource: 'local' }); snapshots.set(2, { config: structuredClone(config), documents: [{ ...documents[0]!, title: 'Updated product guide' }] }); }
   if (options.legacy) delete (versions[0] as Partial<PublicationVersion>).status;
   if (options.pending) versions.push({ number: 2, createdAt: '2026-10-29T10:05:00Z', documentCount: 1, status: 'syncing', graphSource: 'tigergraph' });
@@ -30,7 +30,7 @@ async function fixture(page: Page, options: { pending?: boolean; legacy?: boolea
     else if (path === '/api/agents/agt_dashboard' && method === 'GET') body = { agent, documents, versions: [...versions].reverse(), sessions: [{ id: 'run_ok', question: 'Completed synthetic action', answer: 'Saved', status: 'action_succeeded', createdAt: agent.createdAt, actionName: 'create_contact' }, { id: 'run_fail', question: 'Failed synthetic action', answer: 'Could not save', status: 'action_failed', createdAt: agent.createdAt, actionName: 'create_contact' }] };
     else if (path === '/api/agents/agt_dashboard' && method === 'PUT') { Object.assign(agent, route.request().postDataJSON()); body = { agent }; }
     else if (path.endsWith('/metrics')) body = { periodStart: '2026-10-29T00:00:00Z', statuses: [{ status: 'action_succeeded', count: 2, averageDurationMs: 1240 }, { status: 'failed', count: 1, averageDurationMs: null }], workspaceUsage: { runs: 3, dailyLimit: 100, remaining: 97 } };
-    else if (path.endsWith('/knowledge-preview')) { const input = route.request().postDataJSON(); if (retrievalFails) { status = 502; body = { error: 'Synthetic graph retrieval unavailable. No fallback answer generated.' }; } else body = { version: input.version, citations: [{ documentId: 'doc_guide', title: 'Product guide', excerpt: 'Original saved knowledge <script>safe text</script>' }], knowledge: { source: 'tigergraph', paths: [{ nodes: ['doc_guide', 'billing', 'doc_guide'], relation: 'Shared billing concept' }] }, sufficient: true, message: 'Source matches found. Review them for factual support before relying on an answer.' }; }
+    else if (path.endsWith('/knowledge-preview')) { const input = route.request().postDataJSON(); if (retrievalFails) { status = 502; body = { error: 'Synthetic graph retrieval unavailable. No fallback answer generated.' }; } else body = { version: input.version, citations: [{ documentId: 'doc_guide', title: 'Product guide', excerpt: 'Original saved knowledge <script>safe text</script>' }], knowledge: options.postgres ? { source: 'postgres', paths: [] } : { source: 'tigergraph', paths: [{ nodes: ['doc_guide', 'billing', 'doc_guide'], relation: 'Shared billing concept' }] }, sufficient: true, message: 'Source matches found. Review them for factual support before relying on an answer.' }; }
     else if (path.endsWith('/knowledge-evaluate')) { const input = route.request().postDataJSON(); body = { version: input.version, cases: input.cases.map((item: { question: string; expectedDocumentIds: string[] }) => ({ question: item.question, retrievedDocumentIds: item.expectedDocumentIds, recall: 1, precision: 1, reciprocalRank: 1 })), meanRecall: 1, meanReciprocalRank: 1, scope: 'retrieval-only; does not grade generated answers' }; }
     else if (path.endsWith('/diagnostics')) {
       if (diagnosticsFail) { status = 503; body = { error: 'Synthetic setup check failure. Retry when the server is available.' }; }
@@ -160,4 +160,18 @@ test('public website stays available while the initial authentication check is p
     await expect(page.getByRole('link', { name: 'Build your guide', exact: true }).first()).toBeVisible();
     await expect(page.getByText('Opening your workspace…', { exact: true })).toHaveCount(0);
   } finally { releaseAuth(); }
+});
+
+
+test('PostgreSQL publications and retrieval show hybrid knowledge without invented relationship paths', async ({ page }) => {
+  const state = await fixture(page, { postgres: true });
+  await page.getByRole('tab', { name: 'Install', exact: true }).click();
+  await expect(page.getByRole('article', { name: 'Version 1', exact: true })).toContainText('PostgreSQL hybrid search');
+  await page.getByRole('tab', { name: /^Knowledge/ }).click();
+  await page.getByLabel('Retrieval test question', { exact: true }).fill('How do I change a payment deadline?');
+  await page.getByRole('button', { name: 'Preview retrieved sources', exact: true }).click();
+  await expect(page.getByText('Retrieved with PostgreSQL keyword and semantic search.', { exact: true })).toBeVisible();
+  await expect(page.locator('.retrieval-source')).toContainText('Original saved knowledge');
+  await expect(page.getByText('Source relationship paths', { exact: true })).toHaveCount(0);
+  expect(state.requests.some(request => request.path.includes('/embed/session/ask'))).toBe(false);
 });

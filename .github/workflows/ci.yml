@@ -11,6 +11,23 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17@sha256:7d0a41464797aeb9862dfdc0bbf1526b82cfd324cdd8036df19e3545f4a9ccb8
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: guidekit-ci-only
+          POSTGRES_DB: guidekit_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d guidekit_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      GUIDEKIT_TEST_POSTGRES_URL: postgresql://postgres:guidekit-ci-only@127.0.0.1:5432/guidekit_test
+      GUIDEKIT_TEST_KNOWLEDGE_URL: postgresql://guidekit_retrieval:guidekit-ci-retrieval-only@127.0.0.1:5432/guidekit_test
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -20,6 +37,8 @@ jobs:
         run: npm ci --ignore-scripts
       - run: npm run audit:secrets
       - run: npm audit --audit-level=high
+      - name: Prepare restricted disposable PostgreSQL test role
+        run: node --import tsx scripts/postgres-ci.ts
       - run: npm run check
       - name: Install Chromium for browser acceptance tests
         run: npx playwright install --with-deps chromium

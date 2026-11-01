@@ -1,6 +1,6 @@
 # GuideKit engineering rules
 
-Build the shared visual/voice agent platform. Cutroom is a host integration, never the product boundary. Core first. TigerGraph is the selected graph sponsor integration; browser speech recognition and synthesis are the selected voice approach. Motion polish follows verified behavior.
+Build the shared visual/voice agent platform as a startup product. Cutroom is a host integration, never the product boundary. Core first. PostgreSQL with keyword and pgvector semantic retrieval is the selected product data and knowledge architecture; retain TigerGraph only for migration compatibility and rollback. Browser speech recognition and synthesis are the selected voice approach. Motion polish follows verified behavior.
 
 Run locally on loopback. Use the owner's official Codex/ChatGPT login through app-server; no credential extraction, shared hosted subscription relay, or paid fallback. The owner approved preparing a separately configured hosted OpenAI provider, disabled by default; it must require explicit selection and paid-call enablement, never reuse the personal subscription credentials, and never silently replace the local runtime. Live paid calls and public deployment remain separate gates. Treat model success as unverified until a completed live request and website outcome have been observed.
 

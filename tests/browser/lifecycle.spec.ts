@@ -11,7 +11,7 @@ import type { GuideKitInstance } from '../../packages/sdk/src/types';
 // Accelerated lifecycle simulation: real Chromium/HTTP, synthetic accounts/inference,
 // and controlled token expiry. This is not an elapsed ten-minute or physical voice test.
 const endpoint = 'http://127.0.0.1:4710', website = 'http://127.0.0.1:4711', sdkUrl = `${endpoint}/sdk/guidekit.js`;
-let assets = '', data = '', agentId = '', service: ReturnType<typeof createApp>, inferCalls = 0, askRequests = 0, sessionRequests = 0;
+let assets = '', data = '', agentId = '', service: Awaited<ReturnType<typeof createApp>>, inferCalls = 0, askRequests = 0, sessionRequests = 0;
 const servers: Server[] = [];
 type Resources = { listeners: number; mutations: number; resizes: number; timeouts: number; intervals: number; frames: number };
 declare global { interface Window { lifecycleAssistant: GuideKitInstance; lifecycleResources: () => Resources; } }
@@ -19,15 +19,15 @@ declare global { interface Window { lifecycleAssistant: GuideKitInstance; lifecy
 test.beforeAll(async () => {
   assets = await mkdtemp(resolve(tmpdir(), 'guidekit-lifecycle-assets-')); data = await mkdtemp(resolve(tmpdir(), 'guidekit-lifecycle-data-'));
   await build({ entryPoints: ['packages/sdk/src/index.ts'], outfile: resolve(assets, 'dist/sdk/guidekit.js'), bundle: true, format: 'iife', target: 'es2022' });
-  service = createApp({ dataDir: data, root: assets, adminOrigins: new Set([endpoint]), testing: true, provider: {
+  service = (await createApp({ dataDir: data, root: assets, adminOrigins: new Set([endpoint]), testing: true, provider: {
     async status() { return { provider: 'codex', available: true, authenticated: true, message: 'Explicit synthetic lifecycle provider' }; },
     async infer({ prompt }) { inferCalls++; const message = JSON.parse(prompt.split('\n\n').find(line => line.startsWith('User request (reference data): '))!.slice('User request (reference data): '.length)) as string;
       return JSON.stringify({ answer: message.includes('Guide this form') ? 'Enter the public fields, then save.' : 'Export is available in the directory.', steps: message.includes('Guide this form') ? ['full-name', 'company', 'save'].map(targetId => ({ targetId, text: `Use ${targetId}.`, annotation: 'target' })) : [], action: null, citationIds: [], journeyDisposition: 'done' });
     }, async close() {}
-  } });
-  const owner = service.repo.register({ email: 'lifecycle@example.invalid', name: 'Lifecycle owner', companyName: 'Lifecycle' }, 'synthetic-non-login-hash');
-  const agent = service.repo.createAgent(owner.tenant.id, { name: 'Lifecycle guide', companyName: 'Lifecycle', greeting: 'How can I help?', description: '', instructions: '', accentColor: '#365cf5', allowedOrigins: [website], allowedActions: [] }); agentId = agent.id;
-  service.repo.addDocument(owner.tenant.id, agent.id, { title: 'Directory guide', content: 'Contacts can be exported from the directory.' }); service.repo.publish(owner.tenant.id, agent.id);
+  } }));
+  const owner = (await service.repo.register({ email: 'lifecycle@example.invalid', name: 'Lifecycle owner', companyName: 'Lifecycle' }, 'synthetic-non-login-hash'));
+  const agent = (await service.repo.createAgent(owner.tenant.id, { name: 'Lifecycle guide', companyName: 'Lifecycle', greeting: 'How can I help?', description: '', instructions: '', accentColor: '#365cf5', allowedOrigins: [website], allowedActions: [] })); agentId = agent.id;
+  (await service.repo.addDocument(owner.tenant.id, agent.id, { title: 'Directory guide', content: 'Contacts can be exported from the directory.' })); (await service.repo.publish(owner.tenant.id, agent.id));
   const api = express(); api.use((req, _res, next) => { if (req.method === 'POST') { if (req.path === '/api/embed/session/ask') askRequests++; else if (req.path === `/api/embed/${agentId}/session`) sessionRequests++; } next(); }); api.use(service.app);
   const host = express(); host.use((_req, res) => { res.set('Content-Security-Policy', `default-src 'self'; script-src 'self' ${endpoint}; connect-src 'self' ${endpoint}; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'`); res.type('html').send(`<!doctype html><html lang="en"><head><title>Lifecycle fixture</title></head><body style="padding:48px;font-family:system-ui"><main><h1>Directory</h1><form><label>Full name<input data-guidekit-id="full-name" required></label><label>Company<input data-guidekit-id="company" required></label><button data-guidekit-id="save" type="button">Save contact</button></form></main><script src="${sdkUrl}"></script></body></html>`); });
   const listen = (app: ReturnType<typeof express>, port: number) => new Promise<void>((accept, reject) => { const server = app.listen(port, '127.0.0.1', () => accept()); servers.push(server); server.on('error', reject); });
@@ -44,7 +44,7 @@ test('accelerated server-side expiry fails safely at 401, then a new visitor req
   const errors: string[] = []; page.on('pageerror', error => errors.push(error.message)); await install(page);
   expect((await ask(page, 'Explain directory export'))?.answer).toBe('Export is available in the directory.'); expect(inferCalls).toBe(1); expect(sessionRequests).toBe(1);
   // Force the disposable server credential to expire while the browser still believes it valid.
-  service.repo.db.prepare('UPDATE embed_sessions SET expires=0').run();
+  (await service.repo.db.prepare('UPDATE embed_sessions SET expires=0').run());
   expect(await ask(page, 'Explain directory export again')).toBeNull(); await expect(page.getByRole('dialog', { name: 'Website assistant' })).toContainText('session expired');
   expect(inferCalls).toBe(1); expect(sessionRequests).toBe(1); const stoppedRequests = askRequests; await page.waitForTimeout(400); expect(askRequests).toBe(stoppedRequests);
   expect((await ask(page, 'Explain directory export after reconnect'))?.answer).toBe('Export is available in the directory.'); expect(sessionRequests).toBe(2); expect(inferCalls).toBe(2);

@@ -37,26 +37,26 @@ test('HTTP graph integration uses immutable trusted scopes, augments planner evi
     }
   };
   const origins = new Set<string>();
-  const core = createApp({ dataDir: directory, adminOrigins: origins, testing: true, graph, provider: {
+  const core = (await createApp({ dataDir: directory, adminOrigins: origins, testing: true, graph, provider: {
     status: async () => ({ provider: 'codex', available: true, authenticated: true, message: 'Explicit test inference provider.' }), close: async () => {},
     infer: async input => { inferCalls++; lastPrompt = input.prompt; return JSON.stringify({ answer: 'Billing statements can be exported as CSV.', steps: [], action: null, citationIds }); }
-  } });
+  } }));
   const server = createServer(core.app); await new Promise<void>(accept => server.listen(0, '127.0.0.1', accept));
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`; origins.add(base);
   // Isolate this integration test from native password hashing. Authentication
   // still uses a real signed, persisted express-session cookie and middleware.
-  function ownerCookie(name: string) {
-    const owner = core.repo.register({ email: `${name}@example.invalid`, name, companyName: name }, 'explicit-test-only-no-login-hash');
+  async function ownerCookie(name: string) {
+    const owner = (await core.repo.register({ email: `${name}@example.invalid`, name, companyName: name }, 'explicit-test-only-no-login-hash'));
     const sid = `graph_fixture_${name}`, expires = Date.now() + 60_000;
-    core.repo.db.prepare('INSERT INTO dashboard_sessions VALUES (?,?,?)').run(sid, JSON.stringify({ userId: owner.user.id, cookie: { originalMaxAge: 60_000, expires: new Date(expires).toISOString(), httpOnly: true, sameSite: 'strict', path: '/' } }), expires);
+    (await core.repo.db.prepare('INSERT INTO dashboard_sessions VALUES (?,?,?)').run(sid, JSON.stringify({ userId: owner.user.id, cookie: { originalMaxAge: 60_000, expires: new Date(expires).toISOString(), httpOnly: true, sameSite: 'strict', path: '/' } }), expires));
     const signature = createHmac('sha256', core.repo.sessionSecret).update(sid).digest('base64').replace(/=+$/, '');
     return { owner, cookie: `gk.sid=${encodeURIComponent(`s:${sid}.${signature}`)}` };
   }
-  const a = ownerCookie('owner_a'), b = ownerCookie('owner_b');
-  const agent = core.repo.createAgent(a.owner.tenant.id, agentConfig);
-  const first = core.repo.addDocument(a.owner.tenant.id, agent.id, { title: 'Invoice', content: 'An invoice belongs to billing.' });
-  const related = core.repo.addDocument(a.owner.tenant.id, agent.id, { title: 'Statement export', content: 'Billing statements support CSV export.' });
-  core.repo.publish(a.owner.tenant.id, agent.id);
+  const a = await ownerCookie('owner_a'), b = await ownerCookie('owner_b');
+  const agent = (await core.repo.createAgent(a.owner.tenant.id, agentConfig));
+  const first = (await core.repo.addDocument(a.owner.tenant.id, agent.id, { title: 'Invoice', content: 'An invoice belongs to billing.' }));
+  const related = (await core.repo.addDocument(a.owner.tenant.id, agent.id, { title: 'Statement export', content: 'Billing statements support CSV export.' }));
+  { const saved = await core.repo.publish(a.owner.tenant.id, agent.id, 'tigergraph'); await core.repo.publicationState(agent.id, saved.number, 'ready', undefined, true); }
   async function request(path: string, options: { cookie?: string; origin?: string; token?: string; body?: unknown } = {}) {
     const headers: Record<string, string> = { Origin: options.origin ?? base };
     if (options.cookie) headers.Cookie = options.cookie;
@@ -78,10 +78,10 @@ test('HTTP graph integration uses immutable trusted scopes, augments planner evi
       const session = await request(`/api/embed/${agent.id}/session`, { origin: website, body: {} }); token = session.data.token;
     });
     await t.test('syncing an old published version reads its saved snapshot and session version stays pinned', async () => {
-      core.repo.removeDocument(a.owner.tenant.id, agent.id, first.id);
-      core.repo.removeDocument(a.owner.tenant.id, agent.id, related.id);
-      const newer = core.repo.addDocument(a.owner.tenant.id, agent.id, { title: 'New policy', content: 'The new billing policy is different.' });
-      core.repo.publish(a.owner.tenant.id, agent.id);
+      (await core.repo.removeDocument(a.owner.tenant.id, agent.id, first.id));
+      (await core.repo.removeDocument(a.owner.tenant.id, agent.id, related.id));
+      const newer = (await core.repo.addDocument(a.owner.tenant.id, agent.id, { title: 'New policy', content: 'The new billing policy is different.' }));
+      { const saved = await core.repo.publish(a.owner.tenant.id, agent.id, 'tigergraph'); await core.repo.publicationState(agent.id, saved.number, 'ready', undefined, true); }
       const latest = await request(`/api/agents/${agent.id}/graph-sync`, { cookie: a.cookie, body: {} }); assert.equal(latest.status, 200); assert.equal(latest.data.version, 2);
       assert.deepEqual(syncCalls[0]!.documents.map(doc => doc.id), [newer.id]);
       const before = inferCalls;
@@ -103,7 +103,7 @@ test('HTTP graph integration uses immutable trusted scopes, augments planner evi
       mode = 'offline';
       assert.equal((await request('/api/integrations/status', { cookie: a.cookie })).data.tigergraph.connected, false);
       assert.equal((await request(`/api/agents/${agent.id}/graph-sync`, { cookie: a.cookie, body: { version: 1 } })).status, 502);
-      assert.equal(core.repo.published(agent.id).version, 2);
+      assert.equal((await core.repo.published(agent.id)).version, 2);
       for (const next of ['offline', 'forged_id', 'forged_excerpt', 'forged_path'] as const) {
         mode = next; const before = inferCalls, result = await ask(`failure_${next}`);
         assert.equal(result.status, 502); assert.equal(inferCalls, before); assert.equal(result.data.citations, undefined);
@@ -116,23 +116,23 @@ test('HTTP graph integration uses immutable trusted scopes, augments planner evi
 
 test('unconfigured graph status and sync are explicit while local retrieval remains available', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'guidekit-local-http-')), origins = new Set<string>();
-  const core = createApp({ dataDir: directory, adminOrigins: origins, testing: true, provider: {
+  const core = (await createApp({ dataDir: directory, adminOrigins: origins, testing: true, provider: {
     status: async () => ({ provider: 'codex', available: true, authenticated: true, message: 'Explicit test provider.' }), close: async () => {},
     infer: async () => JSON.stringify({ answer: 'The invoice policy is available.', steps: [], action: null, citationIds: [] })
-  } });
+  } }));
   const server = createServer(core.app); await new Promise<void>(accept => server.listen(0, '127.0.0.1', accept));
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`; origins.add(base);
   try {
-    const owner = core.repo.register({ email: 'local@example.invalid', name: 'Local owner', companyName: 'Local company' }, 'test-no-login-hash');
-    const agent = core.repo.createAgent(owner.tenant.id, agentConfig);
-    core.repo.addDocument(owner.tenant.id, agent.id, { title: 'Invoice policy', content: 'An invoice is available from Billing.' }); core.repo.publish(owner.tenant.id, agent.id);
+    const owner = (await core.repo.register({ email: 'local@example.invalid', name: 'Local owner', companyName: 'Local company' }, 'test-no-login-hash'));
+    const agent = (await core.repo.createAgent(owner.tenant.id, agentConfig));
+    (await core.repo.addDocument(owner.tenant.id, agent.id, { title: 'Invoice policy', content: 'An invoice is available from Billing.' })); (await core.repo.publish(owner.tenant.id, agent.id));
     const sessionResponse = await fetch(`${base}/api/embed/${agent.id}/session`, { method: 'POST', headers: { Origin: website, 'Content-Type': 'application/json' }, body: '{}' });
     const session = await sessionResponse.json() as any;
     const response = await fetch(`${base}/api/embed/session/ask`, { method: 'POST', headers: { Origin: website, Authorization: `Bearer ${session.token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ message: 'invoice', requestId: 'local_answer', page }) });
     assert.equal(response.status, 200); assert.deepEqual((await response.json() as any).knowledge, { source: 'local', paths: [] });
     // Cookie-authenticated unavailable sync is covered by an explicit session.
     const sid = 'local_fixture', expires = Date.now() + 60_000;
-    core.repo.db.prepare('INSERT INTO dashboard_sessions VALUES (?,?,?)').run(sid, JSON.stringify({ userId: owner.user.id, cookie: { path: '/', originalMaxAge: 60_000, expires: new Date(expires).toISOString() } }), expires);
+    (await core.repo.db.prepare('INSERT INTO dashboard_sessions VALUES (?,?,?)').run(sid, JSON.stringify({ userId: owner.user.id, cookie: { path: '/', originalMaxAge: 60_000, expires: new Date(expires).toISOString() } }), expires));
     const signature = createHmac('sha256', core.repo.sessionSecret).update(sid).digest('base64').replace(/=+$/, '');
     const headers = { Origin: base, Cookie: `gk.sid=${encodeURIComponent(`s:${sid}.${signature}`)}`, 'Content-Type': 'application/json' };
     const status = await fetch(`${base}/api/integrations/status`, { headers }); assert.equal((await status.json() as any).tigergraph.configured, false);
