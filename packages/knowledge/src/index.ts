@@ -44,7 +44,7 @@ export function createPostgresKnowledgeProvider(config?: PostgresKnowledgeConfig
   async function assertRuntime(client: PoolClient) {
     const result = await client.query(`SELECT r.rolsuper,r.rolbypassrls,r.rolcreaterole,r.rolcreatedb,
       EXISTS(SELECT 1 FROM pg_roles p WHERE (p.rolsuper OR p.rolbypassrls) AND pg_has_role(current_user,p.oid,'MEMBER')) AS privileged_member,
-      (SELECT count(*)::int FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='guidekit_knowledge' AND c.relname IN('versions','documents','chunks') AND c.relrowsecurity AND c.relforcerowsecurity AND NOT pg_has_role(current_user,c.relowner,'MEMBER')) AS protected_tables
+      (SELECT count(*)::int FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='guidekit_knowledge' AND c.relname IN('versions','documents','chunks') AND c.relrowsecurity AND c.relforcerowsecurity AND NOT pg_has_role(current_user,c.relowner,'MEMBER') AND EXISTS(SELECT 1 FROM pg_policy p WHERE p.polrelid=c.oid AND p.polname='scope_boundary' AND NOT p.polpermissive)) AS protected_tables
       FROM pg_roles r WHERE r.rolname=current_user`);
     const role = result.rows[0];
     if (!role || role.rolsuper || role.rolbypassrls || role.rolcreaterole || role.rolcreatedb || role.privileged_member || role.protected_tables !== 3) fail('invalid_config', 'PostgreSQL knowledge requires a separate restricted runtime role and forced row-level security. Owner, privileged and migration connections are refused.');

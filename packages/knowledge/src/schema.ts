@@ -50,6 +50,14 @@ DO $policies$ BEGIN
     CREATE POLICY scope_isolation ON guidekit_knowledge.chunks USING(tenant_id=current_setting('guidekit.tenant_id',true) AND agent_id=current_setting('guidekit.agent_id',true) AND version::text=current_setting('guidekit.version',true)) WITH CHECK(tenant_id=current_setting('guidekit.tenant_id',true) AND agent_id=current_setting('guidekit.agent_id',true) AND version::text=current_setting('guidekit.version',true));
   END IF;
 END $policies$;
+-- A restrictive scope boundary also survives an accidentally broad permissive policy.
+DO $boundaries$ DECLARE table_name text; BEGIN
+ FOREACH table_name IN ARRAY ARRAY['versions','documents','chunks'] LOOP
+  IF NOT EXISTS(SELECT 1 FROM pg_policies WHERE schemaname='guidekit_knowledge' AND tablename=table_name AND policyname='scope_boundary') THEN
+   EXECUTE format('CREATE POLICY scope_boundary ON guidekit_knowledge.%I AS RESTRICTIVE USING(tenant_id=current_setting(''guidekit.tenant_id'',true) AND agent_id=current_setting(''guidekit.agent_id'',true) AND version::text=current_setting(''guidekit.version'',true)) WITH CHECK(tenant_id=current_setting(''guidekit.tenant_id'',true) AND agent_id=current_setting(''guidekit.agent_id'',true) AND version::text=current_setting(''guidekit.version'',true))',table_name);
+  END IF;
+ END LOOP;
+END $boundaries$;
 CREATE OR REPLACE FUNCTION guidekit_knowledge.reject_ready_mutation() RETURNS trigger LANGUAGE plpgsql SET search_path=pg_catalog,guidekit_knowledge AS $guard$
 BEGIN
  IF TG_TABLE_NAME='versions' THEN
@@ -75,8 +83,8 @@ export async function installPostgresKnowledgeSchema(options: { connectionString
   if (!/^[a-zA-Z_][a-zA-Z0-9_]{0,62}$/.test(options.runtimeRole)) fail('invalid_config', 'Invalid PostgreSQL knowledge runtime role.');
   const pool = new Pool({ connectionString: options.connectionString, max: 1, connectionTimeoutMillis: 10_000 });
   try {
-    const role = await pool.query('SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname=$1', [options.runtimeRole]);
-    if (role.rows.length !== 1 || role.rows[0].rolsuper || role.rows[0].rolbypassrls) fail('invalid_config', 'Knowledge runtime role must exist without superuser or BYPASSRLS privileges.');
+    const role = await pool.query('SELECT rolsuper,rolbypassrls,rolcreaterole,rolcreatedb FROM pg_roles WHERE rolname=$1', [options.runtimeRole]);
+    if (role.rows.length !== 1 || role.rows[0].rolsuper || role.rows[0].rolbypassrls || role.rows[0].rolcreaterole || role.rows[0].rolcreatedb) fail('invalid_config', 'Knowledge runtime role must exist without superuser, BYPASSRLS, CREATEROLE or CREATEDB privileges.');
     const client = await pool.connect();
     try {
       await client.query('BEGIN'); await client.query(POSTGRES_KNOWLEDGE_SCHEMA);
