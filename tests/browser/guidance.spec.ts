@@ -103,6 +103,49 @@ test('observed input moves the guide without stealing focus, and only verified h
   expect(JSON.stringify(requests)).not.toMatch(/Observed Name Private Marker|Observed Company Private Marker|private-guidance-marker/);
 });
 
+test('a visitor can keep a native select default by tabbing onward, while focus, guide controls and invalid values do not accept it', async ({ page }) => {
+  await openFixture(page); await askForGuide(page);
+  await nameField(page).fill('Default Selection Name'); await step(page, 2);
+  await companyField(page).fill('Default Selection Company'); await step(page, 3);
+  const status = page.locator('[data-guidekit-id="contact-status"]');
+  const submit = page.locator('[data-guidekit-id="create-contact"]');
+  await expect(status).toHaveValue('New'); await noManualNavigation(page);
+
+  // Focusing the current selection does not mean the visitor accepted it.
+  await status.focus(); await page.waitForTimeout(quietWindow); await step(page, 3);
+  await guide(page).getByRole('button', { name: 'Pause guide', exact: true }).click();
+  await page.waitForTimeout(quietWindow); await step(page, 3);
+  await guide(page).getByRole('button', { name: 'Resume guide', exact: true }).click();
+  await page.waitForTimeout(quietWindow); await step(page, 3);
+  await status.focus();
+  await guide(page).getByRole('button', { name: 'Open chat', exact: true }).click();
+  await expect(chat(page)).toBeVisible(); await expect(guide(page)).toBeHidden();
+  await page.getByRole('button', { name: 'Resume guide', exact: true }).click();
+  await page.waitForTimeout(quietWindow); await step(page, 3);
+
+  // Native and host-declared invalidity both block acceptance even when the
+  // visitor deliberately tabs to the next real page control.
+  await status.evaluate(select => (select as HTMLSelectElement).setCustomValidity('Choose a valid status.'));
+  await status.focus(); await status.press('Tab'); await expect(submit).toBeFocused();
+  expect(await status.evaluate(select => (select as HTMLSelectElement).validity.valid)).toBe(false);
+  await page.waitForTimeout(quietWindow); await step(page, 3);
+  await status.evaluate(select => { (select as HTMLSelectElement).setCustomValidity(''); select.setAttribute('aria-invalid', 'true'); });
+  await status.focus(); await status.press('Tab'); await expect(submit).toBeFocused();
+  await page.waitForTimeout(quietWindow); await step(page, 3);
+
+  await status.evaluate(select => select.removeAttribute('aria-invalid'));
+  await status.focus(); await page.waitForTimeout(quietWindow); await step(page, 3);
+  await status.press('Tab'); await step(page, 4); await expect(submit).toBeFocused();
+  await expect(status).toHaveValue('New'); await noManualNavigation(page);
+  await expect(page.locator('#contacts-list tr')).toHaveCount(0);
+  await submit.click();
+  await expect(page.locator('#contacts-list tr')).toHaveCount(1);
+  await expect(page.locator('#contacts-list')).toContainText('Default Selection Name');
+  await expect(page.locator('#contacts-list .status-pill')).toHaveText('New');
+  await expect(page.locator('#form-result')).toContainText('created and verified');
+  await expect(guide(page)).toHaveCount(0); await expect(chat(page)).toBeVisible();
+});
+
 test('guidance follows edits automatically while pause, resume and stop stay under visitor control', async ({ page }) => {
   await openFixture(page); await askForGuide(page);
   await noManualNavigation(page);
