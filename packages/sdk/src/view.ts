@@ -5,6 +5,8 @@ import { BeatScheduler, type SpeechEvents } from './beats';
 import { MotionDirector, type MotionPoint } from './motion';
 import type { VoiceSettingsHandlers, VoiceSettingsState } from './voices';
 import { GuidedReveal, revealedBounds, targetRevealed } from './scroll';
+import { isSafeTarget } from './context';
+import { placeGuidanceLabel, type PlacementBox } from './placement';
 import { instructionDuration, instructionGraphemes } from './instruction';
 
 const styles = `
@@ -19,8 +21,8 @@ const styles = `
 .messages{padding:20px 18px 8px;overflow-y:auto;flex:1;overscroll-behavior:contain;scrollbar-width:thin;background:linear-gradient(#fafbfe,#fff 100px)}.message{margin-bottom:20px;font-size:13px;overflow-wrap:anywhere}.message.user{background:#eef2ff;padding:11px 14px;border-radius:14px 14px 3px 14px;margin-left:32px}.message.assistant{padding-right:8px}.author{text-transform:uppercase;letter-spacing:.1em;font-weight:700;font-size:9px;color:#71809c;margin-bottom:7px}.content{white-space:pre-wrap}.message.error{border-left:3px solid #df7552;padding-left:12px;color:#74452f}.sources{margin-top:12px;font-size:11px;color:#60708d}.sources summary{cursor:pointer;width:fit-content;padding:3px 0}.source{margin:9px 0;padding:10px;background:#f5f7fc;border-radius:8px}.source strong{display:block;margin-bottom:4px;color:#35425b}.source blockquote{margin:0;white-space:pre-wrap}
 .status{min-height:29px;padding:3px 18px;color:#6b7891;font-size:11px;overflow-wrap:anywhere}.status[data-error=true]{color:#a1422e}.composer{padding:0 14px 12px}.input-box{border:1px solid #dfe5f0;border-radius:13px;background:#fff;padding:10px 10px 8px;transition:border-color .2s}.input-box:focus-within{border-color:#96aaf8;box-shadow:0 0 0 3px #365cf509}textarea{display:block;width:100%;height:50px;max-height:100px;border:0;resize:none;outline:none!important;background:transparent;color:#17213b;font-size:13px;padding:0 3px;line-height:1.5}textarea::placeholder{color:#8b95a8}.input-tools{display:flex;align-items:center;gap:6px}.hint{flex:1;font-size:10px;color:#8691a5}.send{width:32px;height:32px;border-radius:9px;color:#fff;background:var(--gk-accent);display:grid;place-items:center}.stop{font-size:11px;background:#fff2ed;color:#a54428;border-radius:8px;padding:8px 10px}.footer{font-size:9px;color:#8b95a8;text-align:center;padding:0 12px 11px}.footer b{font-weight:650;color:#66748d}
 .action{margin-top:13px;border:1px solid #dfe5f0;border-radius:12px;overflow:hidden;background:#fff}.action-main{padding:13px}.action-title{font-weight:700;font-size:12px}.action-reason{font-size:12px;color:#627089;margin:5px 0 0;white-space:pre-wrap}.action pre{background:#f5f7fb;border-radius:7px;padding:10px;max-height:150px;overflow:auto;font:11px/1.5 ui-monospace,SFMono-Regular,monospace;white-space:pre-wrap;overflow-wrap:anywhere}.action-foot{border-top:1px solid #edf0f7;padding:10px 12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}.primary,.secondary{font-size:12px;font-weight:600;border-radius:8px;padding:8px 11px}.primary{background:var(--gk-accent);color:white}.secondary{background:#f0f3fa;color:#4b5a75}.action-state{font-size:11px;color:#64718a}.action-state[data-success=true]{color:#16815b}.guide-start{margin-top:12px;display:flex;align-items:center;gap:6px;width:fit-content}
-.highlight{position:fixed;border:2px solid var(--gk-accent);border-radius:10px;box-shadow:0 0 0 5px #365cf51a,0 0 0 9999px #111d3a08;pointer-events:none;transform-origin:top left}.guide{pointer-events:auto;position:fixed;width:290px;max-width:calc(100vw - 24px);background:#fff;border:1px solid #dbe3f6;box-shadow:0 12px 45px #17213b26;border-radius:16px;padding:14px;animation:gk-appear .18s ease-out}.guide-header{display:flex;align-items:center;justify-content:space-between;gap:8px}.guide-label{color:var(--gk-accent);font-size:11px;font-weight:700}.guide p{font-size:13px;margin:10px 0 9px;white-space:pre-wrap;overflow-wrap:anywhere;overflow:auto}.guide .icon{width:25px;height:25px}.guide-hint{font-size:10px;line-height:1.4;color:#71809a;margin:8px 0 12px}.guide-tools{display:flex;gap:4px}.guide-progress{display:block;width:100%;height:3px;border:0;border-radius:3px;overflow:hidden;margin-top:9px;appearance:none;accent-color:var(--gk-accent)}.guide-progress::-webkit-progress-bar{background:#edf0f7}.guide-progress::-webkit-progress-value{background:var(--gk-accent);transition:width .18s}.guide-progress::-moz-progress-bar{background:var(--gk-accent)}.guide[data-paused=true] .guide-label{color:#77839b}.guide[data-waiting=true] .guide-hint{color:#926144}.guide-resume{display:block;margin:6px 18px 12px;width:calc(100% - 36px);text-align:left}.guide-pause{font-size:11px;padding:7px 8px;background:transparent;color:#66748c;border-radius:7px}.guide-pause:hover{background:#f0f3fa}
-.guide.guide-expressive{width:248px;padding:0;overflow:hidden;isolation:isolate;animation:none;border:1px solid transparent;background:linear-gradient(#fff,#fff) padding-box,linear-gradient(125deg,#b7cdffb3,#e5dcff,#c4d9ffb3) border-box;box-shadow:0 14px 40px #17213b1c,0 3px 9px #17213b0b,-3px -2px 15px #8fb7ff21,3px 3px 17px #c9b6ff24}.guide-body{position:relative;padding:14px;display:flex;flex-direction:column;overflow:auto;overscroll-behavior:contain;scrollbar-width:thin}.guide-body>.guide-header,.guide-body>.guide-progress,.guide-body>.guide-hint{flex-shrink:0}.guide-expressive .guide-label{display:inline-flex;align-items:baseline;gap:4px;white-space:nowrap;flex-shrink:0}.guide-step-number{display:inline-block;font-weight:750;text-shadow:0 0 10px #8fb7ff55}.guide-step-total{color:#71809a;font-weight:500}.guide-expressive .guide-tools{flex-shrink:0;align-items:center}.guide-expressive .guide-tools .guide-pause{white-space:nowrap;padding:4px 6px;font-size:10px;line-height:17px}.guide-expressive .guide-hint{margin-bottom:0}.guide-expressive .guide-instruction{line-height:1.6;min-height:1.6em;max-height:min(260px,max(48px,calc(100dvh - 220px)));flex-shrink:1;scrollbar-width:thin;overscroll-behavior:contain;color:#17213b}.guide-instruction:empty{margin-top:10px}.guide-expressive[data-gk-typing=true] .guide-instruction::after{content:"";display:inline-block;height:1em;width:2px;vertical-align:-.12em;margin-left:3px;border-radius:2px;background:#8da7de;animation:gk-caret .65s ease-in-out 2}.guide-instruction-accessible{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}.guide-skip{align-self:flex-start;margin:-1px 0 2px;padding:3px 0;background:transparent;color:#687b9e;font-size:10px;font-weight:600;border-radius:3px}.guide-skip:hover{color:#334b77}.guide-expressive .guide-tools button{transition:background .15s,color .15s,box-shadow .15s}.guide-expressive .primary:hover{box-shadow:0 3px 10px color-mix(in srgb,var(--gk-accent) 24%,transparent)}.guide-expressive .secondary:hover{background:#e7edf7}.guide-rim{position:absolute;inset:-1px;z-index:2;pointer-events:none;border-radius:inherit;padding:1px;background:linear-gradient(115deg,transparent 20%,#8fb7ff 40%,#d7c6ff 52%,transparent 72%);background-size:260% 100%;opacity:0;mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);mask-composite:exclude}.guide-expressive[data-gk-typing=true] .guide-rim{animation:gk-rim-sweep 1.15s ease-out 1}.guide-measure{position:fixed;visibility:hidden;pointer-events:none;inset:0 auto auto 0;white-space:pre;width:max-content;max-width:none;font-size:13px;line-height:1.6}.guide-expressive[data-paused=true]{box-shadow:0 10px 30px #17213b16,0 0 12px #a7baff15}@keyframes gk-rim-sweep{0%{background-position:100% 0;opacity:0}18%{opacity:.9}100%{background-position:0 0;opacity:0}}@keyframes gk-caret{0%,100%{opacity:.25}50%{opacity:1}}
+.highlight{position:fixed;border:2px solid var(--gk-guide-ink,#b57500);border-radius:10px;pointer-events:none}.guide{pointer-events:auto;position:fixed;width:290px;max-width:calc(100vw - 24px);background:#fff9e8;border:1px solid #dfb66b;box-shadow:0 8px 26px #5d42151c;border-radius:16px;padding:12px}.guide p{font-size:13px;margin:8px 0;white-space:pre-wrap;overflow-wrap:anywhere;overflow:auto}.guide-label{font-size:10px;font-weight:600;color:#6d6659;white-space:nowrap}.guide-step-number{font-weight:750;color:#55401a}.guide-step-total{color:#827765;font-weight:500}.guide-tools{display:flex;align-items:center;gap:3px}.guide .icon{width:25px;height:25px;color:#74664d}.guide-pause{font-size:10px;line-height:17px;padding:4px 6px;white-space:nowrap;background:transparent;color:#6e6047;border-radius:7px}.guide-pause:hover,.guide .icon:hover{background:#f5ead0;color:#493718}.guide-resume{display:block;margin:6px 18px 12px;width:calc(100% - 36px);text-align:left}
+.guide.guide-expressive{width:80px;padding:0;border:0;background:none;box-shadow:none;overflow:visible;pointer-events:none;animation:none;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;--gk-guide-text:#352707}.guide-surface{position:relative;width:100%;height:100%;pointer-events:auto;border:1px solid #d9a13d;border-radius:18px;overflow:hidden;background:linear-gradient(180deg,#fff9e8 0%,#ffe9b4 43%,#ffdb91 100%);box-shadow:inset 0 1px 0 #fffdf3,0 4px 12px #66430c26,0 0 18px #f1b73926;transition:opacity .12s ease-out}.guide[data-gk-arrival=pending] .guide-surface{opacity:0;pointer-events:none}.guide-body{position:relative;padding:9px 12px;overflow:auto;overscroll-behavior:contain;scrollbar-width:thin}.guide-expressive .guide-instruction{font-size:13px;line-height:1.45;font-weight:600;color:var(--gk-guide-text);margin:0;min-height:1.45em;max-height:min(220px,max(36px,calc(100dvh - 112px)));white-space:pre-wrap;overflow-wrap:anywhere;overflow:auto;scrollbar-width:thin;overscroll-behavior:contain}.guide-expressive[data-gk-typing=true] .guide-instruction::after{content:"";display:inline-block;height:.95em;width:2px;vertical-align:-.1em;margin-left:3px;border-radius:2px;background:#9c6f20;animation:gk-caret .65s ease-in-out 2}.guide-instruction-accessible{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}.guide-skip{margin:0;padding:4px 6px;background:transparent;color:#806021;font-size:10px;line-height:17px;white-space:nowrap;font-weight:600;border-radius:7px}.guide-skip:hover{color:#49310a}.guide-toolbar{position:fixed;right:12px;bottom:12px;pointer-events:auto;display:flex;align-items:center;gap:8px;max-width:calc(100vw - 24px);padding:5px 7px 5px 11px;border:1px solid #e1d8c5;border-radius:30px;background:#fffdf8f5;box-shadow:0 4px 14px #3f352516}.guide-toolbar .guide-tools{flex-wrap:wrap;min-width:0}.guide-toolbar button{transition:background .15s,color .15s}.guide-assist{position:absolute;right:0;bottom:calc(100% + 8px);width:260px;max-width:calc(100vw - 24px);max-height:calc(100dvh - 76px);overflow:auto;overscroll-behavior:contain;background:#fffdf7;border:1px solid #e1d8c5;border-radius:12px;padding:10px 12px;box-shadow:0 5px 18px #473a211c;font-size:11px;line-height:1.5;color:#756747}.guide-hint{font-size:11px;line-height:1.5;color:#756747;margin:0}.guide[data-paused=true] .guide-surface{box-shadow:0 3px 10px #66430c1c}.guide-measure{position:fixed;visibility:hidden;pointer-events:none;inset:0 auto auto 0;white-space:pre;width:max-content;max-width:none;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:13px;line-height:1.45;font-weight:600}.guide-rim{position:absolute;inset:-1px;pointer-events:none;border-radius:inherit;padding:1px;background:linear-gradient(110deg,transparent 15%,#fff6cf 40%,#f6b94b 53%,transparent 75%);background-size:240% 100%;opacity:0;mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);mask-composite:exclude}.guide-expressive[data-gk-typing=true] .guide-rim{animation:gk-rim-sweep 1.15s ease-out 1}@keyframes gk-rim-sweep{0%{background-position:100% 0;opacity:0}18%{opacity:.9}100%{background-position:0 0;opacity:0}}@keyframes gk-caret{0%,100%{opacity:.25}50%{opacity:1}}
 @media(max-width:520px){.panel{right:12px;bottom:12px;max-width:calc(100vw - 24px);max-height:calc(100dvh - 24px);width:390px}.launcher{right:16px;bottom:16px}.guide{width:270px}.hint{font-size:9px}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
 `;
@@ -31,6 +33,7 @@ const icons = {
   mic: '<rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2m-7 9v3m-4 0h8"/>',
   sound: '<path d="m11 4-6 5H2v6h3l6 5V4Zm4 4a6 6 0 0 1 0 8m3-11a10 10 0 0 1 0 14"/>',
   guide: '<path d="m4 3 7 18 2-8 8-2L4 3Z"/>',
+  help: '<circle cx="12" cy="12" r="9"/><path d="M9.5 8.5a2.5 2.5 0 0 1 4.8 1c0 1.8-2.3 2-2.3 3.5m0 3h.01"/>',
   chat: '<path d="M21 11.5a8.4 8.4 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.4 8.4 0 0 1-3.8-.9L3 21l1.9-5.7a8.4 8.4 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.4 8.4 0 0 1 3.8-.9h.5a8.5 8.5 0 0 1 8 8v.5Z"/>'
 };
 function icon(name: keyof typeof icons): SVGSVGElement {
@@ -56,6 +59,8 @@ export interface ActionCard {
   retry(message: string, handler: () => void): void;
 }
 export interface GuideHooks {
+  /** Existing captured public targets only; rectangles are revalidated locally. */
+  nearbyTargets?(): readonly HTMLElement[];
   state?(state: GuidanceState): void;
   progress?(index: number, step: ModelPlan['steps'][number], evidence: 'observed' | 'manual' | 'host_verified'): void;
   finish?(result: GuidanceResult): boolean;
@@ -266,34 +271,53 @@ export class View {
     if (this.opened && this.cursorDocked && this.motion.location !== 'flight') this.alignDock(false, true);
     this.clearGuide(false); if (!steps.length) return;
     this.departDock(); this.motion.setPaused(false); this.motion.setVisible(true);
-    const motion = this.motion, card = element('section', 'guide guide-expressive'), body = element('div', 'guide-body'), beats = new BeatScheduler();
+    const motion = this.motion, card = element('section', 'guide guide-expressive'), surface = element('div', 'guide-surface'), body = element('div', 'guide-body'), beats = new BeatScheduler();
     card.setAttribute('role', 'region'); card.setAttribute('aria-label', 'Visual guidance');
-    const head = element('div', 'guide-header'), label = element('span', 'guide-label'), stepNumber = element('span', 'guide-step-number'), stepTotal = element('span', 'guide-step-total'), tools = element('div', 'guide-tools');
+    const toolbar = element('div', 'guide-toolbar'), label = element('span', 'guide-label'), stepNumber = element('span', 'guide-step-number'), stepTotal = element('span', 'guide-step-total'), tools = element('div', 'guide-tools');
     label.setAttribute('aria-hidden', 'true'); label.append(document.createTextNode('Step '), stepNumber, document.createTextNode(' '), stepTotal);
     const pause = button('Pause', 'guide-pause', () => { this.handlers.guidePause?.(); session.setPaused(!state?.paused); }); pause.setAttribute('aria-label', 'Pause guide');
-    tools.append(pause, iconButton('Open chat', 'chat', () => this.open()), iconButton('Stop visual guidance', 'close', () => this.stopGuide())); head.append(label, tools);
-    const progress = element('progress', 'guide-progress'); progress.setAttribute('aria-label', 'Guide progress');
+    let expandedHelp = false;
+    const help = iconButton('Show guidance help', 'help', () => { expandedHelp = !expandedHelp; updateHelp(); schedulePosition(); }); help.setAttribute('aria-expanded', 'false');
+    tools.append(pause, help, iconButton('Open chat', 'chat', () => this.open()), iconButton('Stop visual guidance', 'close', () => this.stopGuide())); toolbar.append(label, tools);
     // The visual prefix is decorative. Assistive technology receives the whole
     // instruction once, without a live announcement for each typed character.
     const text = element('p', 'guide-instruction'), accessibleText = element('span', 'guide-instruction-accessible'), hint = element('div', 'guide-hint');
     text.setAttribute('aria-hidden', 'true'); accessibleText.setAttribute('role', 'status'); accessibleText.setAttribute('aria-live', 'polite'); accessibleText.setAttribute('aria-atomic', 'true'); hint.setAttribute('role', 'status');
-    const skip = button('Show full instruction', 'guide-skip', () => finishInstruction()); skip.hidden = true;
+    const skip = button('Show full', 'guide-skip', () => finishInstruction()); skip.setAttribute('aria-label', 'Show full instruction'); skip.hidden = true; tools.insertBefore(skip, pause);
     const measure = element('span', 'guide-measure'); measure.setAttribute('aria-hidden', 'true');
     const rim = element('span', 'guide-rim'); rim.setAttribute('aria-hidden', 'true');
-    body.append(head, progress, text, accessibleText, skip, hint); card.append(body, rim); this.shadow.append(card, measure);
+    const assist = element('div', 'guide-assist'); assist.hidden = true; assist.append(hint); toolbar.append(assist);
+    body.append(text, accessibleText); surface.append(body, rim); card.append(surface, toolbar); this.shadow.append(card, measure);
     let state: GuidanceState | null = null, disposed = false, frame = 0, lastIndex = -1, lastNarrated = -1, narration = 0, animateNext = false;
     let cardAnimation: Animation | null = null, observed: HTMLElement | null = null, markReady = false, lastPresented = -1, hasPresented = false, fromChat = true, presentedTarget: HTMLElement | null = null, motionUntil = 0, lastBox = '';
     let reveal: GuidedReveal | null = null, revealTarget: HTMLElement | null = null, revealIndex = -1;
-    let labelAnimation: Animation | null = null, labelPending = false;
+    let labelAnimation: Animation | null = null, labelPending = false, arrivalReady = false, presentationGeneration = 0;
     let instructionFrame = 0, instructionStarted = false, instructionStart = 0, instructionCommit = 0, instructionCount = -1, instruction = '', graphemes: string[] | null = null;
-    let sizeDirty = true, cardWidth = 248, cardHeight = 0, placementSide = -1, placement = '';
+    let sizeDirty = true, cardWidth = 80, cardHeight = 0, placementSide = -1, placement = '';
     card.dataset.gkScrollState = 'ready';
     card.dataset.gkTyping = 'false';
+    card.dataset.gkArrival = 'pending';
     const motionPreference = matchMedia('(prefers-reduced-motion: reduce)');
     const reduced = () => motionPreference.matches;
     const viewport = () => ({ left: window.visualViewport?.offsetLeft ?? 0, top: window.visualViewport?.offsetTop ?? 0, width: window.visualViewport?.width ?? document.documentElement.clientWidth, height: window.visualViewport?.height ?? window.innerHeight });
     const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(Math.max(min, max), value));
     const queueSize = () => { sizeDirty = true; if (!disposed && !document.hidden && !this.guideChatOpen) schedulePosition(); };
+    const updateHelp = () => {
+      const interrupted = !!state && (state.paused || state.waiting || state.confirmationPending || state.hostPending || state.attention);
+      assist.hidden = !expandedHelp && !interrupted;
+      help.setAttribute('aria-expanded', String(expandedHelp)); help.setAttribute('aria-label', expandedHelp ? 'Hide guidance help' : 'Show guidance help');
+    };
+    const updateGuideInk = (target: HTMLElement | null) => {
+      // Read only authored CSS background colors on bounded local ancestry.
+      // No screenshots, text, values or screenshot-like sampling leave the page.
+      let dark = false;
+      for (let node = target, depth = 0; node && depth < 12; node = node.parentElement, depth++) {
+        const color = getComputedStyle(node).backgroundColor.match(/^rgba?\(\s*([\d.]+)[, ]+([\d.]+)[, ]+([\d.]+)(?:\s*[,/]\s*([\d.]+))?\s*\)$/);
+        if (!color || Number(color[4] ?? 1) < .85) continue;
+        dark = (Number(color[1]) * .2126 + Number(color[2]) * .7152 + Number(color[3]) * .0722) / 255 < .4; break;
+      }
+      for (const [name, value] of [['--gk-guide-ink', dark ? '#ffca54' : '#a96900'], ['--gk-guide-badge', '#f2b544'], ['--gk-guide-text', '#352707']]) if (this.host.style.getPropertyValue(name) !== value) this.host.style.setProperty(name, value!);
+    };
     const settleStepLabel = () => {
       labelAnimation?.cancel(); labelAnimation = null; labelPending = false; label.style.opacity = '1'; card.dataset.gkStepState = 'presented';
     };
@@ -319,7 +343,7 @@ export class View {
       else queueSize();
     };
     const startInstruction = () => {
-      if (disposed || !state || state.paused || this.guideChatOpen || document.hidden || reveal?.active) return;
+      if (disposed || !state || !arrivalReady || state.paused || this.guideChatOpen || document.hidden || reveal?.active) return;
       presentStepLabel();
       if (instructionStarted) return;
       instructionStarted = true;
@@ -343,19 +367,51 @@ export class View {
     const measureCard = (area: ReturnType<typeof viewport>) => {
       if (!sizeDirty) return false;
       sizeDirty = false;
-      const maximum = Math.max(1, Math.min(360, area.width - 24));
-      const bodyStyle = getComputedStyle(body), headStyle = getComputedStyle(head), cardStyle = getComputedStyle(card);
-      const chromeWidth = Array.from(head.children).reduce((width, child) => width + child.getBoundingClientRect().width, 0) + (parseFloat(headStyle.columnGap) || 0) + parseFloat(bodyStyle.paddingLeft) + parseFloat(bodyStyle.paddingRight) + parseFloat(cardStyle.borderLeftWidth) + parseFloat(cardStyle.borderRightWidth);
-      const minimum = Math.min(Math.max(248, Math.ceil(chromeWidth)), maximum);
+      const maximum = Math.max(1, Math.min(320, area.width - 24)), minimum = Math.min(80, maximum);
       // Only the current visual prefix participates in measurement. There is no
       // hidden final paragraph reserving its eventual width or height.
       measure.textContent = text.textContent;
-      const width = Math.ceil(clamp(measure.getBoundingClientRect().width + 32, minimum, maximum));
+      const width = Math.ceil(clamp(measure.getBoundingClientRect().width + 28, minimum, maximum));
       body.style.width = `${Math.max(1, width - 2)}px`; body.style.maxHeight = `${Math.max(100, area.height - 26)}px`;
       const height = Math.ceil(body.getBoundingClientRect().height + 2);
       const changed = width !== cardWidth || height !== cardHeight;
       cardWidth = width; cardHeight = height; card.style.width = `${width}px`; card.style.height = `${height}px`;
       return changed;
+    };
+    let obstacleCache: { target: HTMLElement; key: string; at: number; boxes: PlacementBox[] } | null = null;
+    const publicObstacles = (current: HTMLElement, area: ReturnType<typeof viewport>): PlacementBox[] => {
+      const center = current.getBoundingClientRect(), key = `${center.left},${center.top},${center.width},${center.height},${area.left},${area.top},${area.width},${area.height}`, now = performance.now();
+      if (obstacleCache?.target === current && obstacleCache.key === key && now - obstacleCache.at < 250) return obstacleCache.boxes;
+      const elements = new Set<HTMLElement>();
+      for (const step of steps.slice(0, 24)) { const element = resolve(step.targetId); if (element) elements.add(element); }
+      try { for (const element of hooks?.nearbyTargets?.().slice(0, 24) ?? []) elements.add(element); } catch { /* Optional host geometry must not stop guidance. */ }
+      const boxes: PlacementBox[] = [];
+      for (const element of elements) {
+        if (element === current || !isSafeTarget(element)) continue;
+        const box = revealedBounds(element);
+        if (!box) continue;
+        boxes.push({ left: box.left, top: box.top, width: box.right - box.left, height: box.bottom - box.top });
+      }
+      const result = boxes.sort((a, b) => Math.hypot(a.left + a.width / 2 - center.left, a.top + a.height / 2 - center.top) - Math.hypot(b.left + b.width / 2 - center.left, b.top + b.height / 2 - center.top)).slice(0, 22);
+      obstacleCache = { target: current, key, at: now, boxes: result }; return result;
+    };
+    const placeToolbar = (area: ReturnType<typeof viewport>, target: PlacementBox | null, nearby: PlacementBox[]) => {
+      toolbar.style.maxWidth = `${Math.max(1, area.width - 24)}px`;
+      assist.style.maxWidth = `${Math.max(1, area.width - 24)}px`; assist.style.maxHeight = `${Math.max(48, area.height - 80)}px`;
+      const width = toolbar.offsetWidth, height = toolbar.offsetHeight;
+      const corners = [[area.left + area.width - width - 12, area.top + area.height - height - 12], [area.left + 12, area.top + area.height - height - 12], [area.left + area.width - width - 12, area.top + 12], [area.left + 12, area.top + 12]];
+      let best = Infinity, picked = corners[0]!;
+      for (const [index, candidate] of corners.entries()) {
+        const box = { left: candidate[0]!, top: candidate[1]!, width, height };
+        const cover = (obstacle: PlacementBox) => Math.max(0, Math.min(box.left + width, obstacle.left + obstacle.width + 8) - Math.max(box.left, obstacle.left - 8)) * Math.max(0, Math.min(box.top + height, obstacle.top + obstacle.height + 8) - Math.max(box.top, obstacle.top - 8));
+        const score = (target ? cover(target) * 10000 : 0) + nearby.reduce((sum, obstacle) => sum + cover(obstacle), 0) * 3000 + index;
+        if (score < best) { best = score; picked = candidate; }
+      }
+      toolbar.style.left = `${picked[0]}px`; toolbar.style.top = `${picked[1]}px`; toolbar.style.right = 'auto'; toolbar.style.bottom = 'auto';
+      const below = picked[1]! < area.top + area.height / 2;
+      assist.style.top = below ? 'calc(100% + 8px)' : 'auto'; assist.style.bottom = below ? 'auto' : 'calc(100% + 8px)';
+      const alignLeft = picked[0]! < area.left + area.width / 2; assist.style.left = alignLeft ? '0' : 'auto'; assist.style.right = alignLeft ? 'auto' : '0';
+      return { left: picked[0]!, top: picked[1]!, width, height };
     };
     const position = () => {
       frame = 0; if (disposed || this.guideChatOpen || !state) return;
@@ -365,10 +421,13 @@ export class View {
       card.style.maxHeight = `${Math.max(100, height - edge * 2)}px`;
       const current = state.target ? resolve(state.step.targetId) : null;
       if (current !== state.target) { session.refresh(); return; }
+      updateGuideInk(current);
       beginReveal();
       const rect = current?.getBoundingClientRect(), clipped = current ? revealedBounds(current) : null;
       const targetVisible = !!current && !!clipped && targetRevealed(current);
       if (!state.paused && !state.waiting) hint.textContent = reveal?.active ? 'Scrolling to this step…' : targetVisible ? state.hint : 'Scroll to this control to continue. I’ll point when it’s visible.';
+      updateHelp();
+      const nearby = current ? publicObstacles(current, area) : [], toolbarBox = placeToolbar(area, targetVisible && rect ? rect : null, nearby);
       lastBox = rect ? `${rect.left},${rect.top},${rect.width},${rect.height}` : '';
       let cardLeft = area.left + width - cardWidth - edge, cardTop = area.top + height - cardHeight - edge;
       if (rect && clipped && !reveal?.active) {
@@ -376,26 +435,25 @@ export class View {
         const right = clamp(clipped.right + 5, left, area.left + width - 3), bottom = clamp(clipped.bottom + 5, top, area.top + height - 3);
         const visible = targetVisible && right - left >= .25 && bottom - top >= .25;
         const box = { left, top, width: right - left, height: bottom - top };
-        if (visible) { startInstruction(); narrate(); }
+        if (visible) narrate();
         if (markReady && visible) {
           if (lastPresented !== state.index || presentedTarget !== current) {
-            motion.present({ id: `step-${state.index}-${state.step.targetId}`, kind: state.step.annotation ?? 'target', box, index: state.index + 1 }, { animate: !reduced(), first: fromChat || !hasPresented });
-            fromChat = false; hasPresented = true; lastPresented = state.index; presentedTarget = current;
+            const index = state.index, target = current, generation = ++presentationGeneration;
+            // Set ownership before present(): reduced motion can complete now.
+            lastPresented = index; presentedTarget = current;
+            motion.present({ id: `step-${index}-${state.step.targetId}`, kind: state.step.annotation ?? 'target', box, index: index + 1 }, { animate: !reduced(), first: fromChat || !hasPresented, onReady: () => {
+              if (disposed || !target || !isSafeTarget(target) || generation !== presentationGeneration || state?.index !== index || state.target !== target || state.paused || this.guideChatOpen || document.hidden || resolve(state.step.targetId) !== target) return;
+              arrivalReady = true; card.dataset.gkArrival = 'ready'; schedulePosition();
+            } });
+            fromChat = false; hasPresented = true;
           } else motion.updateBounds(box);
         }
+        if (visible && arrivalReady) startInstruction();
         motion.setVisible(visible && !state.paused);
-        const candidates = [[rect.right + 14, rect.top], [rect.left - cardWidth - 14, rect.top], [rect.left, rect.bottom + 14], [rect.left, rect.top - cardHeight - 14]];
-        let best = Infinity;
-        let chosenSide = -1;
-        for (const [side, candidate] of candidates.entries()) {
-          const x = clamp(candidate[0]!, area.left + edge, area.left + width - cardWidth - edge), y = clamp(candidate[1]!, area.top + edge, area.top + height - cardHeight - edge);
-          const overlap = Math.max(0, Math.min(x + cardWidth, right + 7) - Math.max(x, left - 7)) * Math.max(0, Math.min(y + cardHeight, bottom + 7) - Math.max(y, top - 7));
-          // Keep the same anchor while text grows. Move to another side only
-          // when it meaningfully improves visibility or prevents occlusion.
-          const score = overlap * 1000 + Math.hypot(x - candidate[0]!, y - candidate[1]!) + (placementSide >= 0 && side !== placementSide ? 90 : 0);
-          if (score < best) { best = score; cardLeft = x; cardTop = y; chosenSide = side; }
-        }
-        placementSide = chosenSide;
+        const badge = motion.element.querySelector('[data-gk-step-badge]')?.getBoundingClientRect();
+        const reserved = [toolbarBox, ...(badge?.width && badge.height ? [{ left: badge.left - 3, top: badge.top - 3, width: badge.width + 6, height: badge.height + 6 }] : []), ...nearby];
+        const position = placeGuidanceLabel(rect, { width: cardWidth, height: cardHeight }, area, reserved, placementSide);
+        cardLeft = position.left; cardTop = position.top; placementSide = position.anchor;
       } else motion.setVisible(false);
       card.style.left = `${cardLeft}px`; card.style.top = `${cardTop}px`;
       const destination = `${cardLeft},${cardTop},${cardWidth},${cardHeight}`;
@@ -421,11 +479,11 @@ export class View {
       }
     };
     const schedulePosition = (animate = false) => { animateNext ||= animate; if (!frame && !disposed) frame = requestAnimationFrame(position); };
-    const reposition = () => { cardAnimation?.cancel(); sizeDirty = true; schedulePosition(); };
+    const reposition = () => { obstacleCache = null; cardAnimation?.cancel(); sizeDirty = true; schedulePosition(); };
     const hostMotion = (event: Event) => {
       if (event.target instanceof Element && state?.target && event.target.contains(state.target)) { motionUntil = performance.now() + 10000; reposition(); }
     };
-    const visibility = () => { if (document.hidden) { settlePresentation(); cancelAnimationFrame(frame); frame = 0; } if (this.cursorDocked) return; if (document.hidden) { reveal?.cancel(); motion.setVisible(false); } else schedulePosition(); };
+    const visibility = () => { if (document.hidden) { ++presentationGeneration; settlePresentation(); cancelAnimationFrame(frame); frame = 0; } if (this.cursorDocked) return; if (document.hidden) { reveal?.cancel(); motion.setVisible(false); } else schedulePosition(); };
     const preferenceChanged = () => { if (reduced()) settlePresentation(); sizeDirty = true; schedulePosition(); };
     const narrate = () => {
       if (!state || state.paused || state.waiting || reveal?.active || lastNarrated === state.index || this.guideChatOpen) return;
@@ -467,7 +525,7 @@ export class View {
     }, 250);
     const resize = new ResizeObserver(entries => { if (entries.some(entry => entry.target !== card)) sizeDirty = true; schedulePosition(); });
     resize.observe(document.documentElement); resize.observe(card); resize.observe(body);
-    const mutations = new MutationObserver(records => { if (records.some(record => !(record.target instanceof Element && record.target.closest('[data-guidekit-root]')))) schedulePosition(); });
+    const mutations = new MutationObserver(records => { if (records.some(record => !(record.target instanceof Element && record.target.closest('[data-guidekit-root]')))) { obstacleCache = null; schedulePosition(); } });
     mutations.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['style', 'class', 'hidden', 'open'] });
     const session = new GuidanceSession(steps, resolve, {
       onUpdate: update => {
@@ -478,15 +536,16 @@ export class View {
         // Geometry updates and manual-scroll interruptions never rearm it.
         if (resuming && card.dataset.gkScrollState === 'cancelled') { revealTarget = null; revealIndex = -1; }
         const ownsMotion = !this.guideChatOpen && !this.cursorDocked;
-        if (changedStep || changedTarget || update.waiting) { reveal?.cancel(); ++narration; markReady = false; lastPresented = -1; lastNarrated = -1; beats.cancel(); if (ownsMotion) motion.erase({ animate: false, preserveCursor: true }); this.handlers.guidePause?.(); }
+        if (changedStep || changedTarget || update.waiting) { reveal?.cancel(); ++narration; ++presentationGeneration; markReady = false; lastPresented = -1; lastNarrated = -1; beats.cancel(); if (ownsMotion) motion.erase({ animate: false, preserveCursor: true }); this.handlers.guidePause?.(); }
         const focusFirst = lastIndex < 0 && (document.activeElement === this.host || document.activeElement === document.body);
         stepNumber.textContent = String(update.index + 1); stepTotal.textContent = `of ${update.total}`; hint.textContent = update.hint;
+        if (changedStep || changedTarget) { arrivalReady = false; card.dataset.gkArrival = 'pending'; }
         if (changedStep) { prepareStepLabel(); prepareInstruction(update.step.text); }
         if (update.paused || update.waiting) settlePresentation();
         sizeDirty = true;
-        progress.max = update.total; progress.value = update.completed;
         pause.textContent = update.paused ? 'Resume' : 'Pause'; pause.setAttribute('aria-label', update.paused ? 'Resume guide' : 'Pause guide');
         card.dataset.paused = String(update.paused); card.dataset.waiting = String(update.waiting); if (ownsMotion) { motion.setPaused(update.paused); motion.element.style.opacity = update.paused ? '.45' : '1'; }
+        updateHelp();
         if (observed !== update.target) {
           resize.disconnect(); resize.observe(document.documentElement); resize.observe(card); resize.observe(body); observed = update.target;
           for (let ancestor = observed, depth = 0; ancestor && depth < 64; ancestor = ancestor.parentElement, depth++) resize.observe(ancestor);
@@ -494,7 +553,7 @@ export class View {
         if (!this.guideChatOpen) { this.panel.hidden = true; this.launcher.hidden = true; card.hidden = false; }
         if (focusFirst && update.target?.matches('input:not(:disabled),textarea:not(:disabled),select:not(:disabled)')) update.target.focus({ preventScroll: true });
         beginReveal();
-        if (update.paused) { reveal?.cancel(); ++narration; lastNarrated = -1; markReady = false; lastPresented = -1; beats.cancel(); if (ownsMotion) motion.erase({ animate: false, preserveCursor: true }); this.handlers.guidePause?.(); }
+        if (update.paused) { reveal?.cancel(); ++narration; ++presentationGeneration; lastNarrated = -1; markReady = false; lastPresented = -1; beats.cancel(); if (ownsMotion) motion.erase({ animate: false, preserveCursor: true }); this.handlers.guidePause?.(); }
         schedulePosition(changedStep && lastIndex >= 0); lastIndex = update.index;
       },
       onFinish: result => {
@@ -509,7 +568,7 @@ export class View {
       onComplete: (index, step, evidence) => hooks?.progress?.(index, step, evidence)
     });
     this.guideSession = session; this.guideChatOpen = false; this.resumeGuide.hidden = true;
-    this.guideVisibility = visible => { card.hidden = !visible; if (!visible) { settlePresentation(); reveal?.cancel(); if (!this.cursorDocked) motion.setVisible(false); fromChat = true; beats.cancel(); } else schedulePosition(); };
+    this.guideVisibility = visible => { card.hidden = !visible; if (!visible) { ++presentationGeneration; settlePresentation(); reveal?.cancel(); if (!this.cursorDocked) motion.setVisible(false); fromChat = true; beats.cancel(); } else schedulePosition(); };
     this.guideFocus = () => {
       if ((document.activeElement === this.host || document.activeElement === document.body) && state?.target && resolve(state.step.targetId) === state.target && state.target.matches('input:not(:disabled),textarea:not(:disabled),select:not(:disabled)')) state.target.focus({ preventScroll: true });
     };

@@ -15,6 +15,7 @@ export interface GuidanceState {
   waiting: boolean;
   confirmationPending: boolean;
   hostPending: boolean;
+  attention: boolean;
 }
 export interface GuidanceResult { reason: 'completed' | 'stopped' | 'missing'; verified: boolean; message?: string; scope?: 'step' | 'goal'; }
 interface Callbacks { onUpdate(state: GuidanceState): void; onFinish(result: GuidanceResult): void; onComplete?(index: number, step: Step, evidence: 'observed' | 'manual' | 'host_verified'): void; }
@@ -297,7 +298,7 @@ export class GuidanceSession {
     if (!target && !this.waitingForResult) hint = 'This control changed. Waiting for the page…';
     if (!this.automatic) hint = 'Guidance is suspended. Automatic observation must resume before this step can continue.';
     if (this.paused) hint = 'Guidance is paused. Resume when you’re ready.';
-    const state: GuidanceState = { index: this.index, total: this.steps.length, completed: this.completed.size, step: { ...this.steps[this.index]! }, target, hint, automatic: this.automatic, paused: this.paused, waiting: this.waitingForResult || !target, confirmationPending: this.waitingForResult, hostPending: this.hostPending };
+    const state: GuidanceState = { index: this.index, total: this.steps.length, completed: this.completed.size, step: { ...this.steps[this.index]! }, target, hint, automatic: this.automatic, paused: this.paused, waiting: this.waitingForResult || !target, confirmationPending: this.waitingForResult, hostPending: this.hostPending, attention: Boolean(this.failure) };
     if (this.lastState && Object.entries(state).every(([key, value]) => key === 'step' || this.lastState?.[key as keyof GuidanceState] === value)) return;
     this.lastState = state; this.callbacks.onUpdate(state);
   }

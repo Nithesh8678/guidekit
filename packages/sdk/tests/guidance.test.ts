@@ -116,11 +116,11 @@ test('valid choices advance after dispatch, while final click waits for a verifi
   context.mock.timers.enable({ apis: ['setTimeout'] });
   const status = new SelectDouble(); const save = new ButtonDouble(); const state = environment([['status', status], ['save', save]]);
   try {
-    state.session.start(); state.fire('change', status); assert.equal(state.state.index, 0); context.mock.timers.tick(0); assert.equal(state.state.index, 1);
+    state.session.start(); assert.equal(state.state.attention, false); state.fire('change', status); assert.equal(state.state.index, 0); context.mock.timers.tick(0); assert.equal(state.state.index, 1);
     state.fire('click', save); assert.equal(state.state.waiting, true); context.mock.timers.tick(10000); assert.deepEqual(state.finishes, []);
     state.session.reportResult('unknown', { success: true }); assert.equal(state.session.active, true);
-    state.session.reportResult('save', { success: false, message: 'The save failed. Try again.' }); assert.match(state.state.hint, /save failed/); assert.equal(state.state.waiting, false);
-    state.fire('click', save); assert.equal(state.state.waiting, true);
+    state.session.reportResult('save', { success: false, message: 'The save failed. Try again.' }); assert.match(state.state.hint, /save failed/); assert.equal(state.state.waiting, false); assert.equal(state.state.attention, true);
+    state.fire('click', save); assert.equal(state.state.waiting, true); assert.equal(state.state.attention, false);
     state.session.reportResult('save', { success: true }); assert.deepEqual(state.finishes, [{ reason: 'completed', verified: true, message: 'The website confirmed the result.' }]); assert.equal(state.doc.listenerCount, 0);
   } finally { state.restore(); context.mock.timers.reset(); }
 });
