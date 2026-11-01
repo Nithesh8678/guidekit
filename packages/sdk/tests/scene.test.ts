@@ -44,3 +44,17 @@ test('route changes during async context collection discard the old snapshot and
     enabled = true; state.doc.hidden = true; observer.refresh(); context.mock.timers.tick(200); await settled(); assert.equal(releases.length, 3);
   } finally { observer.destroy(); state.restore(); context.mock.timers.reset(); }
 });
+
+test('continuous render notifications cannot starve a local scene read beyond 500 ms', async context => {
+  context.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] }); const state = environment();
+  let reads = 0, deliveries = 0;
+  const observer = new SceneObserver(() => { reads++; return page; }, () => { deliveries++; });
+  try {
+    observer.refresh();
+    for (let index = 0; index < 6; index++) { context.mock.timers.tick(80); observer.refresh(); await settled(); }
+    assert.equal(reads, 0); context.mock.timers.tick(19); await settled(); assert.equal(reads, 0);
+    context.mock.timers.tick(1); await settled(); assert.equal(reads, 1); assert.equal(deliveries, 1);
+    context.mock.timers.tick(500); await settled(); assert.equal(reads, 1);
+    observer.refresh(); observer.destroy(); context.mock.timers.tick(1000); await settled(); assert.equal(reads, 1);
+  } finally { observer.destroy(); state.restore(); context.mock.timers.reset(); }
+});

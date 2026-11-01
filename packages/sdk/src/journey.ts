@@ -16,6 +16,9 @@ interface Callbacks {
   onEnd?(): void;
 }
 const fingerprint = (page: PageContext) => JSON.stringify([page.url, page.targets.map(target => [target.id, target.label, target.role])]);
+// SceneObserver already waits for the DOM to settle before delivering a scene.
+// Keep only a short coalescing window here for host-confirmed boundaries.
+const continuationSettleMs = 120;
 export const journeyGoal = (goal: string): string => publicLabel(goal.replace(/[\u0000-\u001f\u007f]/g, ' ')).trim().slice(0, 1000);
 export function semanticRevision(revision: unknown): string | undefined {
   if (revision === undefined) return undefined;
@@ -124,9 +127,14 @@ export class JourneyCoordinator {
     const previous = new Map(this.baseline.targets.map(target => [target.id, `${target.label}:${target.role}`]));
     const next = new Map(page.targets.map(target => [target.id, `${target.label}:${target.role}`]));
     const lostPlannedControl = [...this.planTargets].some(id => previous.get(id) !== next.get(id));
+    // A plan can contain several already-grounded controls. Extra rows, menus
+    // or host-state changes do not invalidate those steps: GuidanceSession can
+    // advance them locally without another model round trip. A changed route
+    // or any missing/relabelled remaining control still requires a fresh plan.
+    const groundedRemainder = this.planTargets.size > 0 && !lostPlannedControl;
     const newControls = page.targets.some(target => previous.get(target.id) !== `${target.label}:${target.role}`);
     const semanticProgress = revision !== this.contextRevision && revision !== undefined && this.expectingTransition && this.canContinue;
-    if (changedRoute || lostPlannedControl || this.interaction && newControls || semanticProgress) this.schedule('scene_changed');
+    if (changedRoute || lostPlannedControl || !groundedRemainder && (this.interaction && newControls || semanticProgress)) this.schedule('scene_changed');
   }
   segmentFinished(result: GuidanceResult, terminal = false): boolean {
     if (!this.running) return false;
@@ -161,7 +169,7 @@ export class JourneyCoordinator {
     if (this.paused || this.awaitingHost) return;
     if (this.timer) clearTimeout(this.timer);
     this.abort();
-    this.timer = setTimeout(() => { this.timer = null; void this.replan(); }, 750);
+    this.timer = setTimeout(() => { this.timer = null; void this.replan(); }, continuationSettleMs);
   }
   private abort(): void { ++this.epoch; this.inFlight?.abort(); this.inFlight = null; }
   private async replan(): Promise<void> {

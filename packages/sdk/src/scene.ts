@@ -12,6 +12,7 @@ function owned(node: Node): boolean { return Boolean((node instanceof Element ? 
 /** Watches semantic scene changes, never keystrokes, input values or pointer movement. */
 export class SceneObserver {
   private timer: ReturnType<typeof setTimeout> | null = null;
+  private maxTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly observer: MutationObserver;
   private readonly interval: ReturnType<typeof setInterval>;
   private route = routeKey();
@@ -28,21 +29,28 @@ export class SceneObserver {
   }
   refresh = (): void => {
     if (this.destroyed || document.hidden || !this.enabled()) return;
-    const generation = ++this.generation; this.reading?.abort(); this.reading = null;
+    ++this.generation; this.reading?.abort(); this.reading = null;
     if (this.timer) clearTimeout(this.timer);
-    this.timer = setTimeout(() => {
-      this.timer = null;
+    const read = () => {
+      if (this.timer) clearTimeout(this.timer);
+      if (this.maxTimer) clearTimeout(this.maxTimer);
+      this.timer = null; this.maxTimer = null;
       if (this.destroyed || document.hidden || !this.enabled()) return;
+      const generation = this.generation;
       const route = routeKey(), controller = new AbortController(); this.reading = controller;
       void Promise.resolve().then(() => this.read(controller.signal)).then(page => {
         if (this.destroyed || controller.signal.aborted || generation !== this.generation || document.hidden || !this.enabled()) return;
         if (route !== routeKey()) { this.refresh(); return; }
         this.route = route; this.notify(page, route);
       }).catch(() => { /* A failed/stale host context read must not replace an active scene. */ }).finally(() => { if (this.reading === controller) this.reading = null; });
-    }, 180);
+    };
+    this.timer = setTimeout(read, 180);
+    // Animated hosts can mutate continuously. A trailing debounce alone would
+    // never read their current controls; cap this local settle window instead.
+    this.maxTimer ??= setTimeout(read, 500);
   };
   destroy(): void {
-    this.destroyed = true; ++this.generation; this.reading?.abort(); this.reading = null; this.observer.disconnect(); clearInterval(this.interval); if (this.timer) clearTimeout(this.timer); this.timer = null;
+    this.destroyed = true; ++this.generation; this.reading?.abort(); this.reading = null; this.observer.disconnect(); clearInterval(this.interval); if (this.timer) clearTimeout(this.timer); if (this.maxTimer) clearTimeout(this.maxTimer); this.timer = null; this.maxTimer = null;
     window.removeEventListener('popstate', this.refresh); window.removeEventListener('hashchange', this.refresh); document.removeEventListener('visibilitychange', this.refresh);
   }
 }

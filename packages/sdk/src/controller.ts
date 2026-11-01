@@ -34,6 +34,7 @@ export class Assistant implements GuideKitInstance {
   private session: Session | null = null;
   private connecting: Promise<Session> | null = null;
   private explicitContext: Record<string, unknown> = {};
+  private explicitContextKey = '{}';
   private contextRevision: string | undefined;
   private active: AbortController | null = null;
   private pending: PendingAction | null = null;
@@ -81,7 +82,13 @@ export class Assistant implements GuideKitInstance {
   }
   setContext(context: Record<string, unknown>, options?: GuideContextOptions): void {
     const revision = semanticRevision(options?.revision);
-    this.explicitContext = safeContext(context);
+    const clean = safeContext(context), key = JSON.stringify(clean);
+    // Revision-aware hosts often publish their snapshot on every render. An
+    // identical public snapshot must not restart the scene reader's settle
+    // timer. Without a supplied revision, a call remains an explicit refresh
+    // signal for hosts whose getContext() reads state outside this object.
+    if (revision !== undefined && revision === this.contextRevision && key === this.explicitContextKey) return;
+    this.explicitContext = clean; this.explicitContextKey = key;
     if (revision !== undefined) this.contextRevision = revision;
     this.sceneObserver?.refresh();
   }
