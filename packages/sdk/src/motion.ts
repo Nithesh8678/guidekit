@@ -5,7 +5,11 @@ export type AnnotationKind = 'target' | 'ring' | 'frame' | 'arrow' | 'underline'
 export type CursorActivity = 'pointing' | 'speaking' | 'waiting';
 export type CursorLocation = 'docked' | 'flight' | 'target';
 export interface AnnotationCommand { id: string; kind: AnnotationKind; box: MotionBox; label?: string; index?: number; }
-export interface PresentOptions { animate?: boolean; first?: boolean; pace?: number; onReady?: () => void; }
+export interface PresentOptions {
+  animate?: boolean; first?: boolean; pace?: number;
+  /** Once after cursor arrival and path reveal; synchronous for reduced motion. */
+  onReady?: () => void;
+}
 export interface BoundsOptions { animate?: boolean; }
 export interface DockOptions extends BoundsOptions { onReady?: () => void; }
 export interface EraseOptions extends BoundsOptions { preserveCursor?: boolean; }
@@ -31,6 +35,28 @@ export function validateBox(box: MotionBox): MotionBox {
   if (!box) throw new TypeError('A CSS pixel box is required.');
   const result = { left: finite(box.left, 'left'), top: finite(box.top, 'top'), width: finite(box.width, 'width'), height: finite(box.height, 'height') };
   if (Math.abs(result.left) > MAX_COORDINATE || Math.abs(result.top) > MAX_COORDINATE || result.width < 0.25 || result.height < 0.25 || result.width > MAX_SIZE || result.height > MAX_SIZE || Math.abs(result.left + result.width) > MAX_COORDINATE || Math.abs(result.top + result.height) > MAX_COORDINATE) throw new RangeError('Invalid or excessive annotation bounds.');
+  return result;
+}
+export const STEP_BADGE_SIZE = 22;
+/** A badge stays outside the target when space permits, in viewport CSS pixels. */
+export function stepBadgePlacement(input: MotionBox, viewport?: MotionBox): MotionPoint {
+  const box = validateBox(input), radius = STEP_BADGE_SIZE / 2, gap = 8;
+  const candidates = [
+    { x: box.left - radius - gap, y: box.top + Math.min(box.height / 2, 20) },
+    { x: box.left + Math.min(box.width / 2, 20), y: box.top - radius - gap },
+    { x: box.left + box.width + radius + gap, y: box.top + Math.min(box.height / 2, 20) },
+    { x: box.left + Math.min(box.width / 2, 20), y: box.top + box.height + radius + gap },
+  ];
+  if (!viewport) return candidates[0]!;
+  const area = validateBox(viewport), inset = radius + 3;
+  let best = Infinity, result = candidates[0]!;
+  for (const [index, candidate] of candidates.entries()) {
+    const x = clamp(candidate.x, area.left + Math.min(inset, area.width / 2), area.left + Math.max(area.width - inset, area.width / 2));
+    const y = clamp(candidate.y, area.top + Math.min(inset, area.height / 2), area.top + Math.max(area.height - inset, area.height / 2));
+    const overlap = Math.max(0, Math.min(x + radius, box.left + box.width) - Math.max(x - radius, box.left)) * Math.max(0, Math.min(y + radius, box.top + box.height) - Math.max(y - radius, box.top));
+    const score = overlap * 1000 + Math.hypot(x - candidate.x, y - candidate.y) + index * 2;
+    if (score < best) { best = score; result = { x, y }; }
+  }
   return result;
 }
 export function smoothstep(progress: number): number { const value = clamp(finite(progress, 'progress'), 0, 1); return value * value * (3 - 2 * value); }
@@ -93,34 +119,35 @@ function validateCommand(command: AnnotationCommand): AnnotationCommand {
 }
 /** Stable local geometry is prepared once per semantic/bounds change, never randomly per frame. */
 export function annotationGeometry(input: AnnotationCommand): AnnotationGeometry {
-  const command = validateCommand(input), { width, height } = command.box, random = seeded(`${command.id}:${command.kind}`), paths: AnnotationPath[] = [];
+  const command = validateCommand(input), kind = command.kind === 'number' ? 'target' : command.kind;
+  const { width, height } = command.box, random = seeded(`${command.id}:${kind}`), paths: AnnotationPath[] = [];
   const wobble = () => (random() - 0.5) * 1.4, bow = () => (random() - 0.5) * Math.min(2.5, Math.min(width, height) * 0.04);
   const line = (x1: number, y1: number, x2: number, y2: number) => paths.push(curve({ x: x1, y: y1 }, { x: (x1 + x2) / 2 + bow(), y: (y1 + y2) / 2 + bow() }, { x: x2, y: y2 }));
-  if (command.kind === 'ring' || command.kind === 'number') {
-    const center = command.kind === 'number' ? { x: 0, y: 0 } : { x: width / 2, y: height / 2 }, radiusX = command.kind === 'number' ? 14 : width / 2 + 6, radiusY = command.kind === 'number' ? 14 : height / 2 + 6;
+  if (kind === 'ring') {
+    const center = { x: width / 2, y: height / 2 }, radiusX = width / 2 + 6, radiusY = height / 2 + 6;
     const count = 16, points = Array.from({ length: count }, (_, index) => { const angle = index / count * Math.PI * 2 - Math.PI / 2; return { x: center.x + Math.cos(angle) * (radiusX + wobble()), y: center.y + Math.sin(angle) * (radiusY + wobble()) }; });
     for (let index = 0; index < count; index++) { const current = points[index]!, next = points[(index + 1) % count]!, angle = (index + 0.5) / count * Math.PI * 2 - Math.PI / 2; paths.push(curve(current, { x: center.x + Math.cos(angle) * radiusX / Math.cos(Math.PI / count), y: center.y + Math.sin(angle) * radiusY / Math.cos(Math.PI / count) }, next)); }
-  } else if (command.kind === 'frame') {
+  } else if (kind === 'frame') {
     line(-6, -6, width + 6, -6); line(width + 6, -6, width + 6, height + 6); line(width + 6, height + 6, -6, height + 6); line(-6, height + 6, -6, -6);
-  } else if (command.kind === 'target') {
+  } else if (kind === 'target') {
     const length = Math.min(20, Math.max(7, Math.min(width, height) * 0.3));
     for (const [x, y, directionX, directionY] of [[-5, -5, 1, 1], [width + 5, -5, -1, 1], [width + 5, height + 5, -1, -1], [-5, height + 5, 1, -1]]) {
       paths.push({ d: `M${number(x! + directionX! * length)} ${number(y!)} Q${number(x! + wobble())} ${number(y! + wobble())} ${number(x!)} ${number(y! + directionY! * length)}`, length: length * 1.65 });
     }
-  } else if (command.kind === 'underline') {
+  } else if (kind === 'underline') {
     line(0, height + 6, width, height + 6 + wobble());
   } else {
     const end = { x: width / 2, y: height / 2 }, start = { x: -Math.min(70, width / 2 + 24), y: -Math.min(45, height / 2 + 16) }, control = { x: start.x * 0.25, y: start.y - 12 };
     paths.push(curve(start, control, end)); const angle = Math.atan2(end.y - control.y, end.x - control.x), size = 12;
     line(end.x - Math.cos(angle - 0.5) * size, end.y - Math.sin(angle - 0.5) * size, end.x, end.y); line(end.x, end.y, end.x - Math.cos(angle + 0.5) * size, end.y - Math.sin(angle + 0.5) * size);
   }
-  const label = command.kind === 'number' ? { x: 0, y: 0, text: String(command.index ?? 1) } : command.label ? { x: 0, y: -18, text: command.label } : null;
+  const label = command.label ? { x: 0, y: -18, text: command.label } : null;
   return { paths, length: paths.reduce((sum, path) => sum + path.length, 0), label };
 }
 
 interface BoxMove { from: MotionBox; to: MotionBox; startedAt: number; durationMs: number; }
 interface Mark {
-  command: AnnotationCommand; geometry: AnnotationGeometry; group: SVGGElement; ink: SVGPathElement[]; glow: SVGPathElement[]; text: SVGTextElement;
+  command: AnnotationCommand; geometry: AnnotationGeometry; container: SVGGElement; group: SVGGElement; ink: SVGPathElement[]; glow: SVGPathElement[]; text: SVGTextElement; badge: SVGGElement | null; badgeText: SVGTextElement | null;
   box: MotionBox; move: BoxMove | null; releaseAt: number; durationMs: number; revealed: number; ready: boolean; waitForArrival: boolean; onReady?: () => void;
 }
 interface Erasing { mark: Mark; startedAt: number; }
@@ -175,7 +202,7 @@ export class MotionDirector {
     this.media = options.reducedMotion === undefined && window?.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
     this.reduced = options.reducedMotion ?? this.media?.matches ?? false;
     this.element = this.svg('svg'); this.element.setAttribute('data-gk-annotation', ''); this.element.setAttribute('class', 'gk-annotation'); this.element.setAttribute('aria-hidden', 'true'); this.element.setAttribute('focusable', 'false');
-    Object.assign(this.element.style, { position: 'fixed', left: '0', top: '0', width: '100%', height: '100%', overflow: 'visible', pointerEvents: 'none', color: 'var(--gk-accent, #365cf5)' });
+    Object.assign(this.element.style, { position: 'fixed', left: '0', top: '0', width: '100%', height: '100%', overflow: 'visible', pointerEvents: 'none', color: 'var(--gk-guide-ink, #f2b544)' });
     const definitions = this.svg('defs'), filter = this.svg('filter'), blur = this.svg('feGaussianBlur');
     this.filterId = `gk-motion-glow-${++instanceId}`; filter.setAttribute('id', this.filterId); filter.setAttribute('x', '-100%'); filter.setAttribute('y', '-100%'); filter.setAttribute('width', '300%'); filter.setAttribute('height', '300%'); blur.setAttribute('stdDeviation', String(MOTION.glowRadius)); filter.append(blur); definitions.append(filter);
     this.cursor = this.svg('g'); this.cursor.setAttribute('data-gk-cursor', ''); this.cursor.setAttribute('opacity', '0');
@@ -198,7 +225,7 @@ export class MotionDirector {
     this.media?.addEventListener('change', this.onReducedMotion); this.document.addEventListener('visibilitychange', this.onVisibility);
     if (this.document.hidden) this.suspend();
   }
-  get ready(): boolean { return this.current?.ready ?? Boolean(this.dockTarget && this.cursorPose && !this.flight); }
+  get ready(): boolean { return this.current ? this.current.ready && !this.flight : Boolean(this.dockTarget && this.cursorPose && !this.flight); }
   get location(): CursorLocation { return this.cursorLocation; }
   get diagnostics(): Readonly<{ generation: number; ready: boolean; location: CursorLocation; cursor: Readonly<CursorPose> | null; framePending: boolean; annotations: number; paths: number; frames: number; maxFrameDeltaMs: number; penDurationMs: number; flightDurationMs: number; releaseDelayMs: number }> {
     return { generation: this.generation, ready: this.ready, location: this.location, cursor: this.cursorPose ? { ...this.cursorPose } : null, framePending: this.frame !== null, annotations: Number(!!this.current) + Number(!!this.erasing), paths: (this.current?.geometry.paths.length ?? 0) + (this.erasing?.mark.geometry.paths.length ?? 0), frames: this.frames, maxFrameDeltaMs: this.maxFrameDeltaMs, ...this.timings };
@@ -211,7 +238,7 @@ export class MotionDirector {
       this.dockReady = options.onReady ?? this.dockReady; this.notifyReady(); return;
     }
     const returning = Boolean(this.flight && this.dockTarget), animate = !this.reduced && Boolean(this.cursorPose) && (options.animate === true || returning);
-    this.stopFrame(); ++this.generation; this.current?.group.remove(); this.erasing?.mark.group.remove(); this.current = null; this.erasing = null;
+    this.stopFrame(); ++this.generation; this.current?.container.remove(); this.erasing?.mark.container.remove(); this.current = null; this.erasing = null;
     this.dockTarget = destination; this.dockReady = options.onReady; this.cursorRetained = true;
     const start = this.cursorPose;
     this.flight = animate && start ? { ...createFlight(start, destination, now), fromRotation: start.rotation, fromScale: start.scale } : null;
@@ -234,8 +261,9 @@ export class MotionDirector {
     const fromDock = this.dockTarget !== null;
     this.dockTarget = null; this.dockReady = undefined; this.cursorRetained = true;
     this.current?.group.removeAttribute('data-gk-shape');
-    this.erasing?.mark.group.remove(); this.erasing = this.current && animate ? { mark: this.current, startedAt: now } : null;
-    if (this.current && !animate) this.current.group.remove();
+    this.current?.badge?.removeAttribute('data-gk-step-badge');
+    this.erasing?.mark.container.remove(); this.erasing = this.current && animate ? { mark: this.current, startedAt: now } : null;
+    if (this.current && !animate) this.current.container.remove();
     const end = anchor(command.box), start = this.cursorPose ?? { x: Math.max(20, end.x - 80), y: Math.max(20, end.y - 60) }, distance = Math.hypot(end.x - start.x, end.y - start.y), first = fromDock || (options.first ?? !this.current);
     this.flight = animate ? { ...createFlight(start, end, now), ...(this.cursorPose ? { fromRotation: this.cursorPose.rotation, fromScale: this.cursorPose.scale } : {}) } : null;
     const delay = animate ? Math.max(releaseDelayMs(distance, first), first ? this.flight?.durationMs ?? 0 : 0) : 0;
@@ -248,8 +276,8 @@ export class MotionDirector {
   }
   updateBounds(input: MotionBox, options: BoundsOptions = {}): void {
     if (this.destroyed) return;
-    const box = validateBox(input), mark = this.current; if (!mark || sameBox(mark.command.box, box) && !mark.move) return;
-    if (sameBox(mark.command.box, box)) return;
+    const box = validateBox(input), mark = this.current; if (!mark) return;
+    if (sameBox(mark.command.box, box)) { this.patchBadge(mark); return; }
     const now = this.time(); this.sample(now);
     const from = { ...mark.box }, animate = options.animate === true && !this.reduced, flying = Boolean(this.flight) && !this.reduced;
     mark.command = { ...mark.command, box }; mark.geometry = annotationGeometry(mark.command); this.patchPaths(mark); this.patchLabel(mark, mark.geometry);
@@ -274,10 +302,11 @@ export class MotionDirector {
   setPaused(value: boolean): void { if (this.destroyed || this.paused === value) return; this.paused = value; this.element.style.opacity = value ? '0.5' : '1'; this.syncSuspension(); }
   erase(options: EraseOptions = {}): void {
     if (this.destroyed) return;
-    const now = this.time(); this.sample(now); ++this.generation; this.erasing?.mark.group.remove();
+    const now = this.time(); this.sample(now); ++this.generation; this.erasing?.mark.container.remove();
     this.current?.group.removeAttribute('data-gk-shape');
+    this.current?.badge?.removeAttribute('data-gk-step-badge');
     if (this.current && options.animate !== false && !this.reduced) { this.current.onReady = undefined; this.erasing = { mark: this.current, startedAt: now }; }
-    else { this.current?.group.remove(); this.erasing = null; }
+    else { this.current?.container.remove(); this.erasing = null; }
     this.current = null; this.flight = null; this.dockTarget = null; this.dockReady = undefined; this.cursorRetained = options.preserveCursor === true;
     this.locate('target'); this.render(now); this.stopFrame(); this.schedule();
   }
@@ -288,18 +317,36 @@ export class MotionDirector {
   }
   private svg<K extends keyof SVGElementTagNameMap>(name: K): SVGElementTagNameMap[K] { const node = this.document.createElementNS(svgNamespace, name); node.setAttribute('pointer-events', 'none'); return node; }
   private createMark(command: AnnotationCommand, geometry: AnnotationGeometry, releaseAt: number, durationMs: number, onReady?: () => void): Mark {
-    const group = this.svg('g'), glowing = this.svg('g'), ink = this.svg('g'), text = this.svg('text'); group.setAttribute('data-gk-mark', command.id); group.setAttribute('data-gk-shape', command.kind); group.setAttribute('data-kind', command.kind); glowing.setAttribute('filter', `url(#${this.filterId})`); glowing.setAttribute('opacity', String(MOTION.glowOpacity));
-    const mark: Mark = { command, geometry, group, ink: [], glow: [], text, box: { ...command.box }, move: null, releaseAt, durationMs, revealed: 0, ready: false, waitForArrival: false, onReady };
+    const container = this.svg('g'), group = this.svg('g'), glowing = this.svg('g'), ink = this.svg('g'), text = this.svg('text'), kind = command.kind === 'number' ? 'target' : command.kind;
+    group.setAttribute('data-gk-mark', command.id); group.setAttribute('data-gk-shape', kind); group.setAttribute('data-kind', kind); glowing.setAttribute('filter', `url(#${this.filterId})`); glowing.setAttribute('opacity', String(MOTION.glowOpacity));
+    const mark: Mark = { command, geometry, container, group, ink: [], glow: [], text, badge: null, badgeText: null, box: { ...command.box }, move: null, releaseAt, durationMs, revealed: 0, ready: false, waitForArrival: false, onReady };
     for (const path of geometry.paths) {
       const stroke = this.svg('path'); stroke.setAttribute('d', path.d); stroke.setAttribute('fill', 'none'); stroke.setAttribute('stroke', 'currentColor'); stroke.setAttribute('stroke-width', String(MOTION.strokeWidth)); stroke.setAttribute('vector-effect', 'non-scaling-stroke'); stroke.setAttribute('stroke-linecap', 'round'); stroke.setAttribute('stroke-linejoin', 'round'); stroke.setAttribute('pathLength', '1'); stroke.setAttribute('stroke-dasharray', '1'); stroke.setAttribute('stroke-dashoffset', '1');
       const glow = stroke.cloneNode(false) as SVGPathElement; mark.ink.push(stroke); mark.glow.push(glow); glowing.append(glow); ink.append(stroke);
     }
-    text.setAttribute('fill', 'currentColor'); text.setAttribute('stroke', 'white'); text.setAttribute('stroke-width', '3'); text.setAttribute('paint-order', 'stroke'); text.setAttribute('font-family', 'system-ui, sans-serif'); text.setAttribute('font-size', command.kind === 'number' ? '13' : '12'); text.setAttribute('font-weight', '700');
-    group.append(glowing, ink, text); this.element.insertBefore(group, this.cursor); this.patchLabel(mark, geometry); return mark;
+    text.setAttribute('fill', 'currentColor'); text.setAttribute('stroke', 'white'); text.setAttribute('stroke-width', '3'); text.setAttribute('paint-order', 'stroke'); text.setAttribute('font-family', 'system-ui, sans-serif'); text.setAttribute('font-size', '12'); text.setAttribute('font-weight', '700');
+    group.append(glowing, ink, text); container.append(group); this.element.insertBefore(container, this.cursor); this.patchLabel(mark, geometry); return mark;
   }
   private patchPaths(mark: Mark): void { mark.geometry.paths.forEach((path, index) => { mark.ink[index]?.setAttribute('d', path.d); mark.glow[index]?.setAttribute('d', path.d); }); }
   private patchLabel(mark: Mark, geometry: AnnotationGeometry): void {
-    const label = geometry.label; mark.text.textContent = label?.text ?? ''; mark.text.setAttribute('x', String(label?.x ?? 0)); mark.text.setAttribute('y', String(label?.y ?? 0)); mark.text.setAttribute('text-anchor', mark.command.kind === 'number' ? 'middle' : 'start'); mark.text.setAttribute('dominant-baseline', mark.command.kind === 'number' ? 'central' : 'auto');
+    const label = geometry.label; mark.text.textContent = label?.text ?? ''; mark.text.setAttribute('x', String(label?.x ?? 0)); mark.text.setAttribute('y', String(label?.y ?? 0)); mark.text.setAttribute('text-anchor', 'start'); mark.text.setAttribute('dominant-baseline', 'auto'); this.patchBadge(mark);
+  }
+  private patchBadge(mark: Mark, opacity?: number): void {
+    const index = mark.command.index ?? (mark.command.kind === 'number' ? 1 : undefined);
+    if (index === undefined) { mark.badge?.remove(); mark.badge = null; mark.badgeText = null; return; }
+    if (!mark.badge) {
+      const badge = this.svg('g'), disc = this.svg('circle'), text = this.svg('text');
+      badge.setAttribute('data-gk-step-badge', '');
+      disc.setAttribute('r', String(STEP_BADGE_SIZE / 2)); disc.setAttribute('fill', 'var(--gk-guide-badge, #f2b544)'); disc.setAttribute('stroke', 'var(--gk-guide-badge-rim, #ffe5a8)'); disc.setAttribute('stroke-width', '1');
+      text.setAttribute('fill', 'var(--gk-guide-text, #352707)'); text.setAttribute('font-family', 'system-ui, sans-serif'); text.setAttribute('font-weight', '750'); text.setAttribute('font-size', '11'); text.setAttribute('text-anchor', 'middle'); text.setAttribute('dominant-baseline', 'central');
+      badge.style.filter = 'drop-shadow(0px 2px 4px #0003)'; badge.append(disc, text); mark.container.append(badge); mark.badge = badge; mark.badgeText = text;
+    }
+    mark.badge.setAttribute('data-gk-step-number', String(index)); mark.badgeText!.textContent = String(index);
+    const window = this.document.defaultView, visual = window?.visualViewport;
+    const width = visual?.width ?? this.document.documentElement?.clientWidth ?? window?.innerWidth, height = visual?.height ?? window?.innerHeight;
+    const area = width !== undefined && height !== undefined && width >= 28 && height >= 28 ? { left: visual?.offsetLeft ?? 0, top: visual?.offsetTop ?? 0, width, height } : undefined;
+    const center = stepBadgePlacement(mark.box, area);
+    mark.badge.setAttribute('transform', `translate(${number(center.x)} ${number(center.y)})`); mark.badge.setAttribute('opacity', number(opacity ?? (this.flight ? 0 : mark.revealed)));
   }
   private time(): number { const measured = finite(this.clock(), 'clock'); this.lastNow = Math.max(this.lastNow, measured); return this.suspendedAt ?? this.lastNow; }
   private locate(location: CursorLocation): void { this.cursorLocation = location; this.cursor.setAttribute('data-gk-cursor-location', location); }
@@ -317,7 +364,8 @@ export class MotionDirector {
       if (eraseElapsed !== undefined) { const stagger = (mark.geometry.paths.length - index - 1) * 18; progress *= 1 - cubicBezier((eraseElapsed - stagger) / MOTION.eraseMs, MOTION.editEasing); }
       const offset = number(1 - progress); mark.ink[index]!.setAttribute('stroke-dashoffset', offset); mark.glow[index]!.setAttribute('stroke-dashoffset', offset);
     });
-    mark.text.setAttribute('opacity', number(eraseElapsed === undefined ? reveal : 1 - clamp(eraseElapsed / MOTION.eraseMs, 0, 1)));
+    const labelOpacity = eraseElapsed === undefined ? this.flight ? 0 : reveal : 1 - clamp(eraseElapsed / MOTION.eraseMs, 0, 1);
+    mark.text.setAttribute('opacity', number(labelOpacity)); this.patchBadge(mark, labelOpacity);
   }
   private render(now: number): void {
     if (this.destroyed) return;
@@ -329,7 +377,7 @@ export class MotionDirector {
     if (this.erasing) {
       const elapsed = now - this.erasing.startedAt, mark = this.erasing.mark;
       this.applyMark(mark, mark.revealed, elapsed);
-      if (elapsed >= MOTION.eraseMs + (mark.geometry.paths.length - 1) * 18) { mark.group.remove(); this.erasing = null; }
+      if (elapsed >= MOTION.eraseMs + (mark.geometry.paths.length - 1) * 18) { mark.container.remove(); this.erasing = null; }
     }
     const pose = this.cursorPose;
     this.cursor.setAttribute('opacity', this.cursorRetained && pose ? '1' : this.erasing ? number(1 - clamp((now - this.erasing.startedAt) / MOTION.eraseMs, 0, 1)) : '0');
@@ -339,7 +387,7 @@ export class MotionDirector {
   private notifyReady(): void {
     if (this.destroyed || !this.canRun()) return;
     const mark = this.current;
-    if (mark?.ready && mark.onReady) { const callback = mark.onReady; mark.onReady = undefined; callback(); }
+    if (mark?.ready && !this.flight && mark.onReady) { const callback = mark.onReady; mark.onReady = undefined; callback(); }
     else if (this.dockTarget && !this.flight && this.dockReady) { const callback = this.dockReady; this.dockReady = undefined; callback(); }
   }
   private canRun(): boolean { return this.visible && !this.paused && !this.document.hidden; }
@@ -390,7 +438,7 @@ export class MotionDirector {
       if (this.current) { this.current.move = null; this.current.box = { ...this.current.command.box }; this.current.releaseAt = now; this.current.durationMs = 0; this.cursorPose = { ...anchor(this.current.box), rotation: 0, scale: 1, glowRadius: 8, progress: 1 }; }
       else if (this.dockTarget) this.cursorPose = { ...this.dockTarget, rotation: 0, scale: 1, glowRadius: 8, progress: 1 };
       this.locate(this.dockTarget ? 'docked' : 'target');
-      this.erasing?.mark.group.remove(); this.erasing = null; this.stopFrame(); this.render(now);
+      this.erasing?.mark.container.remove(); this.erasing = null; this.stopFrame(); this.render(now);
     } else this.schedule();
   };
 }

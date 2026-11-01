@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { annotationGeometry, createFlight, cubicBezier, cursorFlightDurationMs, MotionDirector, MOTION, penDurationMs, releaseDelayMs, retargetFlight, sampleFlight, smoothstep, validateBox, type AnnotationCommand, type AnnotationKind } from '../src/motion';
+import { annotationGeometry, createFlight, cubicBezier, cursorFlightDurationMs, MotionDirector, MOTION, penDurationMs, releaseDelayMs, retargetFlight, sampleFlight, smoothstep, stepBadgePlacement, STEP_BADGE_SIZE, validateBox, type AnnotationCommand, type AnnotationKind } from '../src/motion';
 
 const box = { left: 120, top: 80, width: 160, height: 36 };
 const command = (kind: AnnotationKind = 'target', id = 'name'): AnnotationCommand => ({ id, kind, box: { ...box } });
@@ -32,11 +32,31 @@ test('seeded semantic paths remain stable through renders and local translation'
     assert.deepEqual(first, annotationGeometry({ ...command(kind), box: { ...box, left: -120, top: 400 } }));
   }
   assert.notDeepEqual(annotationGeometry(command('ring', 'first')), annotationGeometry(command('ring', 'second')));
-  assert.equal(annotationGeometry({ ...command('number'), index: 8 }).label?.text, '8');
+  assert.deepEqual(annotationGeometry({ ...command('number'), index: 8 }), annotationGeometry(command('target')));
   assert.throws(() => annotationGeometry({ ...command(), kind: 'script' as AnnotationKind }));
   assert.throws(() => annotationGeometry({ ...command(), id: '<script>' }));
   assert.throws(() => annotationGeometry({ ...command(), label: 'x'.repeat(121) }));
   assert.throws(() => annotationGeometry({ ...command(), index: 0 }));
+});
+
+test('step badges choose an outside edge, respect visual viewport offsets and stay bounded when space is tight', () => {
+  assert.equal(STEP_BADGE_SIZE, 22);
+  assert.deepEqual(stepBadgePlacement(box), { x: 101, y: 98 });
+  const area = { left: 40, top: 20, width: 320, height: 240 }, radius = STEP_BADGE_SIZE / 2;
+  const targets = [
+    { left: 40, top: 20, width: 100, height: 30 }, { left: 260, top: 20, width: 100, height: 30 },
+    { left: 40, top: 230, width: 100, height: 30 }, { left: 260, top: 230, width: 100, height: 30 },
+    { left: 100, top: 70, width: 160, height: 36 },
+  ];
+  for (const target of targets) {
+    const center = stepBadgePlacement(target, area);
+    assert.ok(center.x - radius >= area.left && center.x + radius <= area.left + area.width);
+    assert.ok(center.y - radius >= area.top && center.y + radius <= area.top + area.height);
+    const overlap = Math.max(0, Math.min(center.x + radius, target.left + target.width) - Math.max(center.x - radius, target.left)) * Math.max(0, Math.min(center.y + radius, target.top + target.height) - Math.max(center.y - radius, target.top));
+    assert.equal(overlap, 0, 'An available outside edge is preferred over covering the target.');
+  }
+  assert.deepEqual(stepBadgePlacement(box, { left: -20, top: -10, width: 10, height: 8 }), { x: -15, y: -6 });
+  assert.throws(() => stepBadgePlacement(box, { ...area, width: NaN }));
 });
 
 test('smoothstep and local pen easing have exact endpoints and monotonic progress', () => {
@@ -85,6 +105,64 @@ function renderer(reducedMotion = false) {
   const tick = (value: number) => { now = value; const callbacks = [...frames.values()]; frames.clear(); for (const callback of callbacks) callback(value); };
   return { director, shadow, doc, listeners, frames, cancelled, tick, time: (value: number) => { now = value; }, all: () => shadow.all(), active: () => shadow.all().filter(node => node.attributes.has('data-gk-shape')) };
 }
+
+test('all requested mark kinds compose a separate fixed-size numbered disc without replacing or scaling their paths', () => {
+  const state = renderer(true);
+  try {
+    assert.equal(state.director.element.style.color, 'var(--gk-guide-ink, #f2b544)');
+    for (const kind of ['target', 'ring', 'frame', 'arrow', 'underline', 'number'] as const) {
+      state.director.present({ ...command(kind, `composed-${kind}`), index: 7 });
+      const mark = state.active()[0]!, badge = state.all().find(node => node.attributes.has('data-gk-step-badge'))!;
+      assert.equal(mark.getAttribute('data-gk-shape'), kind === 'number' ? 'target' : kind);
+      assert.notEqual(badge.parent, mark, 'The badge is independent of target-space scaling and shape bounds.');
+      assert.equal(badge.getAttribute('data-gk-step-number'), '7'); assert.equal(badge.getAttribute('opacity'), '1');
+      assert.equal(badge.getAttribute('transform'), 'translate(101 98)');
+      assert.equal(badge.children.find(node => node.tagName === 'circle')!.getAttribute('r'), '11');
+      assert.equal(badge.children.find(node => node.tagName === 'text')!.textContent, '7');
+      assert.equal(badge.children.find(node => node.tagName === 'circle')!.getAttribute('fill'), 'var(--gk-guide-badge, #f2b544)');
+      assert.equal(badge.children.find(node => node.tagName === 'text')!.getAttribute('fill'), 'var(--gk-guide-text, #352707)');
+      const paths = mark.all().filter(node => node.tagName === 'path'), geometry = annotationGeometry({ ...command(kind, `composed-${kind}`), index: 7 });
+      assert.equal(paths.length, geometry.paths.length * 2);
+      assert.deepEqual(paths.slice(0, geometry.paths.length).map(path => path.getAttribute('d')), geometry.paths.map(path => path.d));
+      assert.ok(badge.all().every(node => node.getAttribute('pointer-events') === 'none'));
+      assert.equal(state.frames.size, 0);
+    }
+    state.director.present(command('number', 'implicit-number')); assert.equal(state.all().find(node => node.attributes.has('data-gk-step-badge'))!.getAttribute('data-gk-step-number'), '1');
+  } finally { state.director.destroy(); }
+});
+
+test('badge identity and size survive bounds/index updates and settled viewport changes without scheduling frames', () => {
+  const state = renderer(true), visual = { offsetLeft: 40, offsetTop: 20, width: 320, height: 240 };
+  Object.assign(state.doc, { defaultView: { visualViewport: visual } });
+  try {
+    state.director.present({ ...command('ring'), index: 1 });
+    const badge = state.all().find(node => node.attributes.has('data-gk-step-badge'))!;
+    state.director.present({ ...command('ring'), index: 12 });
+    assert.equal(state.all().find(node => node.attributes.has('data-gk-step-badge')), badge); assert.equal(badge.getAttribute('data-gk-step-number'), '12');
+    const next = { left: 40, top: 20, width: 280, height: 190 };
+    state.director.updateBounds(next); const center = stepBadgePlacement(next, { left: 40, top: 20, width: 320, height: 240 });
+    assert.equal(badge.getAttribute('transform'), `translate(${center.x} ${center.y})`); assert.equal(badge.children.find(node => node.tagName === 'circle')!.getAttribute('r'), '11');
+    visual.width = 400; visual.height = 300; state.director.updateBounds(next);
+    const moved = stepBadgePlacement(next, { left: 40, top: 20, width: 400, height: 300 });
+    assert.equal(badge.getAttribute('transform'), `translate(${moved.x} ${moved.y})`); assert.equal(state.frames.size, 0);
+    state.director.present({ ...command('ring'), box: next }); assert.equal(state.all().filter(node => node.attributes.has('data-gk-step-badge')).length, 0);
+  } finally { state.director.destroy(); }
+});
+
+test('badge and readiness cannot precede cursor arrival, and stale badges/callbacks leave with their step', () => {
+  const state = renderer(); let ready = 0, stale = 0;
+  try {
+    state.director.present({ ...command('underline'), index: 3 }, { first: false, onReady: () => ready++ });
+    const badge = state.all().find(node => node.attributes.has('data-gk-step-badge'))!;
+    state.tick(400); assert.equal(state.director.location, 'flight'); assert.equal(state.director.ready, false); assert.equal(ready, 0); assert.equal(badge.getAttribute('opacity'), '0');
+    state.director.updateBounds(box); assert.equal(badge.getAttribute('opacity'), '0', 'A settled-layout refresh cannot reveal a badge during flight.');
+    state.tick(600); assert.equal(state.director.location, 'target'); assert.equal(ready, 1); assert.equal(badge.getAttribute('opacity'), '1'); assert.equal(state.frames.size, 0);
+    state.director.present({ ...command('frame', 'replacement'), index: 4 }, { onReady: () => stale++ });
+    assert.equal(state.all().filter(node => node.attributes.has('data-gk-step-badge')).length, 1);
+    state.director.erase({ animate: false, preserveCursor: true }); assert.equal(state.all().filter(node => node.attributes.has('data-gk-step-badge')).length, 0);
+    state.tick(5000); assert.equal(stale, 0); assert.equal(ready, 1); assert.equal(state.frames.size, 0);
+  } finally { state.director.destroy(); }
+});
 
 test('retained SVG is click-through, bounded, stable on repeated bounds and signals readiness once', () => {
   const state = renderer(); let ready = 0;
