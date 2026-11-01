@@ -243,6 +243,33 @@ test('reduced motion reveals the target instantly without intermediate scrolling
   } finally { await stopProbe(page); }
 });
 
+test('an unused reveal created while visibility is explicitly simulated as hidden starts when visible', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'no-preference' }); await openFixture(page); await arrange(page, 'window');
+  // A deterministic visibility fixture exercises the SDK lifecycle. This is
+  // not a claim that Playwright backgrounded a real operating-system window.
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'hidden', { configurable: true, value: true });
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await ask(page);
+  const hidden = await subsequentFrames(page, 30);
+  expect(hidden.every(frame => frame.y === 0 && !frame.ink && frame.state !== 'revealing')).toBe(true);
+  await startProbe(page);
+  try {
+    await page.evaluate(() => {
+      Object.defineProperty(document, 'hidden', { configurable: true, value: false });
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    await settled(page);
+    const visible = await stopProbe(page), moving = visible.filter(frame => frame.state === 'revealing');
+    expect(new Set(moving.map(frame => Math.round(frame.y))).size).toBeGreaterThan(3);
+    expect(moving.some(frame => frame.ink)).toBe(false);
+    await expect(guide(page).getByText('Step 1 of 4', { exact: true })).toBeVisible();
+  } finally { await stopProbe(page); }
+});
+
 test('a trusted wheel gesture cancels reveal without fighting the visitor or painting the offscreen target', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'no-preference' }); await openFixture(page); await arrange(page, 'window');
   await ask(page); await revealStarted(page);
