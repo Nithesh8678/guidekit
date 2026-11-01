@@ -189,7 +189,10 @@ test('actual aria-hidden hideOthers retains accessible guidance while applicatio
   await expect(page.locator('#modal-background')).toHaveAttribute('aria-hidden', 'true'); await expect(page.locator('#authored-private-area')).toHaveAttribute('aria-hidden', 'true');
   await expect(guide(page)).toBeVisible(); await expect(guide(page)).toContainText('Public title field');
   await expect(page.locator('[data-guidekit-root]')).toHaveAttribute('aria-live', 'off'); expect(await page.locator('[data-guidekit-root]').getAttribute('aria-hidden')).toBeNull();
-  await expect(guide(page).locator('p')).toHaveAttribute('aria-live', 'polite');
+  const instruction = guide(page).getByRole('status').filter({ hasText: 'Public title field' });
+  await expect(instruction).toHaveAttribute('aria-live', 'polite');
+  await expect(instruction).toHaveAttribute('aria-atomic', 'true');
+  await expect(guide(page).locator('.guide-instruction')).toHaveAttribute('aria-hidden', 'true');
   await guide(page).getByRole('button', { name: 'Pause guide', exact: true }).click(); await expect(guide(page)).toHaveAttribute('data-paused', 'true');
   await guide(page).getByRole('button', { name: 'Resume guide', exact: true }).click(); await expect(guide(page)).toHaveAttribute('data-paused', 'false');
   await page.evaluate(() => window.workflowFixture.closeModal()); await expect(guide(page)).toBeVisible(); await expect(page.locator('#authored-private-area')).toHaveAttribute('aria-hidden', 'true'); expect(requests).toHaveLength(1);
