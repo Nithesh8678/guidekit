@@ -13,7 +13,7 @@ import type { GuideKitInstance } from '../../packages/sdk/src/types';
 // Real Chromium + HTTP + SDK, with explicit synthetic planning and disposable host data.
 // These are generic workflow branches, not Cutroom control IDs or real media/model calls.
 const endpoint = 'http://127.0.0.1:5110', website = 'http://127.0.0.1:5111';
-let assets = '', data = '', agentId = '', service: ReturnType<typeof createApp>;
+let assets = '', data = '', agentId = '', service: Awaited<ReturnType<typeof createApp>>;
 const servers: Server[] = [], requests: Array<{ journey: JourneyRequest; page: PageContext }> = [];
 interface Fixture {
   assistant: GuideKitInstance;
@@ -91,7 +91,7 @@ test.beforeAll(async () => {
     };
     window.workflowFixture.closeModal = () => { undo(); document.body.prepend(modal.querySelector('main')); modal.remove(); background.remove(); };
   `, resolveDir: process.cwd(), sourcefile: 'actual-hide-others-fixture.ts' }, bundle: true, format: 'iife', target: 'es2022', write: false });
-  service = createApp({ dataDir: data, root: assets, adminOrigins: new Set([endpoint]), testing: true, provider: {
+  service = (await createApp({ dataDir: data, root: assets, adminOrigins: new Set([endpoint]), testing: true, provider: {
     async status() { return { provider: 'codex', available: true, authenticated: true, message: 'Explicit synthetic workflow planner' }; },
     async infer({ prompt }) {
       const page = reference<PageContext>(prompt, 'Live page (reference data): '), journey = reference<JourneyRequest>(prompt, 'Adaptive journey (untrusted reference data, no field values): ');
@@ -100,10 +100,10 @@ test.beforeAll(async () => {
       const wanted = workflow.review ? ['persist'] : journey.goal.includes('title') ? workflow.titleSaved ? ['review'] : ['title-text', 'title-save'] : workflow.imported < 2 ? ['import'] : !workflow.arranged ? ['arrange'] : ['review'];
       return JSON.stringify({ answer: 'Follow the visible workflow controls.', steps: wanted.map(targetId => ({ targetId, text: 'Use ' + page.targets.find(target => target.id === targetId)!.label + '.', annotation: 'target' })), action: null, citationIds: [], journeyDisposition: workflow.review ? 'done' : 'continue' });
     }, async close() {}
-  } });
-  const owner = service.repo.register({ email: 'workflow@example.invalid', name: 'Workflow owner', companyName: 'Workflow' }, 'synthetic-non-login-hash');
-  const agent = service.repo.createAgent(owner.tenant.id, { name: 'Workflow guide', companyName: 'Workflow', greeting: 'How can I help?', description: '', instructions: '', accentColor: '#365cf5', allowedOrigins: [website], allowedActions: [] }); agentId = agent.id;
-  service.repo.addDocument(owner.tenant.id, agent.id, { title: 'Workflow guide', content: 'Import assets or save a title, then review and persist. The host verifies intermediate and final operations.' }); service.repo.publish(owner.tenant.id, agent.id);
+  } }));
+  const owner = (await service.repo.register({ email: 'workflow@example.invalid', name: 'Workflow owner', companyName: 'Workflow' }, 'synthetic-non-login-hash'));
+  const agent = (await service.repo.createAgent(owner.tenant.id, { name: 'Workflow guide', companyName: 'Workflow', greeting: 'How can I help?', description: '', instructions: '', accentColor: '#365cf5', allowedOrigins: [website], allowedActions: [] })); agentId = agent.id;
+  (await service.repo.addDocument(owner.tenant.id, agent.id, { title: 'Workflow guide', content: 'Import assets or save a title, then review and persist. The host verifies intermediate and final operations.' })); (await service.repo.publish(owner.tenant.id, agent.id));
   const demo = express(); demo.get('/host.js', (_req, res) => res.type('js').send(host)); demo.get('/modal.js', (_req, res) => res.type('js').send(modalScript.outputFiles[0]!.text));
   demo.use((_req, res) => { res.set('Content-Security-Policy', `default-src 'self'; script-src 'self' ${endpoint}; connect-src 'self' ${endpoint}; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'`); res.type('html').send('<!doctype html><html lang="en"><head><title>Workflow fixture</title></head><body style="padding:48px;font-family:system-ui"><main></main><script src="/host.js"></script></body></html>'); });
   const listen = (app: ReturnType<typeof express>, port: number) => new Promise<void>((accept, reject) => { const server = app.listen(port, '127.0.0.1', () => accept()); servers.push(server); server.on('error', reject); });

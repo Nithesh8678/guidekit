@@ -14,7 +14,7 @@ test('real HTTP core: tenancy, publishing, retrieval, actions, and private runti
     infer: async input => { calls++; lastPrompt = input.prompt; return JSON.stringify(nextPlan); }, close: async () => {}
   };
   const origins = new Set<string>();
-  const core = createApp({ dataDir: directory, provider, adminOrigins: origins, testing: true });
+  const core = (await createApp({ dataDir: directory, provider, adminOrigins: origins, testing: true }));
   const server = createServer(core.app); await new Promise<void>(accept => server.listen(0, '127.0.0.1', accept));
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`; origins.add(base);
   const website = 'http://127.0.0.1:4411', otherWebsite = 'http://127.0.0.1:4412';
@@ -98,10 +98,10 @@ test('real HTTP core: tenancy, publishing, retrieval, actions, and private runti
       const continued = await request('/api/embed/session/ask', { token, origin: website, body: { message: journey.goal, page, requestId: 'continue_2', journey } });
       assert.equal(continued.status, 200); assert.deepEqual(continued.data.journey, { id: journey.id, revision: 2, disposition: 'continue' });
       assert.match(lastPrompt, /journey_fixture/); assert.match(lastPrompt, /Open form/);
-      const before = core.repo.rows('SELECT id FROM receipts').length;
+      const before = (await core.repo.rows('SELECT id FROM receipts')).length;
       nextPlan = { answer: 'Create it.', steps: [], action: { name: 'create_contact', argumentsJson: '{"name":"Jamie","company":"Test","status":"New"}', reason: 'Create a contact.' }, citationIds: [], journeyDisposition: 'done' };
       const denied = await request('/api/embed/session/ask', { token, origin: website, body: { message: journey.goal, page, requestId: 'continue_action_denied', journey } });
-      assert.equal(denied.status, 502); assert.match(denied.data.error, /continuation cannot propose/); assert.equal(core.repo.rows('SELECT id FROM receipts').length, before);
+      assert.equal(denied.status, 502); assert.match(denied.data.error, /continuation cannot propose/); assert.equal((await core.repo.rows('SELECT id FROM receipts')).length, before);
       assert.equal((await request('/api/embed/session/ask', { token, origin: website, body: { message: journey.goal, page, requestId: 'private_evidence_denied', journey: { ...journey, completed: [{ ...journey.completed[0], value: 'must not be accepted' }] } } })).status, 400);
     });
     await t.test('proposes a validated action and records no success before confirmation', async () => {
@@ -129,18 +129,18 @@ test('real HTTP core: tenancy, publishing, retrieval, actions, and private runti
     await t.test('expired embed tokens cannot use the model; dashboard logout invalidates its session', async () => {
       nextPlan = { answer: 'Review a fresh contact.', steps: [], action: { name: 'create_contact', argumentsJson: JSON.stringify({ name: 'Grace Tester', company: 'Acme', status: 'New' }), reason: 'Requested' }, citationIds: [] };
       const graceRun = await ask('Create Grace Tester at Acme', 'grace_receipt'); assert.equal(graceRun.status, 200);
-      core.repo.db.prepare('UPDATE embed_sessions SET expires=?').run(Date.now() - 1000);
+      (await core.repo.db.prepare('UPDATE embed_sessions SET expires=?').run(Date.now() - 1000));
       const before = calls; assert.equal((await ask('Hello', 'expired')).status, 401); assert.equal(calls, before);
       assert.equal((await request('/api/embed/session/action-result', { origin: website, token, body: { receiptId: graceRun.data.action.receiptId, status: 'cancelled', message: 'Approval expired before host execution.' } })).status, 200);
-      core.repo.db.prepare('UPDATE embed_sessions SET expires=0').run();
+      (await core.repo.db.prepare('UPDATE embed_sessions SET expires=0').run());
       assert.equal((await request('/api/embed/session/action-result', { origin: website, token, body: { receiptId: graceRun.data.action.receiptId, status: 'cancelled', message: 'Approval expired before host execution.' } })).status, 401);
       assert.equal((await request('/api/auth/logout', { cookie: cookieA, body: {} })).status, 200);
       assert.equal((await request('/api/agents', { cookie: cookieA })).status, 401);
     });
     await t.test('stores persistent version rows and hashes credentials with Argon2id', async () => {
-      const rows = core.repo.rows('SELECT password_hash FROM users'); assert.ok(rows.every(r => String(r.password_hash).startsWith('$argon2id$')));
-      assert.equal(core.repo.listAgents((await request('/api/auth/me', { cookie: cookieB })).data.workspace.tenant.id).length, 0);
-      assert.equal(core.repo.row('SELECT COUNT(*) AS n FROM versions WHERE agent_id=?', agentId)?.n, 2);
+      const rows = (await core.repo.rows('SELECT password_hash FROM users')); assert.ok(rows.every(r => String(r.password_hash).startsWith('$argon2id$')));
+      assert.equal((await core.repo.listAgents((await request('/api/auth/me', { cookie: cookieB })).data.workspace.tenant.id)).length, 0);
+      assert.equal((await core.repo.row('SELECT COUNT(*) AS n FROM versions WHERE agent_id=?', agentId))?.n, 2);
     });
   } finally {
     await new Promise<void>(accept => server.close(() => accept()));

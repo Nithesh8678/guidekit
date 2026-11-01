@@ -44,7 +44,7 @@ const provider: InferenceProvider = {
   async close() {},
 };
 
-const service = createApp({ dataDir, provider, root: assetRoot, adminOrigins: new Set([endpoint]), testing: true });
+const service = (await createApp({ dataDir, provider, root: assetRoot, adminOrigins: new Set([endpoint]), testing: true }));
 const servers: Server[] = [];
 function listen(app: ReturnType<typeof express>, port: number): Promise<void> {
   return new Promise((accept, reject) => {

@@ -44,7 +44,7 @@ test('HTTP planner accepts declared later controls, requires a visible first ste
   const directory = await mkdtemp(join(tmpdir(), 'guidekit-catalog-http-'));
   let nextSteps = [open.id, future.id];
   let lastPrompt = '', prepareCalls = 0;
-  const core = createApp({ dataDir: directory, testing: true, adminOrigins: new Set(), provider: {
+  const core = (await createApp({ dataDir: directory, testing: true, adminOrigins: new Set(), provider: {
     status: async () => ({ provider: 'codex', available: true, authenticated: true, message: 'Explicit fixture.' }), close: async () => {}, prepare() { prepareCalls++; },
     infer: async input => {
       lastPrompt = input.prompt;
@@ -54,14 +54,14 @@ test('HTTP planner accepts declared later controls, requires a visible first ste
       input.onTiming?.({ phase: 'cleanup', durationMs: Number.NaN, elapsedMs: 13 });
       return JSON.stringify({ answer: 'Open Details, then save when ready.', steps: nextSteps.map(targetId => ({ targetId, text: 'Use the highlighted control.' })), action: null, citationIds: [] });
     }
-  } });
+  } }));
   const server = createServer(core.app);
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
   try {
-    const owner = core.repo.register({ email: 'synthetic@example.invalid', name: 'Synthetic tester', companyName: 'Synthetic workspace' }, 'fixture-no-login');
-    const agent = core.repo.createAgent(owner.tenant.id, { name: 'Synthetic Guide', companyName: 'Synthetic', description: '', instructions: '', greeting: 'Hello', accentColor: '#365cf5', allowedOrigins: [website], allowedActions: [] });
-    core.repo.addDocument(owner.tenant.id, agent.id, { title: 'Details', content: 'Open Details to reveal Save details.' }); core.repo.publish(owner.tenant.id, agent.id);
+    const owner = (await core.repo.register({ email: 'synthetic@example.invalid', name: 'Synthetic tester', companyName: 'Synthetic workspace' }, 'fixture-no-login'));
+    const agent = (await core.repo.createAgent(owner.tenant.id, { name: 'Synthetic Guide', companyName: 'Synthetic', description: '', instructions: '', greeting: 'Hello', accentColor: '#365cf5', allowedOrigins: [website], allowedActions: [] }));
+    (await core.repo.addDocument(owner.tenant.id, agent.id, { title: 'Details', content: 'Open Details to reveal Save details.' })); (await core.repo.publish(owner.tenant.id, agent.id));
     const started = await fetch(`${base}/api/embed/${agent.id}/session`, { method: 'POST', headers: { Origin: website, 'Content-Type': 'application/json' }, body: '{}' });
     const { token } = await started.json() as { token: string };
     assert.equal(prepareCalls, 1);

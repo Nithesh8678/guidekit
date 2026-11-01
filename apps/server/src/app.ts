@@ -7,10 +7,11 @@ import { randomBytes } from 'node:crypto';
 import { resolve } from 'node:path';
 import { z } from 'zod';
 import { compileInputSchema } from '../../../packages/contracts/src/schema.js';
-import { createTigerGraphProvider, TigerGraphError, type TigerGraphProvider } from '../../../packages/graph/src/index.js';
-import { Repository, SqliteSessionStore, AppError, digest, newId, now } from './database.js';
+import { TigerGraphError, type TigerGraphProvider } from '../../../packages/graph/src/index.js';
+import { AsyncRepository, RepositorySessionStore, AppError, digest, newId, now } from './repository.js';
+import type { KnowledgeProvider } from '../../../packages/knowledge/src/types.js';
 import { Publications } from './publications.js';
-import { retrieveEvidence } from './knowledge.js';
+import { retrieveEvidence, asKnowledgeProvider, requireKnowledgeProvider, knowledgeName } from './knowledge.js';
 import { JourneyEvidenceCache } from './evidence-cache.js';
 import type { InferenceInput, InferencePhase } from '../../../packages/runtime/src/index.js';
 import { localAccountDelivery, registerAccounts, type AccountDelivery } from './accounts.js';
@@ -25,7 +26,7 @@ export interface InferenceProvider {
   infer(input: InferenceInput): Promise<string>;
   close(): Promise<void>;
 }
-export interface AppOptions { dataDir: string; provider: InferenceProvider; adminOrigins: Set<string>; root?: string; testing?: boolean; graph?: TigerGraphProvider; endpointOrigin?: string; demoOrigins?: { crm: string; support: string }; delivery?: AccountDelivery; limits?: { dailyRuns?: number; activeSessions?: number }; }
+export interface AppOptions { dataDir: string; provider: InferenceProvider; adminOrigins: Set<string>; root?: string; testing?: boolean; graph?: TigerGraphProvider; knowledge?: KnowledgeProvider; repository?: AsyncRepository; endpointOrigin?: string; demoOrigins?: { crm: string; support: string }; delivery?: AccountDelivery; limits?: { dailyRuns?: number; activeSessions?: number }; }
 const email = z.string().trim().toLowerCase().email().max(200);
 const credentials = z.object({ email, password: z.string().min(1).max(256) }).strict();
 const registration = credentials.extend({ password: z.string().min(12).max(256), name: z.string().trim().min(2).max(100), companyName: z.string().trim().min(2).max(100) });
@@ -41,17 +42,21 @@ const outputSchema: Record<string, unknown> = {
   }
 };
 
-export function createApp(options: AppOptions) {
-  const app = express(), repo = new Repository(options.dataDir);
+export async function createApp(options: AppOptions) {
+  const app = express(), repo = options.repository ?? await AsyncRepository.open({ dir: options.dataDir });
   const root = options.root ?? process.cwd();
-  const publications = new Publications(repo, options.graph);
+  const knowledgeProvider = options.knowledge ?? asKnowledgeProvider(options.graph);
+  const legacyGraph = asKnowledgeProvider(options.graph);
+  const knowledgeProviders = [knowledgeProvider, legacyGraph].filter((value): value is KnowledgeProvider => !!value);
+  const publications = new Publications(repo, knowledgeProvider, legacyGraph);
+  await publications.ready();
   const inFlight = new Map<string, Promise<RunResult>>();
   const controllers = new Set<AbortController>();
   const dailyRunLimit = options.limits?.dailyRuns ?? 500, activeSessionLimit = options.limits?.activeSessions ?? 100;
   const sessionsBusy = new Set<string>();
   const evidenceCache = new JourneyEvidenceCache();
-  const prune = setInterval(() => {
-    repo.db.prepare('DELETE FROM dashboard_sessions WHERE expires < ?').run(Date.now());
+  const prune = setInterval(async () => {
+    await repo.db.prepare('DELETE FROM dashboard_sessions WHERE expires < ?').run(Date.now()).catch(() => undefined);
     // Keep embed rows referenced by audit runs; expired credentials are rejected at lookup.
   }, 600_000); prune.unref();
   app.disable('x-powered-by'); app.set('trust proxy', false);
@@ -70,7 +75,7 @@ export function createApp(options: AppOptions) {
   app.use('/api', (_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
   app.use('/api', rateLimit({ windowMs: 60_000, limit: options.testing ? 2000 : 150, standardHeaders: 'draft-8', legacyHeaders: false, message: { error: 'Too many requests. Try again in a minute.' } }));
   app.use(express.json({ limit: '320kb', strict: true }));
-  app.use(session({ name: 'gk.sid', secret: repo.sessionSecret, store: new SqliteSessionStore(repo), resave: false, saveUninitialized: false, cookie: { httpOnly: true, sameSite: 'strict', secure: false, maxAge: 28_800_000 }, rolling: true }));
+  app.use(session({ name: 'gk.sid', secret: repo.sessionSecret, store: new RepositorySessionStore(repo), resave: false, saveUninitialized: false, cookie: { httpOnly: true, sameSite: 'strict', secure: false, maxAge: 28_800_000 }, rolling: true }));
 
   // Cookie-authenticated admin endpoints never accept an embed website's Origin.
   app.use('/api', (req, _res, next) => {
@@ -80,125 +85,133 @@ export function createApp(options: AppOptions) {
     if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) && (!origin || !options.adminOrigins.has(origin))) return next(new AppError(403, 'A same-origin dashboard request is required.'));
     next();
   });
-  const identity = (req: Request): string | null => {
-    const epoch = req.session.userId ? repo.row('SELECT auth_epoch FROM users WHERE id=?', req.session.userId)?.auth_epoch : null;
+  const identity = async (req: Request): Promise<string | null> => {
+    const epoch = req.session.userId ? (await repo.row('SELECT auth_epoch FROM users WHERE id=?', req.session.userId))?.auth_epoch : null;
     return req.session.userId && epoch === (req.session.authEpoch ?? 0) ? req.session.userId : null;
   };
-  const workspace = (req: Request): Workspace => {
-    const userId = identity(req), value = userId ? repo.workspace(userId, req.session.tenantId) : null;
+  const workspace = async (req: Request): Promise<Workspace> => {
+    const userId = (await identity(req)), value = userId ? (await repo.workspace(userId, req.session.tenantId)) : null;
     if (!value) throw new AppError(401, 'Sign in to your workspace.');
     return value;
   };
   const signedIn = async (req: Request, userId: string, tenantId?: string, expectedEpoch = 0) => {
-    if (repo.row('SELECT auth_epoch FROM users WHERE id=?', userId)?.auth_epoch !== expectedEpoch) throw new AppError(401, 'Account access changed during sign-in. Sign in again.');
+    if ((await repo.row('SELECT auth_epoch FROM users WHERE id=?', userId))?.auth_epoch !== expectedEpoch) throw new AppError(401, 'Account access changed during sign-in. Sign in again.');
     await new Promise<void>((accept, reject) => req.session.regenerate(error => error ? reject(error) : accept()));
-    if (repo.row('SELECT auth_epoch FROM users WHERE id=?', userId)?.auth_epoch !== expectedEpoch) throw new AppError(401, 'Account access changed during sign-in. Sign in again.');
+    if ((await repo.row('SELECT auth_epoch FROM users WHERE id=?', userId))?.auth_epoch !== expectedEpoch) throw new AppError(401, 'Account access changed during sign-in. Sign in again.');
     req.session.userId = userId;
     req.session.tenantId = tenantId;
     req.session.authEpoch = expectedEpoch;
     await new Promise<void>((accept, reject) => req.session.save(error => error ? reject(error) : accept()));
-    if (repo.row('SELECT auth_epoch FROM users WHERE id=?', userId)?.auth_epoch !== expectedEpoch) {
+    if ((await repo.row('SELECT auth_epoch FROM users WHERE id=?', userId))?.auth_epoch !== expectedEpoch) {
       await new Promise<void>((accept, reject) => req.session.destroy(error => error ? reject(error) : accept()));
       throw new AppError(401, 'Account access changed during sign-in. Sign in again.');
     }
   };
   const authLimit = rateLimit({ windowMs: 900_000, limit: options.testing ? 100 : 20, standardHeaders: 'draft-8', legacyHeaders: false, message: { error: 'Too many sign-in attempts. Try again in 15 minutes.' } });
-  app.get('/api/auth/me', (req, res) => { try { res.json({ workspace: workspace(req) }); } catch { res.json({ workspace: null }); } });
+  app.get('/api/auth/me', async (req, res) => { try { res.json({ workspace: (await workspace(req)) }); } catch { res.json({ workspace: null }); } });
   app.post('/api/auth/register', authLimit, async (req, res) => {
     const input = registration.parse(req.body);
     const passwordHash = await hash(input.password, { memoryCost: 19456, timeCost: 2, parallelism: 1 });
-    const value = repo.register(input, passwordHash);
+    const value = (await repo.register(input, passwordHash));
     await signedIn(req, value.user.id); res.status(201).json({ workspace: value });
   });
   app.post('/api/auth/login', authLimit, async (req, res) => {
-    const input = credentials.parse(req.body), user = repo.row('SELECT id,password_hash,auth_epoch FROM users WHERE email=?', input.email);
+    const input = credentials.parse(req.body), user = (await repo.row('SELECT id,password_hash,auth_epoch FROM users WHERE email=?', input.email));
     if (!user || !await verify(String(user.password_hash), input.password)) throw new AppError(401, 'Email or password is incorrect.');
-    await signedIn(req, String(user.id), undefined, Number(user.auth_epoch)); res.json({ workspace: repo.workspace(String(user.id)) });
+    await signedIn(req, String(user.id), undefined, Number(user.auth_epoch)); res.json({ workspace: (await repo.workspace(String(user.id))) });
   });
   app.post('/api/auth/logout', async (req, res) => {
     await new Promise<void>((accept, reject) => req.session.destroy(error => error ? reject(error) : accept()));
     res.clearCookie('gk.sid', { httpOnly: true, sameSite: 'strict', secure: false }).json({ ok: true });
   });
   registerAccounts(app, repo, { workspace, identity, signedIn, authLimit, origin: options.endpointOrigin, delivery: options.delivery ?? localAccountDelivery(options.dataDir) });
-  app.use('/api/agents', (req, res, next) => {
+  app.use('/api/agents', async (req, res, next) => {
     if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
-    const actor = workspace(req);
+    const actor = (await workspace(req));
     if (actor.role === 'viewer' && !/^\/[^/]+\/knowledge-(preview|evaluate)$/.test(req.path)) throw new AppError(403, 'Viewers cannot change agents or publish versions. Ask a workspace admin for editor access.');
     if (/^\/[^/]+\/knowledge-(preview|evaluate)$/.test(req.path)) return next();
     const path = req.path, method = req.method;
-    res.once('finish', () => { if (res.statusCode < 400) repo.audit(actor.tenant.id, actor.user.id, `agent.${method.toLowerCase()}`, path.split('/').filter(Boolean).slice(0, 4).join('/') || 'new', { status: res.statusCode }); });
+    res.once('finish', () => { if (res.statusCode < 400) void repo.audit(actor.tenant.id, actor.user.id, `agent.${method.toLowerCase()}`, path.split('/').filter(Boolean).slice(0, 4).join('/') || 'new', { status: res.statusCode }).catch(() => undefined); });
     next();
   });
-  app.get('/api/agents', (req, res) => res.json({ agents: repo.listAgents(workspace(req).tenant.id) }));
-  app.post('/api/agents', (req, res) => res.status(201).json({ agent: repo.createAgent(workspace(req).tenant.id, agentConfigSchema.parse(req.body)) }));
-  app.get('/api/agents/:id', (req, res) => res.json(repo.detail(workspace(req).tenant.id, String(req.params.id))));
-  app.put('/api/agents/:id', (req, res) => res.json({ agent: repo.updateAgent(workspace(req).tenant.id, String(req.params.id), agentConfigSchema.parse(req.body)) }));
-  app.post('/api/agents/:id/documents', (req, res) => res.status(201).json({ document: repo.addDocument(workspace(req).tenant.id, String(req.params.id), documentSchema.parse(req.body)) }));
-  app.put('/api/agents/:id/documents/:documentId', (req, res) => res.json({ document: repo.updateDocument(workspace(req).tenant.id, String(req.params.id), String(req.params.documentId), documentSchema.parse(req.body)) }));
-  app.delete('/api/agents/:id/documents/:documentId', (req, res) => { repo.removeDocument(workspace(req).tenant.id, String(req.params.id), String(req.params.documentId)); res.json({ ok: true }); });
+  app.get('/api/agents', async (req, res) => res.json({ agents: (await repo.listAgents((await workspace(req)).tenant.id)) }));
+  app.post('/api/agents', async (req, res) => res.status(201).json({ agent: (await repo.createAgent((await workspace(req)).tenant.id, agentConfigSchema.parse(req.body))) }));
+  app.get('/api/agents/:id', async (req, res) => res.json((await repo.detail((await workspace(req)).tenant.id, String(req.params.id)))));
+  app.put('/api/agents/:id', async (req, res) => res.json({ agent: (await repo.updateAgent((await workspace(req)).tenant.id, String(req.params.id), agentConfigSchema.parse(req.body))) }));
+  app.post('/api/agents/:id/documents', async (req, res) => res.status(201).json({ document: (await repo.addDocument((await workspace(req)).tenant.id, String(req.params.id), documentSchema.parse(req.body))) }));
+  app.put('/api/agents/:id/documents/:documentId', async (req, res) => res.json({ document: (await repo.updateDocument((await workspace(req)).tenant.id, String(req.params.id), String(req.params.documentId), documentSchema.parse(req.body))) }));
+  app.delete('/api/agents/:id/documents/:documentId', async (req, res) => { (await repo.removeDocument((await workspace(req)).tenant.id, String(req.params.id), String(req.params.documentId))); res.json({ ok: true }); });
   const versionNumber = (value: unknown) => z.coerce.number().int().positive().max(2_147_483_647).parse(value);
-  app.post('/api/agents/:id/publish', async (req, res) => res.status(201).json(await publications.publish(workspace(req).tenant.id, String(req.params.id))));
-  app.get('/api/agents/:id/versions/:number', (req, res) => res.json(repo.version(workspace(req).tenant.id, String(req.params.id), versionNumber(req.params.number))));
-  app.post('/api/agents/:id/versions/:number/retry', async (req, res) => res.json(await publications.prepare(workspace(req).tenant.id, String(req.params.id), versionNumber(req.params.number))));
-  app.post('/api/agents/:id/versions/:number/activate', (req, res) => { const tenantId = workspace(req).tenant.id, agentId = String(req.params.id); publications.activate(tenantId, agentId, versionNumber(req.params.number)); res.json({ activeVersion: repo.agent(tenantId, agentId).publishedVersion }); });
-  app.post('/api/agents/:id/unpublish', (req, res) => { repo.unpublish(workspace(req).tenant.id, String(req.params.id)); res.json({ activeVersion: null }); });
+  app.post('/api/agents/:id/publish', async (req, res) => res.status(201).json(await publications.publish((await workspace(req)).tenant.id, String(req.params.id))));
+  app.get('/api/agents/:id/versions/:number', async (req, res) => res.json((await repo.version((await workspace(req)).tenant.id, String(req.params.id), versionNumber(req.params.number)))));
+  app.post('/api/agents/:id/versions/:number/retry', async (req, res) => res.json(await publications.prepare((await workspace(req)).tenant.id, String(req.params.id), versionNumber(req.params.number))));
+  app.post('/api/agents/:id/versions/:number/activate', async (req, res) => { const tenantId = (await workspace(req)).tenant.id, agentId = String(req.params.id); (await publications.activate(tenantId, agentId, versionNumber(req.params.number))); res.json({ activeVersion: (await repo.agent(tenantId, agentId)).publishedVersion }); });
+  app.post('/api/agents/:id/unpublish', async (req, res) => { (await repo.unpublish((await workspace(req)).tenant.id, String(req.params.id))); res.json({ activeVersion: null }); });
   const previewSchema = z.object({ question: z.string().trim().min(1).max(500), version: z.number().int().positive().optional() }).strict();
   app.post('/api/agents/:id/knowledge-preview', async (req, res) => {
-    const actor = workspace(req), agentId = String(req.params.id), agent = repo.agent(actor.tenant.id, agentId), input = previewSchema.parse(req.body), number = input.version ?? agent.publishedVersion;
+    const actor = (await workspace(req)), agentId = String(req.params.id), agent = (await repo.agent(actor.tenant.id, agentId)), input = previewSchema.parse(req.body), number = input.version ?? agent.publishedVersion;
     if (!number) throw new AppError(400, 'Publish company knowledge before testing retrieval.');
-    const evidence = await retrieveEvidence(repo, options.graph, actor.tenant.id, agentId, number, input.question);
+    const evidence = await retrieveEvidence(repo, knowledgeProviders, actor.tenant.id, agentId, number, input.question);
     res.json({ version: number, ...evidence, sufficient: evidence.citations.length > 0, message: evidence.citations.length ? 'Source matches found. Review them for factual support before relying on an answer.' : 'No source matches. Add relevant knowledge before expecting a company-specific answer.' });
   });
   app.post('/api/agents/:id/knowledge-evaluate', async (req, res) => {
-    const actor = workspace(req), agentId = String(req.params.id), agent = repo.agent(actor.tenant.id, agentId);
+    const actor = (await workspace(req)), agentId = String(req.params.id), agent = (await repo.agent(actor.tenant.id, agentId));
     const input = z.object({ version: z.number().int().positive().optional(), cases: z.array(z.object({ question: z.string().trim().min(1).max(500), expectedDocumentIds: z.array(z.string().max(160)).min(1).max(8) }).strict()).min(1).max(10) }).strict().parse(req.body), number = input.version ?? agent.publishedVersion;
     if (!number) throw new AppError(400, 'Publish knowledge before evaluating.');
-    const sourceIds = new Set(repo.version(actor.tenant.id, agentId, number).documents.map(doc => doc.id));
+    const sourceIds = new Set((await repo.version(actor.tenant.id, agentId, number)).documents.map(doc => doc.id));
     if (input.cases.some(item => item.expectedDocumentIds.some(id => !sourceIds.has(id)))) throw new AppError(400, 'Expected documents must belong to this immutable snapshot.');
     const results = [];
-    for (const item of input.cases) { const evidence = await retrieveEvidence(repo, options.graph, actor.tenant.id, agentId, number, item.question), ids = [...new Set(evidence.citations.map(c => c.documentId))], expected = [...new Set(item.expectedDocumentIds)], hits = ids.filter(id => expected.includes(id)).length, rank = ids.findIndex(id => expected.includes(id)); results.push({ question: item.question, retrievedDocumentIds: ids, recall: hits / expected.length, precision: ids.length ? hits / ids.length : 0, reciprocalRank: rank < 0 ? 0 : 1 / (rank + 1) }); }
+    for (const item of input.cases) { const evidence = await retrieveEvidence(repo, knowledgeProviders, actor.tenant.id, agentId, number, item.question), ids = [...new Set(evidence.citations.map(c => c.documentId))], expected = [...new Set(item.expectedDocumentIds)], hits = ids.filter(id => expected.includes(id)).length, rank = ids.findIndex(id => expected.includes(id)); results.push({ question: item.question, retrievedDocumentIds: ids, recall: hits / expected.length, precision: ids.length ? hits / ids.length : 0, reciprocalRank: rank < 0 ? 0 : 1 / (rank + 1) }); }
     res.json({ version: number, cases: results, meanRecall: results.reduce((sum, item) => sum + item.recall, 0) / results.length, meanReciprocalRank: results.reduce((sum, item) => sum + item.reciprocalRank, 0) / results.length, scope: 'retrieval-only; does not grade generated answers' });
   });
-  app.get('/api/agents/:id/metrics', (req, res) => {
-    const actor = workspace(req), agentId = String(req.params.id); repo.agent(actor.tenant.id, agentId);
+  app.get('/api/agents/:id/metrics', async (req, res) => {
+    const actor = (await workspace(req)), agentId = String(req.params.id); (await repo.agent(actor.tenant.id, agentId));
     const day = `${new Date().toISOString().slice(0, 10)}T00:00:00.000Z`;
-    const rows = repo.rows('SELECT status,COUNT(*) AS count,ROUND(AVG(duration_ms)) AS averageDurationMs FROM runs WHERE tenant_id=? AND agent_id=? AND created_at>=? GROUP BY status', actor.tenant.id, agentId, day);
-    const workspaceRuns = Number(repo.row('SELECT COUNT(*) AS count FROM runs WHERE tenant_id=? AND created_at>=?', actor.tenant.id, day)!.count);
+    const rows = (await repo.rows('SELECT status,COUNT(*) AS count,ROUND(AVG(duration_ms)) AS averageDurationMs FROM runs WHERE tenant_id=? AND agent_id=? AND created_at>=? GROUP BY status', actor.tenant.id, agentId, day));
+    const workspaceRuns = Number((await repo.row('SELECT COUNT(*) AS count FROM runs WHERE tenant_id=? AND created_at>=?', actor.tenant.id, day))!.count);
     res.json({ periodStart: day, statuses: rows, workspaceUsage: { runs: workspaceRuns, dailyLimit: dailyRunLimit, remaining: Math.max(0, dailyRunLimit - workspaceRuns) } });
   });
   app.get('/api/agents/:id/diagnostics', async (req, res) => {
-    const tenantId = workspace(req).tenant.id, agent = repo.agent(tenantId, String(req.params.id));
-    const detail = repo.detail(tenantId, agent.id), version = detail.versions.find(version => version.number === agent.publishedVersion);
+    const tenantId = (await workspace(req)).tenant.id, agent = (await repo.agent(tenantId, String(req.params.id)));
+    const detail = (await repo.detail(tenantId, agent.id)), version = detail.versions.find(version => version.number === agent.publishedVersion);
     const runtime = await options.provider.status();
-    const graph = options.graph ? await options.graph.status().catch(() => ({ connected: false })) : null;
+    const activeSource = version?.graphSource ?? knowledgeProvider?.id ?? 'local';
+    const activeKnowledgeProvider = knowledgeProviders.find(provider => provider.id === activeSource);
+    const knowledgeStatus = activeSource === 'local' ? { connected: true, message: 'Local keyword search is available.' } : activeKnowledgeProvider ? await activeKnowledgeProvider.status().catch(() => ({ connected: false, message: `${knowledgeName(activeSource)} is unavailable; check the server integration.` })) : { connected: false, message: `This publication requires ${knowledgeName(activeSource)}. Restore its server configuration or explicitly migrate it.` };
     const checks = [
       { id: 'publication', status: version?.status === 'ready' ? 'pass' : 'error', message: version?.status === 'ready' ? `Active v${version.number} is ready.` : 'No ready active publication. Publish or retry preparation.' },
       { id: 'knowledge', status: version?.documentCount ? 'pass' : 'error', message: version?.documentCount ? `${version.documentCount} documents in the active snapshot.` : 'Add company knowledge and publish.' },
       { id: 'runtime', status: runtime.available && runtime.authenticated ? 'pass' : 'error', message: runtime.message },
-      { id: 'graph', status: graph ? graph.connected ? 'pass' : 'error' : version?.graphSource === 'tigergraph' ? 'error' : 'warning', message: graph ? graph.connected ? 'TigerGraph is connected.' : 'TigerGraph is unavailable; check the server integration.' : version?.graphSource === 'tigergraph' ? 'This publication requires TigerGraph. Restore the server configuration.' : 'Local retrieval selected. TigerGraph is not configured.' },
-      { id: 'origins', status: version ? 'pass' : 'error', message: version ? `Active snapshot website origins: ${repo.version(tenantId, agent.id, version.number).config.allowedOrigins.join(', ')}` : 'No active snapshot origins. Publish an agent first.' },
+      { id: 'graph', status: knowledgeStatus.connected ? 'pass' : 'error', message: knowledgeStatus.message },
+      { id: 'origins', status: version ? 'pass' : 'error', message: version ? `Active snapshot website origins: ${(await repo.version(tenantId, agent.id, version.number)).config.allowedOrigins.join(', ')}` : 'No active snapshot origins. Publish an agent first.' },
       { id: 'host-actions', status: 'warning', message: 'Business actions require website registration, application authorization and outcome verification. Test them on the installed website.' },
       { id: 'voice', status: 'warning', message: 'Physical voice requires HTTPS/localhost, supported Chrome/Edge and microphone permission. Test on the visitor device.' }
     ];
     res.json({ endpointOrigin: options.endpointOrigin ?? `${req.protocol}://${req.get('host')}`, ...(options.demoOrigins ? { demoOrigins: options.demoOrigins } : {}), ready: !checks.some(check => check.status === 'error'), checks });
   });
-  app.get('/api/runtime/status', async (req, res) => { workspace(req); res.json(await options.provider.status()); });
-  app.get('/api/integrations/status', async (req, res) => {
-    workspace(req);
-    try { res.json({ tigergraph: await (options.graph ?? createTigerGraphProvider()).status() }); }
-    catch { res.json({ tigergraph: { configured: !!options.graph, connected: false, message: 'TigerGraph status could not be checked. Check the server configuration.' } }); }
-  });
-  app.post('/api/agents/:id/graph-sync', async (req, res) => {
-    const tenantId = workspace(req).tenant.id, agentId = String(req.params.id);
-    repo.agent(tenantId, agentId);
-    const input = z.object({ version: z.number().int().positive().optional() }).strict().parse(req.body ?? {});
-    if (!options.graph) throw new AppError(503, 'TigerGraph is not configured. Set up the server-side integration before syncing.');
-    const number = input.version ?? repo.agent(tenantId, agentId).publishedVersion;
+  app.get('/api/runtime/status', async (req, res) => { (await workspace(req)); res.json(await options.provider.status()); });
+  const integrationStatus = async () => {
+    const knowledge = knowledgeProvider ? await knowledgeProvider.status().then(status => ({ ...status, source: knowledgeProvider.id })).catch(() => ({ source: knowledgeProvider.id, configured: true, connected: false, message: `${knowledgeName(knowledgeProvider.id)} status could not be checked. Check the server configuration.` })) : { source: 'local' as const, configured: true, connected: true, message: 'Local keyword search is available.', mode: 'keyword' };
+    // Kept for older SDK/dashboard clients during the migration window.
+    const tigergraph = legacyGraph ? await legacyGraph.status().catch(() => ({ configured: true, connected: false, message: 'TigerGraph status could not be checked.' })) : knowledgeProvider?.id === 'tigergraph' ? knowledge : { configured: false, connected: false, message: 'TigerGraph is not the selected knowledge provider.' };
+    return { knowledge, tigergraph };
+  };
+  app.get('/api/integrations/status', async (req, res) => { await workspace(req); res.json(await integrationStatus()); });
+  app.get('/api/agents/:id/integrations', async (req, res) => { await repo.agent((await workspace(req)).tenant.id, String(req.params.id)); res.json(await integrationStatus()); });
+  const syncKnowledge = async (req: Request, res: Response) => {
+    const tenantId = (await workspace(req)).tenant.id, agentId = String(req.params.id);
+    if (req.path.endsWith('/graph-sync') && !knowledgeProvider) throw new AppError(503, 'TigerGraph is not configured. Select a knowledge provider before syncing.');
+    const agent = await repo.agent(tenantId, agentId), input = z.object({ version: z.number().int().positive().optional() }).strict().parse(req.body ?? {});
+    const number = input.version ?? agent.publishedVersion;
     if (!number) throw new AppError(400, 'Publish a candidate first.');
+    const snapshot = await repo.version(tenantId, agentId, number);
+    requireKnowledgeProvider(snapshot.version.graphSource, knowledgeProviders);
     const result = await publications.prepare(tenantId, agentId, number);
     if (result.version.status !== 'ready') throw new AppError(502, result.version.error ?? 'Knowledge preparation failed.');
-    res.json({ synced: true, version: result.version.number, vertices: result.vertices, edges: result.edges });
-  });
+    res.json({ synced: true, source: result.version.graphSource, version: result.version.number, vertices: result.vertices, edges: result.edges, chunks: result.chunks });
+  };
+  app.post('/api/agents/:id/knowledge-sync', syncKnowledge);
+  app.post('/api/agents/:id/graph-sync', syncKnowledge);
 
   app.use('/api/embed', (req, res, next) => {
     const origin = req.get('origin');
@@ -211,61 +224,70 @@ export function createApp(options: AppOptions) {
     if (req.method === 'OPTIONS') return res.sendStatus(204);
     next();
   });
-  const embedSession = (req: Request, reportingOnly = false) => {
+  const embedSession = async (req: Request, reportingOnly = false) => {
     const bearer = req.get('authorization')?.match(/^Bearer ([A-Za-z0-9_-]{40,100})$/)?.[1];
     if (!bearer) throw new AppError(401, 'Start a new assistant session.');
     // Expired sessions cannot infer. A bounded grace permits only recording an
     // already-issued receipt, including cancellation of a stale approval.
-    const row = repo.row('SELECT * FROM embed_sessions WHERE token_hash=? AND expires>?', digest(bearer), Date.now() - (reportingOnly ? 86_400_000 : 0));
+    const row = (await repo.row('SELECT * FROM embed_sessions WHERE token_hash=? AND expires>?', digest(bearer), Date.now() - (reportingOnly ? 86_400_000 : 0)));
     if (!row) throw new AppError(401, 'This assistant session expired. Reopen the assistant.');
     if (row.origin !== req.get('origin')) throw new AppError(403, 'This session belongs to a different website.');
     return row;
   };
   const embedLimit = rateLimit({ windowMs: 600_000, limit: options.testing ? 300 : 30, standardHeaders: 'draft-8', legacyHeaders: false, message: { error: 'Assistant session limit reached. Try again in a few minutes.' } });
-  app.post('/api/embed/:agentId/session', embedLimit, (req, res) => {
-    const agentId = String(req.params.agentId), published = repo.published(agentId);
-    if (published.graphSource === 'tigergraph' && !options.graph) throw new AppError(503, 'This publication requires TigerGraph. Restore the server configuration.');
+  app.post('/api/embed/:agentId/session', embedLimit, async (req, res) => {
+    const agentId = String(req.params.agentId), published = (await repo.published(agentId));
+    requireKnowledgeProvider(published.graphSource, knowledgeProviders);
     if (!published.config.allowedOrigins.includes(req.get('origin')!)) throw new AppError(403, 'This website is not in the published agent’s allowed origins.');
-    if (Number(repo.row('SELECT COUNT(*) AS count FROM embed_sessions WHERE tenant_id=? AND expires>?', published.tenantId, Date.now())!.count) >= activeSessionLimit) throw new AppError(429, 'This workspace reached its active assistant session capacity. Retry after existing sessions expire.');
     const token = randomBytes(32).toString('base64url'), expiresAt = Date.now() + 900_000;
-    repo.db.prepare('INSERT INTO embed_sessions VALUES (?,?,?,?,?,?,?)').run(newId('ses'), digest(token), published.tenantId, agentId, published.version, req.get('origin')!, expiresAt);
+    await repo.transaction(async () => {
+      await repo.lockTenant(published.tenantId);
+      if (Number((await repo.row('SELECT COUNT(*) AS count FROM embed_sessions WHERE tenant_id=? AND expires>?', published.tenantId, Date.now()))!.count) >= activeSessionLimit) throw new AppError(429, 'This workspace reached its active assistant session capacity. Retry after existing sessions expire.');
+      await repo.db.prepare('INSERT INTO embed_sessions VALUES (?,?,?,?,?,?,?)').run(newId('ses'), digest(token), published.tenantId, agentId, published.version, req.get('origin')!, expiresAt);
+    });
     // Preparation contains no page, question, thread or model turn. It is bounded by the provider.
     try { options.provider.prepare?.(); } catch { /* An inference still verifies readiness before any turn. */ }
     res.json({ token, expiresAt, agent: { id: agentId, version: published.version, name: published.config.name, companyName: published.config.companyName, greeting: published.config.greeting, accentColor: published.config.accentColor, allowedActions: published.config.allowedActions } });
   });
-  app.post('/api/embed/session/prepare', (req, res) => {
-    embedSession(req);
+  app.post('/api/embed/session/prepare', async (req, res) => {
+    (await embedSession(req));
     z.object({}).strict().parse(req.body ?? {});
     try { options.provider.prepare?.(); } catch { /* Preparation does not replace inference-time checks. */ }
     res.json({ ok: true });
   });
   const askLimit = rateLimit({ windowMs: 600_000, limit: options.testing ? 300 : 16, standardHeaders: 'draft-8', legacyHeaders: false, message: { error: 'Question limit reached. Try again in a few minutes.' } });
   app.post('/api/embed/session/ask', askLimit, async (req, res) => {
-    const sessionRow = embedSession(req), input = askSchema.parse(req.body);
+    const sessionRow = (await embedSession(req)), input = askSchema.parse(req.body);
     if (new URL(input.page.url).origin !== sessionRow.origin) throw new AppError(400, 'Page context does not match the session website.');
     if (JSON.stringify(input.page.context).length > 12000 || JSON.stringify(input.page.actions).length > 18000) throw new AppError(413, 'Page context or action schemas are too large.');
-    const existing = repo.row('SELECT * FROM runs WHERE session_id=? AND request_id=?', String(sessionRow.id), input.requestId);
+    const existing = (await repo.row('SELECT * FROM runs WHERE session_id=? AND request_id=?', String(sessionRow.id), input.requestId));
     const requestHash = digest(JSON.stringify(input));
     if (existing) {
       if (existing.question !== input.message || (existing.request_hash && existing.request_hash !== requestHash)) throw new AppError(409, 'A request ID cannot be reused for a different question or page context.');
       if (existing.response) return res.json(JSON.parse(String(existing.response)));
       throw new AppError(409, existing.status === 'running' ? 'This question is already running.' : 'This request ended. Submit a new question.');
     }
-    if (Number(repo.row('SELECT COUNT(*) AS count FROM runs WHERE tenant_id=? AND created_at>=?', String(sessionRow.tenant_id), `${new Date().toISOString().slice(0, 10)}T00:00:00.000Z`)!.count) >= dailyRunLimit) throw new AppError(429, 'This workspace reached its daily model request capacity. Retry after 00:00 UTC or ask the operator to review the limit.');
-    if (sessionsBusy.has(String(sessionRow.id)) || inFlight.size >= 2) throw new AppError(429, 'The assistant is busy. Wait for the current question to finish.');
+    if (sessionsBusy.has(String(sessionRow.id)) || controllers.size >= 2) throw new AppError(429, 'The assistant is busy. Wait for the current question to finish.');
     const runId = newId('run'), controller = new AbortController();
     controllers.add(controller); sessionsBusy.add(String(sessionRow.id));
     const abort = () => { if (!res.writableEnded) controller.abort(); };
     res.on('close', abort);
     const timer = setTimeout(() => controller.abort(), 110_000);
     const started = performance.now();
-    repo.db.prepare('INSERT INTO runs (id,session_id,tenant_id,agent_id,request_id,question,status,created_at,request_hash) VALUES (?,?,?,?,?,?,?,?,?)').run(runId, String(sessionRow.id), String(sessionRow.tenant_id), String(sessionRow.agent_id), input.requestId, input.message, 'running', now(), requestHash);
+    let inserted = false;
     const work = async (): Promise<RunResult> => {
-      const published = repo.published(String(sessionRow.agent_id), Number(sessionRow.version));
-      if (published.graphSource === 'tigergraph' && !options.graph) throw new AppError(503, 'This publication requires TigerGraph. Restore the server configuration.');
+      await repo.transaction(async () => {
+        await repo.lockTenant(String(sessionRow.tenant_id));
+        if (Number((await repo.row('SELECT COUNT(*) AS count FROM runs WHERE tenant_id=? AND created_at>=?', String(sessionRow.tenant_id), `${new Date().toISOString().slice(0, 10)}T00:00:00.000Z`))!.count) >= dailyRunLimit) throw new AppError(429, 'This workspace reached its daily model request capacity. Retry after 00:00 UTC or ask the operator to review the limit.');
+        await repo.db.prepare('INSERT INTO runs (id,session_id,tenant_id,agent_id,request_id,question,status,created_at,request_hash) VALUES (?,?,?,?,?,?,?,?,?)').run(runId, String(sessionRow.id), String(sessionRow.tenant_id), String(sessionRow.agent_id), input.requestId, input.message, 'running', now(), requestHash);
+      });
+      inserted = true;
+      controller.signal.throwIfAborted();
+      const published = (await repo.published(String(sessionRow.agent_id), Number(sessionRow.version)));
+      requireKnowledgeProvider(published.graphSource, knowledgeProviders);
       const retrievalStarted = performance.now();
       const loadEvidence = async () => {
-        const evidence = await retrieveEvidence(repo, options.graph, String(sessionRow.tenant_id), String(sessionRow.agent_id), Number(sessionRow.version), input.message);
+        const evidence = await retrieveEvidence(repo, knowledgeProviders, String(sessionRow.tenant_id), String(sessionRow.agent_id), Number(sessionRow.version), input.message);
         controller.signal.throwIfAborted(); return evidence;
       };
       const { evidence: { citations, knowledge }, cached } = input.journey
@@ -279,7 +301,7 @@ export function createApp(options: AppOptions) {
         if (JSON.stringify(action.inputSchema).length > 6000) throw new AppError(400, 'An action schema is too large.');
         try { compileInputSchema(action.inputSchema); } catch { throw new AppError(400, `Unsupported input schema for action ${action.name}. Use bounded properties, types, required, enum and numeric/string bounds.`); }
       }
-      const history = repo.rows('SELECT question,answer,status FROM runs WHERE session_id=? AND id!=? AND answer!=? ORDER BY created_at DESC LIMIT 4', String(sessionRow.id), runId, '').reverse();
+      const history = (await repo.rows('SELECT question,answer,status FROM runs WHERE session_id=? AND id!=? AND answer!=? ORDER BY created_at DESC LIMIT 4', String(sessionRow.id), runId, '')).reverse();
       const prompt = buildPrompt(published.config, input.message, { ...input.page, actions }, citations, history, knowledge, input.journey);
       const planningStarted = performance.now();
       const rawText = await options.provider.infer({ prompt, schema: outputSchema, signal: controller.signal, onTiming: event => {
@@ -307,42 +329,58 @@ export function createApp(options: AppOptions) {
       const selected = citations.filter(c => ids.has(c.documentId)).filter((c, index, all) => all.findIndex(x => x.documentId === c.documentId) === index);
       const result: RunResult = { runId, answer: plan.answer, steps: plan.steps, action, citations: selected, provider: options.provider.id ?? 'codex', version: published.version, knowledge, ...(input.journey ? { journey: { id: input.journey.id, revision: input.journey.revision, disposition: plan.journeyDisposition ?? (plan.steps.length ? 'continue' : 'needs_input') } } : {}) };
       controller.signal.throwIfAborted();
-      repo.transaction(() => {
-        if (action) repo.db.prepare('INSERT INTO receipts (id,session_id,run_id,action_name,arguments) VALUES (?,?,?,?,?)').run(action.receiptId, String(sessionRow.id), runId, action.name, JSON.stringify(action.arguments));
-        repo.db.prepare('UPDATE runs SET answer=?,status=?,response=?,action_name=? WHERE id=?').run(result.answer, action ? 'awaiting_confirmation' : 'answered', JSON.stringify(result), action?.name ?? null, runId);
-      });
+      (await repo.transaction(async () => {
+        controller.signal.throwIfAborted();
+        if (action) (await repo.db.prepare('INSERT INTO receipts (id,session_id,run_id,action_name,arguments) VALUES (?,?,?,?,?)').run(action.receiptId, String(sessionRow.id), runId, action.name, JSON.stringify(action.arguments)));
+        controller.signal.throwIfAborted();
+        (await repo.db.prepare('UPDATE runs SET answer=?,status=?,response=?,action_name=? WHERE id=?').run(result.answer, action ? 'awaiting_confirmation' : 'answered', JSON.stringify(result), action?.name ?? null, runId));
+      }));
       return result;
     };
     const promise = work(); inFlight.set(runId, promise);
     try { res.json(await promise); }
     catch (error) {
-      repo.db.prepare('UPDATE runs SET status=?,error_code=? WHERE id=?').run(controller.signal.aborted ? 'cancelled' : 'failed', controller.signal.aborted ? 'cancelled_or_deadline' : error instanceof AppError ? `request_${error.status}` : 'provider_or_output', runId);
+      if (inserted) (await repo.db.prepare('UPDATE runs SET status=?,error_code=? WHERE id=?').run(controller.signal.aborted ? 'cancelled' : 'failed', controller.signal.aborted ? 'cancelled_or_deadline' : error instanceof AppError ? `request_${error.status}` : 'provider_or_output', runId));
       if (controller.signal.aborted) throw new AppError(408, 'The request was stopped or took too long. You can try again.');
       if (error instanceof AppError) throw error;
       throw new AppError(502, 'The model could not complete this request. Check the runtime connection and try again.');
-    } finally { repo.db.prepare('UPDATE runs SET duration_ms=? WHERE id=?').run(Math.round(performance.now() - started), runId); clearTimeout(timer); res.off('close', abort); controllers.delete(controller); sessionsBusy.delete(String(sessionRow.id)); inFlight.delete(runId); }
+    } finally { if (inserted) await repo.db.prepare('UPDATE runs SET duration_ms=? WHERE id=?').run(Math.round(performance.now() - started), runId).catch(() => undefined); clearTimeout(timer); res.off('close', abort); controllers.delete(controller); sessionsBusy.delete(String(sessionRow.id)); inFlight.delete(runId); }
   });
-  app.post('/api/embed/session/action-result', (req, res) => {
-    const sessionRow = embedSession(req, true), input = actionResultSchema.parse(req.body);
-    const receipt = repo.row('SELECT * FROM receipts WHERE id=? AND session_id=?', input.receiptId, String(sessionRow.id));
-    if (!receipt) throw new AppError(404, 'Action confirmation not found in this session.');
-    if (receipt.status !== 'pending') {
-      if (receipt.status === input.status && receipt.message === input.message) return res.json({ ok: true });
-      throw new AppError(409, 'This action has already reached a different final state.');
-    }
-    repo.transaction(() => {
-      repo.db.prepare('UPDATE receipts SET status=?,message=? WHERE id=?').run(input.status, input.message, input.receiptId);
-      repo.db.prepare('UPDATE runs SET status=? WHERE id=? AND session_id=?').run(`action_${input.status}`, String(receipt.run_id), String(sessionRow.id));
+  app.post('/api/embed/session/action-result', async (req, res) => {
+    const sessionRow = (await embedSession(req, true)), input = actionResultSchema.parse(req.body);
+    await repo.transaction(async () => {
+      // Conditional claim avoids two async requests overwriting a final receipt.
+      const receipt = await repo.row('SELECT * FROM receipts WHERE id=? AND session_id=?', input.receiptId, String(sessionRow.id));
+      if (!receipt) throw new AppError(404, 'Action confirmation not found in this session.');
+      if (receipt.status !== 'pending') {
+        if (receipt.status === input.status && receipt.message === input.message) return;
+        throw new AppError(409, 'This action has already reached a different final state.');
+      }
+      const claimed = await repo.db.prepare("UPDATE receipts SET status=?,message=? WHERE id=? AND session_id=? AND status='pending'").run(input.status, input.message, input.receiptId, String(sessionRow.id));
+      if (!claimed.changes) {
+        const latest = await repo.row('SELECT status,message FROM receipts WHERE id=? AND session_id=?', input.receiptId, String(sessionRow.id));
+        if (latest?.status === input.status && latest.message === input.message) return;
+        throw new AppError(409, 'This action has already reached a different final state.');
+      }
+      await repo.db.prepare('UPDATE runs SET status=? WHERE id=? AND session_id=?').run(`action_${input.status}`, String(receipt.run_id), String(sessionRow.id));
     });
     res.json({ ok: true });
   });
   app.get('/health', (_req, res) => res.json({ ok: true, service: 'guidekit', mode: 'local' }));
   app.get('/ready', async (_req, res) => {
-    let database = false; try { database = repo.row('SELECT 1 AS ok FROM schema_migrations LIMIT 1')?.ok === 1; } catch { /* Report only readiness, never database paths. */ }
+    let database = false; try { database = (await repo.row('SELECT 1 AS ok FROM schema_migrations LIMIT 1'))?.ok === 1; } catch { /* Report only readiness, never database paths. */ }
     const runtime = await options.provider.status().catch(() => ({ available: false, authenticated: false }));
-    const graph = options.graph ? await options.graph.status().then(status => status.connected).catch(() => false) : !repo.row("SELECT agent_id FROM publication_states WHERE graph_source='tigergraph' LIMIT 1");
-    const ok = database && runtime.available && runtime.authenticated && graph;
-    res.status(ok ? 200 : 503).json({ ok, checks: { database, runtime: runtime.available && runtime.authenticated, graph }, provider: options.provider.id ?? 'codex' });
+    const knowledge = await (async () => {
+      // Readiness concerns active publications. A retained historical TigerGraph
+      // snapshot should not disable a PostgreSQL product after explicit migration.
+      const active = await repo.rows('SELECT p.graph_source FROM publication_states p JOIN agents a ON a.id=p.agent_id AND a.published_version=p.version');
+      const required = new Set(active.map(row => String(row.graph_source)));
+      if ([...required].some(source => source !== 'local' && !knowledgeProviders.some(provider => provider.id === source))) return false;
+      const selected = knowledgeProviders.filter(provider => required.has(provider.id) || provider === knowledgeProvider);
+      return (await Promise.all(selected.map(provider => provider.status().then(status => status.connected).catch(() => false)))).every(Boolean);
+    })();
+    const ok = database && runtime.available && runtime.authenticated && knowledge;
+    res.status(ok ? 200 : 503).json({ ok, checks: { database, runtime: runtime.available && runtime.authenticated, knowledge, graph: knowledge }, provider: options.provider.id ?? 'codex' });
   });
   app.use('/sdk', (req, res, next) => { res.set('Cross-Origin-Resource-Policy', 'cross-origin'); res.set('Access-Control-Allow-Origin', '*'); res.set('Cache-Control', /^\/releases\/[a-f0-9]{24}\/(guidekit\.(js|mjs)|manifest\.json)$/.test(req.path) ? 'public, max-age=31536000, immutable' : 'no-cache'); next(); }, express.static(resolve(root, 'dist/sdk'), { dotfiles: 'deny', index: false, cacheControl: false }));
   app.use(express.static(resolve(root, 'dist/dashboard'), { dotfiles: 'deny', index: 'index.html' }));
@@ -356,7 +394,7 @@ export function createApp(options: AppOptions) {
     if (error instanceof SyntaxError) return res.status(400).json({ error: 'Send a valid JSON request.' });
     res.status(500).json({ error: 'The request could not be completed.' });
   });
-  return { app, repo, close: async () => { clearInterval(prune); for (const controller of controllers) controller.abort(); await Promise.allSettled(inFlight.values()); await publications.close(); await options.provider.close(); evidenceCache.clear(); repo.close(); } };
+  return { app, repo, close: async () => { clearInterval(prune); for (const controller of controllers) controller.abort(); await Promise.allSettled(inFlight.values()); await publications.close(); await options.provider.close(); await knowledgeProvider?.close?.(); evidenceCache.clear(); (await repo.close()); } };
 }
 
 function buildPrompt(config: { name: string; companyName: string; description: string; instructions: string }, message: string, page: PageContext, citations: Citation[], history: unknown[] = [], knowledge?: RunResult['knowledge'], journey?: JourneyRequest): string {

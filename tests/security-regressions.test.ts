@@ -24,13 +24,13 @@ test('tenant configuration, knowledge snapshots and session secret survive SQLit
   const directory = await mkdtemp(join(tmpdir(), 'guidekit-reopen-'));
   try {
     let repo = new Repository(directory);
-    const workspace = repo.register({ email: 'reopen@example.invalid', name: 'Test owner', companyName: 'Persistent company' }, 'not-a-real-login-hash');
-    const agent = repo.createAgent(workspace.tenant.id, { name: 'Persistent guide', companyName: 'Persistent company', description: '', instructions: '', greeting: 'Hello', accentColor: '#365cf5', allowedOrigins: ['http://127.0.0.1:4411'], allowedActions: [] });
-    repo.addDocument(workspace.tenant.id, agent.id, { title: 'Policy', content: 'The support response target is 42 hours.' }); repo.publish(workspace.tenant.id, agent.id);
-    const secret = repo.sessionSecret; repo.close(); repo = new Repository(directory);
-    assert.equal(repo.sessionSecret, secret); assert.equal(repo.agent(workspace.tenant.id, agent.id).publishedVersion, 1);
-    assert.equal(repo.published(agent.id).documents[0]!.title, 'Policy'); assert.match(repo.retrieve(workspace.tenant.id, agent.id, 1, 'support response target')[0]!.excerpt, /42 hours/);
-    assert.equal(repo.workspace(workspace.user.id)?.tenant.name, 'Persistent company'); repo.close();
+    const workspace = (await repo.register({ email: 'reopen@example.invalid', name: 'Test owner', companyName: 'Persistent company' }, 'not-a-real-login-hash'));
+    const agent = (await repo.createAgent(workspace.tenant.id, { name: 'Persistent guide', companyName: 'Persistent company', description: '', instructions: '', greeting: 'Hello', accentColor: '#365cf5', allowedOrigins: ['http://127.0.0.1:4411'], allowedActions: [] }));
+    (await repo.addDocument(workspace.tenant.id, agent.id, { title: 'Policy', content: 'The support response target is 42 hours.' })); (await repo.publish(workspace.tenant.id, agent.id));
+    const secret = repo.sessionSecret; (await repo.close()); repo = new Repository(directory);
+    assert.equal(repo.sessionSecret, secret); assert.equal((await repo.agent(workspace.tenant.id, agent.id)).publishedVersion, 1);
+    assert.equal((await repo.published(agent.id)).documents[0]!.title, 'Policy'); assert.match((await repo.retrieve(workspace.tenant.id, agent.id, 1, 'support response target'))[0]!.excerpt, /42 hours/);
+    assert.equal((await repo.workspace(workspace.user.id))?.tenant.name, 'Persistent company'); (await repo.close());
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -39,10 +39,10 @@ test('late provider completion after cancellation cannot issue an action receipt
   let finish!: (value: string) => void, providerSignal: AbortSignal | undefined, began!: () => void;
   const begun = new Promise<void>(accept => { began = accept; });
   const origin = 'http://127.0.0.1:4411', origins = new Set<string>();
-  const core = createApp({ dataDir: directory, adminOrigins: origins, testing: true, provider: {
+  const core = (await createApp({ dataDir: directory, adminOrigins: origins, testing: true, provider: {
     status: async () => ({ provider: 'codex', available: true, authenticated: true, message: 'Explicit test provider' }), close: async () => {},
     infer: async input => { providerSignal = input.signal; began(); return new Promise<string>(accept => { finish = accept; }); }
-  } });
+  } }));
   const server = createServer(core.app); await new Promise<void>(accept => server.listen(0, '127.0.0.1', accept));
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`; origins.add(base);
   const post = (path: string, body: unknown, headers: Record<string, string> = {}, signal?: AbortSignal) => fetch(`${base}${path}`, { method: 'POST', headers: { Origin: base, 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body), signal });
@@ -59,9 +59,9 @@ test('late provider completion after cancellation cannot issue an action receipt
     for (let i = 0; i < 100 && !providerSignal?.aborted; i++) await new Promise(accept => setTimeout(accept, 5));
     assert.equal(providerSignal?.aborted, true);
     finish(JSON.stringify({ answer: 'Review this action.', steps: [], action: { name: 'create_contact', argumentsJson: '{}', reason: 'Requested' }, citationIds: [] }));
-    for (let i = 0; i < 100 && core.repo.row('SELECT status FROM runs')?.status === 'running'; i++) await new Promise(accept => setTimeout(accept, 5));
-    assert.equal(core.repo.row('SELECT status,response FROM runs')?.status, 'cancelled');
-    assert.equal(core.repo.row('SELECT status,response FROM runs')?.response, null);
-    assert.equal(core.repo.row('SELECT COUNT(*) AS n FROM receipts')?.n, 0);
+    for (let i = 0; i < 100 && (await core.repo.row('SELECT status FROM runs'))?.status === 'running'; i++) await new Promise(accept => setTimeout(accept, 5));
+    assert.equal((await core.repo.row('SELECT status,response FROM runs'))?.status, 'cancelled');
+    assert.equal((await core.repo.row('SELECT status,response FROM runs'))?.response, null);
+    assert.equal((await core.repo.row('SELECT COUNT(*) AS n FROM receipts'))?.n, 0);
   } finally { await core.close(); server.closeAllConnections(); await new Promise<void>(accept => server.close(() => accept())); await rm(directory, { recursive: true, force: true }); }
 });

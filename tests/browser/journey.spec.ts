@@ -10,7 +10,7 @@ import type { JourneyRequest, PageContext } from '../../packages/contracts/src/i
 
 // Explicit synthetic inference. These real Chromium/HTTP/SDK tests never call a model account.
 const endpoint = 'http://127.0.0.1:4610', website = 'http://127.0.0.1:4611';
-let assets = '', data = '', agentId = '', service: ReturnType<typeof createApp>, continuationDelay = 0, finalContinues = false;
+let assets = '', data = '', agentId = '', service: Awaited<ReturnType<typeof createApp>>, continuationDelay = 0, finalContinues = false;
 const servers: Server[] = [], requests: Array<{ journey: JourneyRequest | null; page: PageContext }> = [];
 function reference<T>(prompt: string, prefix: string): T { const line = prompt.split('\n\n').find(line => line.startsWith(prefix)); if (!line) throw new Error(`Missing fixture prompt section ${prefix}`); return JSON.parse(line.slice(prefix.length)); }
 const provider: InferenceProvider = {
@@ -58,7 +58,7 @@ const script = document.createElement('script'); script.src = '${endpoint}/sdk/g
 test.beforeAll(async () => {
   assets = await mkdtemp(resolve(tmpdir(), 'guidekit-journey-assets-')); data = await mkdtemp(resolve(tmpdir(), 'guidekit-journey-data-'));
   await build({ entryPoints: ['packages/sdk/src/index.ts'], outfile: resolve(assets, 'dist/sdk/guidekit.js'), bundle: true, format: 'iife', target: 'es2022' });
-  service = createApp({ dataDir: data, provider, root: assets, adminOrigins: new Set([endpoint]), testing: true });
+  service = (await createApp({ dataDir: data, provider, root: assets, adminOrigins: new Set([endpoint]), testing: true }));
   const listen = (app: ReturnType<typeof express>, port: number) => new Promise<void>((accept, reject) => { const server = app.listen(port, '127.0.0.1', () => accept()); server.on('error', reject); servers.push(server); });
   const demo = express(); demo.get('/host.js', (_req, res) => res.type('js').send(host));
   demo.use((_req, res) => { res.set('Content-Security-Policy', `default-src 'self'; script-src 'self' ${endpoint}; connect-src 'self' ${endpoint}; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'`); res.type('html').send('<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Journey fixture</title></head><body style="font-family:system-ui;padding:48px"><main></main><script src="/host.js"></script></body></html>'); });
