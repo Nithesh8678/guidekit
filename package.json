@@ -24,8 +24,10 @@
     "test:graph": "node --env-file-if-exists=.env --import tsx scripts/graph-proof.ts",
     "check": "npm run typecheck && npm test && npm run build",
     "audit:secrets": "node scripts/check-secrets.mjs",
-    "backup": "node --import tsx scripts/backup.ts",
-    "restore": "node --import tsx scripts/restore.ts",
+    "backup": "node --env-file-if-exists=.env --import tsx scripts/backup.ts",
+    "restore": "node --env-file-if-exists=.env --import tsx scripts/restore.ts",
+    "db:backup": "node --import tsx scripts/postgres-archive.ts backup",
+    "db:restore": "node --import tsx scripts/postgres-archive.ts restore",
     "retention": "node --env-file-if-exists=.env --import tsx scripts/retention.ts",
     "test:dashboard": "playwright test --config apps/dashboard/playwright.config.ts",
     "test:dashboard:integration": "playwright test --config apps/dashboard/playwright.integration.config.ts"
