@@ -483,7 +483,14 @@ export class View {
     const hostMotion = (event: Event) => {
       if (event.target instanceof Element && state?.target && event.target.contains(state.target)) { motionUntil = performance.now() + 10000; reposition(); }
     };
-    const visibility = () => { if (document.hidden) { ++presentationGeneration; settlePresentation(); cancelAnimationFrame(frame); frame = 0; } if (this.cursorDocked) return; if (document.hidden) { reveal?.cancel(); motion.setVisible(false); } else schedulePosition(); };
+    const visibility = () => {
+      // Visibility suspends the retained flight, rather than replacing it. Keep
+      // its guarded onReady valid so the label can appear after that flight
+      // resumes; pause/chat/step changes still invalidate their presentations.
+      if (document.hidden) { settlePresentation(); cancelAnimationFrame(frame); frame = 0; }
+      if (this.cursorDocked) return;
+      if (document.hidden) { reveal?.cancel(); motion.setVisible(false); } else schedulePosition();
+    };
     const preferenceChanged = () => { if (reduced()) settlePresentation(); sizeDirty = true; schedulePosition(); };
     const narrate = () => {
       if (!state || state.paused || state.waiting || reveal?.active || lastNarrated === state.index || this.guideChatOpen) return;
