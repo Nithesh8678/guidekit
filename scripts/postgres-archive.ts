@@ -189,11 +189,18 @@ export async function restorePostgresBackup(options: PostgresRestoreOptions): Pr
   try { const directory = await lstat(dataDir); if (!directory.isDirectory() || directory.isSymbolicLink()) throw new Error('PostgreSQL restore data directory must be a real directory.'); }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
   await assertOffline(dataDir, options.port);
-  let hasSecret = false;
-  try { const existing = await fileDigest(secretPath, 65_536, false); hasSecret = true; if (existing.sha256 !== manifest.files['session.secret'].sha256) throw new Error('The target signing secret differs. Use a new data directory; an existing secret is never overwritten.'); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  await mkdir(dirname(dataDir), { recursive: true, mode: 0o700 });
+  const lockPath = `${dataDir}.restore.lock`, restoreLock = await open(lockPath, 'wx', 0o600);
+  const lockIdentity = await restoreLock.stat();
   let driver: PostgresDriver | undefined;
   try {
+    await restoreLock.writeFile(JSON.stringify({ pid: process.pid })); await restoreLock.sync();
+    // The server checks the sibling lock before and after creating its service lock.
+    // Repeat the offline checks after acquiring ours to cover either startup interleaving.
+    await assertOffline(dataDir, options.port);
+    let hasSecret = false;
+    try { const existing = await fileDigest(secretPath, 65_536, false); hasSecret = true; if (existing.sha256 !== manifest.files['session.secret'].sha256) throw new Error('The target signing secret differs. Use a new data directory; an existing secret is never overwritten.'); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     driver = await PostgresDriver.open(options.connectionString, false, true);
     const active = driver, tables = descriptors(options.knowledgeSchema);
     await driver.transaction(async () => {
@@ -233,7 +240,18 @@ export async function restorePostgresBackup(options: PostgresRestoreOptions): Pr
     // Keep a newly staged verified secret: a lost COMMIT acknowledgement must not discard recovery material.
     throw safe(error);
   }
-  finally { await driver?.close(); }
+  finally {
+    try { await driver?.close(); }
+    finally {
+      try { await restoreLock.close(); }
+      finally {
+        try {
+          const current = await lstat(lockPath);
+          if (current.isFile() && !current.isSymbolicLink() && current.dev === lockIdentity.dev && current.ino === lockIdentity.ino) await rm(lockPath);
+        } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+      }
+    }
+  }
 }
 
 export async function postgresArchiveCli(args = process.argv.slice(2)): Promise<void> {

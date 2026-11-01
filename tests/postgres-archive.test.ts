@@ -7,6 +7,7 @@ import { createServer } from 'node:net';
 import { randomBytes, createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Pool } from 'pg';
+import { acquireProcessLock } from '../apps/server/src/process-lock.js';
 import { AsyncRepository } from '../apps/server/src/repository.js';
 import { POSTGRES_KNOWLEDGE_SCHEMA } from '../packages/knowledge/src/schema.js';
 import { createPostgresBackup, restorePostgresBackup, verifyPostgresArchive } from '../scripts/postgres-archive.js';
@@ -71,7 +72,28 @@ test('logical PostgreSQL archive captures a coherent full snapshot and restores 
     await t.test('restore replays knowledge readiness last, preserves source digests and actual similarity search', async () => {
       // Empty target has its independently created signing secret: use a new local directory for restore.
       const restoreDir = join(root, 'restored-data');
-      const restored = await restorePostgresBackup({ connectionString: target.url.toString(), archive, dataDir: restoreDir, offline: true, port: await freePort(), knowledgeSchema: target.knowledge });
+      // Defer the actual restore query with the same PostgreSQL advisory lock.
+      const blocker = await target.ownerPool.connect();
+      await blocker.query('BEGIN');
+      await blocker.query("SELECT pg_advisory_xact_lock(hashtext('guidekit:postgres-restore'))");
+      let restoreFailure: unknown;
+      const restoring = restorePostgresBackup({ connectionString: target.url.toString(), archive, dataDir: restoreDir, offline: true, port: await freePort(), knowledgeSchema: target.knowledge });
+      void restoring.catch(error => { restoreFailure = error; });
+      try {
+        for (let attempt = 0; ; attempt++) {
+          if (restoreFailure) throw restoreFailure;
+          const deferred = await blocker.query("SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event='advisory' AND query=$1", ["SELECT pg_advisory_xact_lock(hashtext('guidekit:postgres-restore'))"]);
+          if (deferred.rows.length) break;
+          if (attempt > 100) throw new Error('Restore did not reach its deferred query.'); await delay(20);
+        }
+        const restoreLock = `${restoreDir}.restore.lock`;
+        assert.equal(JSON.parse(await readFile(restoreLock, 'utf8')).pid, process.pid);
+        assert.equal((await stat(restoreLock)).mode & 0o777, 0o600);
+        assert.throws(() => acquireProcessLock(restoreDir), /restore is in progress/);
+        await assert.rejects(stat(join(restoreDir, '.service.lock')), { code: 'ENOENT' });
+      } finally { await blocker.query('ROLLBACK'); blocker.release(); }
+      const restored = await restoring;
+      await assert.rejects(stat(`${restoreDir}.restore.lock`), { code: 'ENOENT' });
       assert.deepEqual(restored.tables, backup.manifest.tables);
       assert.equal(await readFile(join(restoreDir, 'session.secret'), 'utf8'), source.repository.sessionSecret);
       assert.equal((await target.repository.row('SELECT password_hash FROM users'))?.password_hash, 'synthetic-password-hash');
@@ -90,6 +112,13 @@ test('logical PostgreSQL archive captures a coherent full snapshot and restores 
       const bad = join(root, 'tampered'); await cp(archive, bad, { recursive: true }); await writeFile(join(bad, 'knowledge.chunks.jsonl'), 'tampered\n');
       await assert.rejects(verifyPostgresArchive(bad), /checksum mismatch/);
       await assert.rejects(restorePostgresBackup({ connectionString: 'invalid', archive, dataDir: target.directory, offline: true, port: await freePort(), knowledgeSchema: target.knowledge }), /signing secret differs/);
+      const heldDir = join(root, 'held-target'), heldLock = `${heldDir}.restore.lock`, heldContents = JSON.stringify({ pid: process.pid, owner: 'another restore' });
+      await writeFile(heldLock, heldContents, { mode: 0o600, flag: 'wx' });
+      try {
+        await assert.rejects(restorePostgresBackup({ connectionString: 'invalid', archive, dataDir: heldDir, offline: true, port: await freePort(), knowledgeSchema: target.knowledge }), { code: 'EEXIST' });
+        assert.equal(await readFile(heldLock, 'utf8'), heldContents);
+      } finally { await rm(heldLock); }
+      await assert.rejects(stat(`${target.directory}.restore.lock`), { code: 'ENOENT' });
     });
   } finally { await source.close(); await target.close(); await rm(root, { recursive: true, force: true }); }
 });
@@ -131,5 +160,6 @@ test('logical PostgreSQL restore rolls back product and vector rows after a late
     for (const table of ['tenants','users','agents','documents','versions','knowledge_fts','publication_states',`${target.knowledge}.versions`,`${target.knowledge}.documents`,`${target.knowledge}.chunks`]) assert.equal(Number((await target.repository.row(`SELECT COUNT(*) AS count FROM ${table}`))?.count), 0);
     assert.equal(Number((await target.repository.row(`SELECT COUNT(*) AS count FROM ${target.knowledge}.metadata`))?.count), 1);
     await assert.rejects(stat(join(dataDir, 'session.secret')), { code: 'ENOENT' });
+    await assert.rejects(stat(`${dataDir}.restore.lock`), { code: 'ENOENT' });
   } finally { await source.close(); await target.close(); await rm(root, { recursive: true, force: true }); }
 });
