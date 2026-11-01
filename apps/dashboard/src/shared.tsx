@@ -17,7 +17,7 @@ export function DeliveryNotice({ generic = false }: { generic?: boolean }) { ret
 
 export type PublicationStatus = 'preparing' | 'syncing' | 'ready' | 'failed';
 // Missing lifecycle fields are accepted for snapshots created before readiness tracking.
-export type PublicationVersion = AgentDetail['versions'][number] & { status?: PublicationStatus; graphSource?: 'local' | 'tigergraph'; error?: string; completedAt?: string };
+export type PublicationVersion = AgentDetail['versions'][number] & { status?: PublicationStatus; graphSource?: 'local' | 'tigergraph' | 'postgres'; error?: string; completedAt?: string };
 export type DashboardDetail = Omit<AgentDetail, 'versions'> & { versions: PublicationVersion[] };
 export interface PublicationResult { version: PublicationVersion; activeVersion: number | null; }
 export interface VersionSnapshot { version: PublicationVersion; config: AgentConfig; documents: KnowledgeDocument[]; }

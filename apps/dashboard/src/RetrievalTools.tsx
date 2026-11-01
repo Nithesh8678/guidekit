@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from 'react';
 import type { AgentDetail, Citation, KnowledgePath } from '@guidekit/contracts';
 import { api, errorMessage, Notice, Spinner, versionStatus, type VersionSnapshot } from './shared';
 
-interface Preview { version: number; citations: Citation[]; knowledge: { source: 'local' | 'tigergraph'; paths: KnowledgePath[] }; sufficient: boolean; message: string; }
+interface Preview { version: number; citations: Citation[]; knowledge: { source: 'local' | 'tigergraph' | 'postgres'; paths: KnowledgePath[] }; sufficient: boolean; message: string; }
 interface EvaluationCase { question: string; expectedDocumentIds: string[]; }
 interface Evaluation { version: number; cases: { question: string; retrievedDocumentIds: string[]; recall: number; precision: number; reciprocalRank: number }[]; meanRecall: number; meanReciprocalRank: number; scope: string; }
 const percent = (value: number) => `${Math.round(value * 100)}%`;
