@@ -74,16 +74,28 @@ export function targetRevealed(target: HTMLElement): boolean {
 }
 function plannedMoves(target: HTMLElement): Move[] {
   const rect = target.getBoundingClientRect(), projected = { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom }, margin = getComputedStyle(target), moves: Move[] = [];
-  for (const port of ports(target)) {
-    const fromLeft = port.element?.scrollLeft ?? window.scrollX, fromTop = port.element?.scrollTop ?? window.scrollY;
+  const chain = ports(target).map(port => {
     const root = document.scrollingElement ?? document.documentElement;
-    const maxLeft = port.element ? Math.max(0, port.element.scrollWidth - port.element.clientWidth) : Math.max(0, root.scrollWidth - document.documentElement.clientWidth);
-    const maxTop = port.element ? Math.max(0, port.element.scrollHeight - port.element.clientHeight) : Math.max(0, root.scrollHeight - document.documentElement.clientHeight);
-    const dx = port.x ? revealDelta(projected.left, projected.right, port.bounds.left, port.bounds.right, 28 + Math.max(length(margin.scrollMarginLeft, 1), length(margin.scrollMarginRight, 1))) / port.scaleX : 0;
-    const dy = port.y ? revealDelta(projected.top, projected.bottom, port.bounds.top, port.bounds.bottom, 28 + Math.max(length(margin.scrollMarginTop, 1), length(margin.scrollMarginBottom, 1))) / port.scaleY : 0;
-    // Chromium's RTL scrollLeft is negative; retain its native coordinate range.
+    const maxX = port.element ? Math.max(0, port.element.scrollWidth - port.element.clientWidth) : Math.max(0, root.scrollWidth - document.documentElement.clientWidth);
+    const maxY = port.element ? Math.max(0, port.element.scrollHeight - port.element.clientHeight) : Math.max(0, root.scrollHeight - document.documentElement.clientHeight);
     const rtl = port.element && getComputedStyle(port.element).direction === 'rtl';
-    const left = clamp(fromLeft + dx, rtl ? -maxLeft : 0, rtl ? 0 : maxLeft), top = clamp(fromTop + dy, 0, maxTop);
+    return { ...port, fromLeft: port.element?.scrollLeft ?? window.scrollX, fromTop: port.element?.scrollTop ?? window.scrollY, minLeft: rtl ? -maxX : 0, maxLeft: rtl ? 0 : maxX, maxTop: maxY };
+  });
+  for (let index = 0; index < chain.length; index++) {
+    const port = chain[index]!, { fromLeft, fromTop } = port, bounds = { ...port.bounds };
+    // A tall inner panel may fit the control while an outer clip hides it.
+    // Constrain its usable area by what each outer port can actually reveal;
+    // remaining outer travel permits the normal below-the-page window case.
+    for (const outer of chain.slice(index + 1)) {
+      bounds.left = Math.max(bounds.left, outer.bounds.left - (outer.x ? outer.fromLeft - outer.minLeft : 0) * outer.scaleX);
+      bounds.right = Math.min(bounds.right, outer.bounds.right + (outer.x ? outer.maxLeft - outer.fromLeft : 0) * outer.scaleX);
+      bounds.top = Math.max(bounds.top, outer.bounds.top - (outer.y ? outer.fromTop : 0) * outer.scaleY);
+      bounds.bottom = Math.min(bounds.bottom, outer.bounds.bottom + (outer.y ? outer.maxTop - outer.fromTop : 0) * outer.scaleY);
+    }
+    const dx = port.x ? revealDelta(projected.left, projected.right, bounds.left, bounds.right, 28 + Math.max(length(margin.scrollMarginLeft, 1), length(margin.scrollMarginRight, 1))) / port.scaleX : 0;
+    const dy = port.y ? revealDelta(projected.top, projected.bottom, bounds.top, bounds.bottom, 28 + Math.max(length(margin.scrollMarginTop, 1), length(margin.scrollMarginBottom, 1))) / port.scaleY : 0;
+    // Chromium's RTL scrollLeft is negative; retain its native coordinate range.
+    const left = clamp(fromLeft + dx, port.minLeft, port.maxLeft), top = clamp(fromTop + dy, 0, port.maxTop);
     projected.left -= (left - fromLeft) * port.scaleX; projected.right -= (left - fromLeft) * port.scaleX;
     projected.top -= (top - fromTop) * port.scaleY; projected.bottom -= (top - fromTop) * port.scaleY;
     if (Math.abs(left - fromLeft) > epsilon || Math.abs(top - fromTop) > epsilon) moves.push({ element: port.element, fromLeft, fromTop, left, top });

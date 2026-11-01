@@ -290,6 +290,8 @@ export class View {
       const current = state.target ? resolve(state.step.targetId) : null;
       if (current !== state.target) { session.refresh(); return; }
       const rect = current?.getBoundingClientRect(), clipped = current ? revealedBounds(current) : null;
+      const targetVisible = !!current && !!clipped && targetRevealed(current);
+      if (!state.paused && !state.waiting) hint.textContent = reveal?.active ? 'Scrolling to this step…' : targetVisible ? state.hint : 'Scroll to this control to continue. I’ll point when it’s visible.';
       lastBox = rect ? `${rect.left},${rect.top},${rect.width},${rect.height}` : '';
       const oldCard = card.getBoundingClientRect();
       const cardWidth = card.offsetWidth, cardHeight = card.offsetHeight;
@@ -297,7 +299,7 @@ export class View {
       if (rect && clipped && !reveal?.active) {
         const left = clamp(clipped.left - 5, area.left + 3, area.left + width - 3), top = clamp(clipped.top - 5, area.top + 3, area.top + height - 3);
         const right = clamp(clipped.right + 5, left, area.left + width - 3), bottom = clamp(clipped.bottom + 5, top, area.top + height - 3);
-        const visible = !!current && targetRevealed(current) && right - left >= .25 && bottom - top >= .25;
+        const visible = targetVisible && right - left >= .25 && bottom - top >= .25;
         const box = { left, top, width: right - left, height: bottom - top };
         if (visible) narrate();
         if (markReady && visible) {
