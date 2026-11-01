@@ -1,6 +1,6 @@
 # SDK 0.4 release candidate
 
-The current build target is `0.4.3-alpha.1`. It adds a content-adaptive guidance card with progressive instruction text and a subtle border glow. Guided scrolling still finishes before target presentation; the controls remain available throughout the text reveal. It preserves PostgreSQL, local and TigerGraph evidence compatibility. This is the reusable SDK's release-candidate version; building or packing it does not publish it to npm or establish hosted availability.
+The current build target is `0.4.4-alpha.1`. It adds automatic observed guidance without Back, Next or Finish controls. The step label and instruction animate inside the content-adaptive card, with a subtle border glow. Guided scrolling still finishes before target presentation; Pause, chat and stop remain available throughout the text reveal. It preserves PostgreSQL, local and TigerGraph evidence compatibility. This is the reusable SDK's release-candidate version; building or packing it does not publish it to npm or establish hosted availability.
 
 `npm run build` produces three reusable forms from the same SDK source:
 

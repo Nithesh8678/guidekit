@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile, cp, rm } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 
-const SDK_VERSION = '0.4.3-alpha.1';
+const SDK_VERSION = '0.4.4-alpha.1';
 export async function buildSDK() {
   const output = resolve('dist/sdk'), packageDir = resolve('dist/sdk-package');
   await mkdir(output, { recursive: true });
