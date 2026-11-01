@@ -121,6 +121,9 @@ test('real intermediate instruction prefixes expand the card smoothly in width a
     expect(style.shadow).not.toBe('none'); expect(style.background).toContain('linear-gradient');
     await expect(guide(page).locator('.guide-rim')).toHaveAttribute('aria-hidden', 'true');
     expect(await guide(page).locator('.guide-rim').evaluate(node => getComputedStyle(node).pointerEvents)).toBe('none');
+    const screenshot = test.info().outputPath('adaptive-guide-card-desktop.png');
+    await page.screenshot({ path: screenshot });
+    await test.info().attach('Adaptive guide card', { path: screenshot, contentType: 'image/png' });
   } finally { await stopProbe(page); }
 });
 
