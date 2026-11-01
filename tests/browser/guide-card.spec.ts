@@ -169,6 +169,45 @@ test('a one-step guide keeps its Finish guide label on one line and all controls
   } finally { await stopProbe(page); }
 });
 
+test('a 200px visual viewport lets keyboard users scroll to Next, Pause and Finish guide inside the card', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 740 }); await page.emulateMedia({ reducedMotion: 'no-preference' });
+  await openFixture(page, Array(4).fill(longInstruction) as string[]);
+  await page.locator('[data-guidekit-id="contact-name"]').evaluate(node => { (node.closest('label') as HTMLElement).style.top = '-20px'; });
+  await ask(page); await finished(page, longInstruction);
+  // A short visual viewport models the space remaining above an on-screen
+  // keyboard; it deliberately does not claim physical mobile-keyboard testing.
+  await page.setViewportSize({ width: 320, height: 200 });
+  await expect.poll(async () => {
+    const bounds = await guide(page).boundingBox();
+    return !!bounds && bounds.x >= 0 && bounds.y >= 0 && bounds.x + bounds.width <= 320 && bounds.y + bounds.height <= 200;
+  }).toBe(true);
+  const visibleFocusedControl = async (name: string) => {
+    const control = guide(page).getByRole('button', { name, exact: true }); await expect(control).toBeFocused();
+    await expect.poll(() => control.evaluate(button => {
+      const bounds = button.getBoundingClientRect();
+      let left = 0, top = 0, right = innerWidth, bottom = innerHeight, nativeScroll = false, scrolled = false;
+      for (let ancestor = button.parentElement; ancestor; ancestor = ancestor.parentElement) {
+        const style = getComputedStyle(ancestor), box = ancestor.getBoundingClientRect();
+        if (/auto|scroll|hidden|clip/.test(style.overflowX)) { left = Math.max(left, box.left + ancestor.clientLeft); right = Math.min(right, box.left + ancestor.clientLeft + ancestor.clientWidth); }
+        if (/auto|scroll|hidden|clip/.test(style.overflowY)) { top = Math.max(top, box.top + ancestor.clientTop); bottom = Math.min(bottom, box.top + ancestor.clientTop + ancestor.clientHeight); }
+        if (/auto|scroll/.test(style.overflowY) && ancestor.scrollHeight > ancestor.clientHeight + 1) { nativeScroll = true; scrolled ||= ancestor.scrollTop > 0; }
+      }
+      return { visible: bounds.left >= left - 1 && bounds.right <= right + 1 && bounds.top >= top - 1 && bounds.bottom <= bottom + 1, nativeScroll, scrolled };
+    }), 'The focused control is visibly inside every clipping ancestor after native keyboard scrolling').toMatchObject({ visible: true, nativeScroll: true, scrolled: true });
+  };
+  await guide(page).getByRole('button', { name: 'Open chat', exact: true }).focus();
+  for (let index = 0; index < 4; index++) await page.keyboard.press('Tab');
+  await visibleFocusedControl('Next');
+  await page.keyboard.press('Shift+Tab'); await visibleFocusedControl('Pause guide');
+  await page.keyboard.press('Enter'); await expect(guide(page)).toHaveAttribute('data-paused', 'true');
+  await page.keyboard.press('Tab'); await visibleFocusedControl('Next');
+  for (let index = 2; index <= 4; index++) {
+    await page.keyboard.press('Enter'); await expect(guide(page).getByText(`Step ${index} of 4`, { exact: true })).toBeVisible();
+  }
+  await page.keyboard.press('Shift+Tab'); await visibleFocusedControl('Resume guide');
+  await page.keyboard.press('Tab'); await visibleFocusedControl('Finish guide');
+});
+
 test('typed Unicode prefixes end only at complete graphemes including combining accents, flags and joined emoji', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   const text = 'Name 👨‍👩‍👧‍👦 Café e\u0301 🇮🇳 👍🏽 தமிழ் 👩🏽‍💻 — enter it exactly as you would like the contact to appear. '.repeat(2);
