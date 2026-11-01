@@ -13,6 +13,7 @@ export function validateScope(input: KnowledgeScope): void {
   if (!Number.isSafeInteger(input.version) || input.version < 1 || input.version > 2_147_483_647) fail('invalid_input', 'Version must be a positive 32-bit integer.');
 }
 export const digest = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+export const wellFormed = (value: string): boolean => !/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(value);
 export interface SourceChunk { ordinal: number; start: number; end: number; excerpt: string; }
 
 /** Exact UTF-16 source offsets, paragraph/sentence boundaries, and bounded context overlap. */
@@ -52,7 +53,7 @@ export function buildSnapshot(input: KnowledgeSnapshot, embeddingModel: string) 
   for (const document of input.documents) {
     identifier(document.id, 'document ID');
     if (ids.has(document.id)) fail('invalid_input', 'Duplicate document ID.'); ids.add(document.id);
-    if (typeof document.title !== 'string' || !document.title.trim() || document.title.length > 180 || typeof document.content !== 'string' || document.content.includes('\0') || document.title.includes('\0')) fail('invalid_input', 'Invalid source document.');
+    if (typeof document.title !== 'string' || !document.title.trim() || document.title.length > 180 || typeof document.content !== 'string' || document.content.includes('\0') || document.title.includes('\0') || !wellFormed(document.title) || !wellFormed(document.content)) fail('invalid_input', 'Invalid source document.');
     bytes += Buffer.byteLength(document.content);
   }
   if (bytes > 2_000_000) fail('invalid_input', 'Snapshot source text exceeds 2 MB.');

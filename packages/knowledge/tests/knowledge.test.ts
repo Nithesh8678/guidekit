@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildSnapshot, chunkSource } from '../src/chunks.js';
+import { buildSnapshot, chunkSource, wellFormed } from '../src/chunks.js';
 import { createPostgresKnowledgeProvider, normalizedVectors, EMBEDDING_ID } from '../src/index.js';
 
 test('source chunks preserve exact offsets and cover every character with bounded overlap', () => {
@@ -39,6 +39,11 @@ test('vectors require finite values, correct dimensions/count, and nonzero norm'
   const valid = Array(384).fill(0); valid[0] = 4;
   assert.equal(normalizedVectors([valid], 1)[0]![0], 1);
   for (const value of [null, [], [Array(383).fill(1)], [Array(384).fill(0)], [[NaN, ...Array(383).fill(1)]], [[Infinity, ...Array(383).fill(1)]], [Array(384).fill('1')]]) assert.throws(() => normalizedVectors(value, 1));
+});
+
+test('source Unicode validation prevents PostgreSQL replacement from changing citation text', () => {
+  assert.equal(wellFormed('😀 Source'), true); assert.equal(wellFormed('\uD800'), false); assert.equal(wellFormed('\uDC00'), false);
+  assert.throws(() => buildSnapshot({ tenantId: 'tenant', agentId: 'agent', version: 1, allowedActions: [], documents: [{ id: 'doc', title: 'Source', content: '\uD800' }] }, EMBEDDING_ID));
 });
 
 test('unconfigured PostgreSQL provider fails explicitly without any local fallback', async () => {

@@ -1,6 +1,6 @@
 /** Server-only CPU embeddings. Document/query text never leaves this process. */
 import { resolve } from 'node:path';
-import { fail, KnowledgeError } from './chunks.js';
+import { fail, KnowledgeError, wellFormed } from './chunks.js';
 
 export const EMBEDDING_MODEL = 'Xenova/all-MiniLM-L6-v2';
 export const EMBEDDING_REVISION = '751bff37182d3f1213fa05d7196b954e230abad9';
@@ -41,7 +41,7 @@ export function createLocalEmbeddingProvider(options: { cacheDir?: string; local
     model: EMBEDDING_ID, dimensions: EMBEDDING_DIMENSIONS,
     async embed(texts) {
       if (closed) fail('embedding_failed', 'The embedding provider is closed.');
-      if (!Array.isArray(texts) || texts.length < 1 || texts.length > 16 || texts.some(text => typeof text !== 'string' || !text.trim() || text.includes('\0') || text.length > 3200) || Buffer.byteLength(JSON.stringify(texts)) > 64_000) fail('invalid_input', 'Embedding input exceeds the bounded text batch.');
+      if (!Array.isArray(texts) || texts.length < 1 || texts.length > 16 || texts.some(text => typeof text !== 'string' || !text.trim() || text.includes('\0') || text.length > 3200 || !wellFormed(text)) || Buffer.byteLength(JSON.stringify(texts)) > 64_000) fail('invalid_input', 'Embedding input exceeds the bounded text batch.');
       if (pending >= 8) fail('embedding_failed', 'The embedding worker is busy. Retry shortly.');
       texts = [...texts];
       pending++;

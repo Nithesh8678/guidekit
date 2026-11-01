@@ -59,9 +59,26 @@ test('PostgreSQL hybrid retrieval: immutable atomic snapshots, exact grounded so
       try { await assert.rejects(changed.retrieve({ ...snapshot, question: 'blend' }), /another embedding model/); } finally { await changed.close?.(); }
       const broken = createPostgresKnowledgeProvider({ connectionString: runtimeUrl!, embeddings: { ...fixtureEmbeddings(), embed: async () => { throw new Error('Synthetic embedding failure'); } } });
       const incomplete = { ...snapshot, version: 3 };
-      try { await assert.rejects(broken.syncVersion(incomplete), /embedding preparation/); } finally { await broken.close?.(); }
+      try {
+        await assert.rejects(broken.retrieve({ ...snapshot, question: 'ExportPreset42' }), /No keyword-only fallback/);
+        await assert.rejects(broken.syncVersion(incomplete), /embedding preparation/);
+      } finally { await broken.close?.(); }
       const absent = await scopedQuery(runtime, incomplete, 'SELECT ready FROM guidekit_knowledge.versions'); assert.deepEqual(absent.rows, []);
       await provider.syncVersion(incomplete); assert.equal((await provider.retrieve({ ...incomplete, question: 'blend' })).citations[0]!.documentId, 'transition');
+    });
+    await t.test('a database failure during chunk insertion rolls back the entire publication and can be retried', async () => {
+      const candidate = { ...snapshot, version: 4, documents: [{ id: 'long_source', title: 'Clip workflow', content: 'Open the clips panel. Then add a transition. '.repeat(60) }] };
+      // Deliberate fault injection exists only in the isolated /guidekit_test schema.
+      await owner.query(`CREATE FUNCTION guidekit_knowledge.test_fail_insert() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.tenant_id='${snapshot.tenantId}' AND NEW.version=4 AND NEW.ordinal=1 THEN RAISE EXCEPTION 'Synthetic chunk insertion fault'; END IF; RETURN NEW; END $$`);
+      await owner.query('CREATE TRIGGER test_fail_insert BEFORE INSERT ON guidekit_knowledge.chunks FOR EACH ROW EXECUTE FUNCTION guidekit_knowledge.test_fail_insert()');
+      try {
+        await assert.rejects(provider.syncVersion(candidate), /could not complete/);
+        for (const table of ['versions', 'documents', 'chunks']) assert.deepEqual((await scopedQuery(runtime, candidate, `SELECT tenant_id FROM guidekit_knowledge.${table}`)).rows, []);
+      } finally {
+        await owner.query('DROP TRIGGER test_fail_insert ON guidekit_knowledge.chunks'); await owner.query('DROP FUNCTION guidekit_knowledge.test_fail_insert()');
+      }
+      assert.ok((await provider.syncVersion(candidate)).chunks! > 1);
+      assert.equal((await provider.retrieve({ ...candidate, question: 'clips' })).citations[0]!.documentId, 'long_source');
     });
   } finally { await provider.close?.(); await owner.end(); await runtime.end(); }
 });

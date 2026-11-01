@@ -1,7 +1,7 @@
 /** Server-only tenant-scoped PostgreSQL keyword + exact vector retrieval. */
 import { Pool, type PoolClient } from 'pg';
 import type { KnowledgeProvider, KnowledgeScope, KnowledgeSnapshot } from './types.js';
-import { buildSnapshot, fail, identifier, KnowledgeError, validateScope } from './chunks.js';
+import { buildSnapshot, fail, identifier, KnowledgeError, validateScope, wellFormed } from './chunks.js';
 import { createLocalEmbeddingProvider, EMBEDDING_DIMENSIONS, normalizedVectors, type EmbeddingProvider } from './embeddings.js';
 import { KNOWLEDGE_SCHEMA_VERSION } from './schema.js';
 export { KnowledgeError, chunkSource } from './chunks.js';
@@ -117,7 +117,7 @@ export function createPostgresKnowledgeProvider(config?: PostgresKnowledgeConfig
     async retrieve(input) {
       input = { ...input };
       validateScope(input);
-      if (typeof input.question !== 'string' || !input.question.trim() || input.question.length > 3000 || input.question.includes('\0')) fail('invalid_input', 'A retrieval question must contain 1–3000 characters.');
+      if (typeof input.question !== 'string' || !input.question.trim() || input.question.length > 3000 || input.question.includes('\0') || !wellFormed(input.question)) fail('invalid_input', 'A retrieval question must contain 1–3000 well-formed characters.');
       const limit = input.limit ?? 8;
       if (!Number.isInteger(limit) || limit < 1 || limit > 16) fail('invalid_input', 'Retrieval limit must be between 1 and 16.');
       return scoped(input, async client => {
