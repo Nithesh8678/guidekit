@@ -169,18 +169,33 @@ test('a one-step guide keeps its Finish guide label on one line and all controls
   } finally { await stopProbe(page); }
 });
 
-test('a 200px visual viewport lets keyboard users scroll to Next, Pause and Finish guide inside the card', async ({ page }) => {
+test('a 180px visual viewport lets keyboard users scroll to Next, Pause and Finish guide inside the card', async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 740 }); await page.emulateMedia({ reducedMotion: 'no-preference' });
   await openFixture(page, Array(4).fill(longInstruction) as string[]);
   await page.locator('[data-guidekit-id="contact-name"]').evaluate(node => { (node.closest('label') as HTMLElement).style.top = '-20px'; });
   await ask(page); await finished(page, longInstruction);
   // A short visual viewport models the space remaining above an on-screen
   // keyboard; it deliberately does not claim physical mobile-keyboard testing.
-  await page.setViewportSize({ width: 320, height: 200 });
+  await page.setViewportSize({ width: 320, height: 180 });
   await expect.poll(async () => {
     const bounds = await guide(page).boundingBox();
-    return !!bounds && bounds.x >= 0 && bounds.y >= 0 && bounds.x + bounds.width <= 320 && bounds.y + bounds.height <= 200;
+    return !!bounds && bounds.x >= 0 && bounds.y >= 0 && bounds.x + bounds.width <= 320 && bounds.y + bounds.height <= 180;
   }).toBe(true);
+  const traversal: { key: string; focused: string }[] = [];
+  const tabTo = async (name: string, key: 'Tab' | 'Shift+Tab' = 'Tab') => {
+    const control = guide(page).getByRole('button', { name, exact: true });
+    // Native overflow containers can be keyboard stops in their own right.
+    // Follow actual focus instead of guessing a fixed number of Tab presses.
+    for (let index = 0; index < 16 && !await control.evaluate(node => node.getRootNode() instanceof ShadowRoot && (node.getRootNode() as ShadowRoot).activeElement === node); index++) {
+      await page.keyboard.press(key);
+      traversal.push({ key, focused: await page.evaluate(() => {
+        let active = document.activeElement;
+        while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
+        return active?.getAttribute('aria-label') ?? (active instanceof HTMLButtonElement ? active.textContent ?? '' : active?.className || active?.tagName || 'none');
+      }) });
+    }
+    await expect(control, `Keyboard traversal: ${JSON.stringify(traversal)}`).toBeFocused();
+  };
   const visibleFocusedControl = async (name: string) => {
     const control = guide(page).getByRole('button', { name, exact: true }); await expect(control).toBeFocused();
     await expect.poll(() => control.evaluate(button => {
@@ -196,16 +211,17 @@ test('a 200px visual viewport lets keyboard users scroll to Next, Pause and Fini
     }), 'The focused control is visibly inside every clipping ancestor after native keyboard scrolling').toMatchObject({ visible: true, nativeScroll: true, scrolled: true });
   };
   await guide(page).getByRole('button', { name: 'Open chat', exact: true }).focus();
-  for (let index = 0; index < 4; index++) await page.keyboard.press('Tab');
+  await tabTo('Next');
   await visibleFocusedControl('Next');
-  await page.keyboard.press('Shift+Tab'); await visibleFocusedControl('Pause guide');
+  await tabTo('Pause guide', 'Shift+Tab'); await visibleFocusedControl('Pause guide');
   await page.keyboard.press('Enter'); await expect(guide(page)).toHaveAttribute('data-paused', 'true');
-  await page.keyboard.press('Tab'); await visibleFocusedControl('Next');
+  await tabTo('Next'); await visibleFocusedControl('Next');
   for (let index = 2; index <= 4; index++) {
     await page.keyboard.press('Enter'); await expect(guide(page).getByText(`Step ${index} of 4`, { exact: true })).toBeVisible();
   }
-  await page.keyboard.press('Shift+Tab'); await visibleFocusedControl('Resume guide');
-  await page.keyboard.press('Tab'); await visibleFocusedControl('Finish guide');
+  await tabTo('Resume guide', 'Shift+Tab'); await visibleFocusedControl('Resume guide');
+  await tabTo('Finish guide'); await visibleFocusedControl('Finish guide');
+  await test.info().attach('Short-viewport keyboard traversal', { body: JSON.stringify(traversal, null, 2), contentType: 'application/json' });
 });
 
 test('typed Unicode prefixes end only at complete graphemes including combining accents, flags and joined emoji', async ({ page }) => {
