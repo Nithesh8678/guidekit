@@ -1,6 +1,27 @@
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { Repository } from '../apps/server/src/database.js';
+import { AsyncRepository } from '../apps/server/src/repository.js';
+
+/** PostgreSQL and async SQLite use the same guarded, transactional retention policy. */
+export async function retainHistoryAsync(repo: AsyncRepository, days: number, apply = false) {
+  if (!Number.isSafeInteger(days) || days < 1 || days > 3650) throw new Error('Retention days must be an integer from 1 to 3650.');
+  const cutoff = new Date(Date.now() - days * 86_400_000).toISOString(), grace = Date.now() - 86_400_000;
+  const eligible = "SELECT r.id FROM runs r JOIN embed_sessions e ON e.id=r.session_id WHERE r.created_at<? AND e.expires<? AND r.status NOT IN ('running','awaiting_confirmation')";
+  return repo.transaction(async () => {
+    const runs = Number((await repo.row(`SELECT COUNT(*) AS count FROM runs WHERE id IN (${eligible})`, cutoff, grace))!.count);
+    const audit = Number((await repo.row('SELECT COUNT(*) AS count FROM audit_events WHERE created_at<?', cutoff))!.count);
+    if (apply) {
+      await repo.db.prepare(`DELETE FROM receipts WHERE run_id IN (${eligible})`).run(cutoff, grace);
+      await repo.db.prepare(`DELETE FROM runs WHERE id IN (${eligible})`).run(cutoff, grace);
+      await repo.db.prepare('DELETE FROM embed_sessions WHERE expires<? AND id NOT IN (SELECT session_id FROM runs)').run(grace);
+      await repo.db.prepare('DELETE FROM account_tokens WHERE expires<?').run(grace);
+      await repo.db.prepare('DELETE FROM dashboard_sessions WHERE expires<?').run(Date.now());
+      await repo.db.prepare('DELETE FROM audit_events WHERE created_at<?').run(cutoff);
+    }
+    return { applied: apply, cutoff, eligibleRuns: runs, eligibleAuditEvents: audit, note: 'Knowledge, versions, accounts and pending/running work are retained. External indexes and local account outbox files are unaffected.' };
+  });
+}
 
 /** Preview by default. Never deletes knowledge, publications, accounts or active receipts. */
 export function retainHistory(repo: Repository, days: number, apply = false) {
@@ -26,6 +47,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     const allowed = new Set(['--days', '--data-dir', '--apply']);
     let directory = '.data', days = 30, apply = false;
     for (let i = 0; i < args.length; i++) { const arg = args[i]!; if (!allowed.has(arg)) throw new Error('Unknown retention option. Use --help.'); if (arg === '--apply') apply = true; else { const value = args[++i]; if (!value) throw new Error('Missing retention option value.'); if (arg === '--days') days = Number(value); else directory = value; } }
-    const repo = new Repository(resolve(directory)); try { console.log(JSON.stringify(retainHistory(repo, days, apply), null, 2)); } finally { repo.close(); }
+    const repo = await AsyncRepository.open({ dir: resolve(directory), connectionString: process.env.GUIDEKIT_DATABASE_URL });
+    try { console.log(JSON.stringify(await retainHistoryAsync(repo, days, apply), null, 2)); } finally { await repo.close(); }
   }
 }
