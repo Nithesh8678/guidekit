@@ -11,7 +11,7 @@ const annotation = (page: Page) => page.locator('[data-guidekit-root] [data-gk-a
 const shape = (page: Page) => page.locator('[data-guidekit-root] [data-gk-shape]');
 const cursor = (page: Page) => page.locator('[data-guidekit-root] [data-gk-cursor]');
 async function noTargetMark(page: Page) {
-  await expect(shape(page)).toHaveCount(0); await expect(annotation(page)).toHaveCount(1);
+  await expect(shape(page)).toHaveCount(0); await expect(page.locator('[data-guidekit-root] [data-gk-step-badge]')).toHaveCount(0); await expect(annotation(page)).toHaveCount(1);
 }
 
 const test = base.extend<{ browserErrors: string[] }>({
