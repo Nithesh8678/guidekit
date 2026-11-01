@@ -15,6 +15,8 @@ const endpoint = 'http://127.0.0.1:5210', website = 'http://127.0.0.1:5211';
 const catalog = [{ id: 'name', label: 'Public name field', role: 'textbox' }, { id: 'save', label: 'Save item', role: 'button' }];
 const requests: Array<{ page: PageContext; journey: JourneyRequest }> = [], servers: Server[] = [];
 let assets = '';
+let prepareMode: 'ready' | 'slow' | 'missing' = 'ready', sessionDelay = 0;
+const preparations: unknown[] = [];
 interface LatencyFixture { assistant: GuideKitInstance; reads: number; clickAt: number; nextAt: number; releaseSave(): void; stopChurn(): void; }
 declare global { interface Window { guideKitLatency: LatencyFixture; LatencyContextCollector: typeof ContextCollector; } }
 const host = `
@@ -51,7 +53,8 @@ test.beforeAll(async () => {
   service.options('/{*path}', (_req, res) => res.sendStatus(204));
   service.get('/sdk.js', (_req, res) => res.sendFile(resolve(assets, 'sdk.js')));
   service.get('/probe.js', (_req, res) => res.type('js').send(probe.outputFiles[0]!.text));
-  service.post('/api/embed/latency_fixture/session', (_req, res) => res.json({ token: 'synthetic-latency-session', expiresAt: Date.now() + 3600_000, agent: { id: 'latency_fixture', version: 1, name: 'Latency guide', companyName: 'Fixture', greeting: 'How can I help?', accentColor: '#365cf5', allowedActions: [] } }));
+  service.post('/api/embed/latency_fixture/session', async (_req, res) => { if (sessionDelay) await new Promise(resolve => setTimeout(resolve, sessionDelay)); res.json({ token: 'synthetic-latency-session', expiresAt: Date.now() + 3600_000, agent: { id: 'latency_fixture', version: 1, name: 'Latency guide', companyName: 'Fixture', greeting: 'How can I help?', accentColor: '#365cf5', allowedActions: [] } }); });
+  service.post('/api/embed/session/prepare', async (req, res) => { preparations.push(req.body); if (prepareMode === 'slow') await new Promise(resolve => setTimeout(resolve, 600)); res.status(prepareMode === 'missing' ? 404 : 200).json(prepareMode === 'missing' ? { error: 'Compatibility fixture: endpoint unavailable.' } : { ready: true }); });
   service.post('/api/embed/session/ask', async (req, res) => {
     const page = req.body.page as PageContext, journey = req.body.journey as JourneyRequest; requests.push({ page, journey });
     await new Promise(resolve => setTimeout(resolve, 180));
@@ -65,7 +68,7 @@ test.beforeAll(async () => {
   for (const [app, port] of [[service, 5210], [demo, 5211]] as const) await new Promise<void>((accept, reject) => { const server = app.listen(port, '127.0.0.1', () => accept()); server.on('error', reject); servers.push(server); });
 });
 test.afterAll(async () => { await Promise.all(servers.map(server => new Promise<void>(accept => { server.closeAllConnections(); server.close(() => accept()); }))); if (assets) await rm(assets, { recursive: true, force: true }); });
-test.beforeEach(() => { requests.length = 0; });
+test.beforeEach(() => { requests.length = 0; preparations.length = 0; prepareMode = 'ready'; sessionDelay = 0; });
 const guide = (page: Page) => page.getByRole('region', { name: 'Visual guidance' });
 async function start(page: Page, query = '', goal = 'Create and save an item') {
   await page.goto(`${website}/?${query}`); await expect.poll(() => page.evaluate(() => Boolean(window.guideKitLatency.assistant))).toBe(true);
@@ -155,4 +158,27 @@ test('a catalog cannot start guidance at a control that has not appeared', async
   const result = await page.evaluate(() => window.guideKitLatency.assistant.ask('Invalid first target'));
   expect(result).toBeNull(); await expect(guide(page)).toHaveCount(0);
   await expect(page.getByRole('log')).toContainText('is not ready');
+});
+
+test('opening chat warms one idle worker without blocking UI, sending context, or making a model request', async ({ page }) => {
+  prepareMode = 'slow'; await start(page); await page.evaluate(() => window.guideKitLatency.assistant.close());
+  await page.evaluate(() => { for (let index = 0; index < 8; index++) window.guideKitLatency.assistant.open(); });
+  await expect(page.getByRole('dialog', { name: 'Website assistant' })).toBeVisible();
+  await expect.poll(() => preparations.length).toBe(1); expect(preparations).toEqual([{}]); expect(requests).toHaveLength(1);
+  await page.waitForTimeout(700); await page.evaluate(() => window.guideKitLatency.assistant.open());
+  expect(preparations).toHaveLength(1); expect(requests).toHaveLength(1);
+});
+
+test('older servers may omit idle preparation without affecting questions or surfacing a false error', async ({ page }) => {
+  prepareMode = 'missing'; await start(page); await page.evaluate(() => { window.guideKitLatency.assistant.close(); window.guideKitLatency.assistant.open(); });
+  await expect.poll(() => preparations.length).toBe(1); await expect(page.getByRole('log')).not.toContainText('Compatibility fixture');
+  const result = await page.evaluate(() => window.guideKitLatency.assistant.ask('Create and save an item'));
+  expect(result?.steps).toHaveLength(3); await expect(guide(page)).toBeVisible();
+});
+
+test('destroying the assistant before session connection prevents a late idle preparation', async ({ page }) => {
+  sessionDelay = 600;
+  await page.goto(website); await expect.poll(() => page.evaluate(() => Boolean(window.guideKitLatency.assistant))).toBe(true);
+  await page.evaluate(() => { window.guideKitLatency.assistant.open(); window.guideKitLatency.assistant.destroy(); });
+  await page.waitForTimeout(750); expect(preparations).toEqual([]); expect(requests).toEqual([]);
 });

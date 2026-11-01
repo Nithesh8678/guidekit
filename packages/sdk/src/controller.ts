@@ -33,6 +33,8 @@ export class Assistant implements GuideKitInstance {
   private readonly lifetime = new AbortController();
   private session: Session | null = null;
   private connecting: Promise<Session> | null = null;
+  private preparing: Promise<void> | null = null;
+  private preparedAt = 0;
   private explicitContext: Record<string, unknown> = {};
   private explicitContextKey = '{}';
   private readonly guideTargets: NonNullable<MountOptions['guideTargets']>;
@@ -102,6 +104,17 @@ export class Assistant implements GuideKitInstance {
       this.view.offerJourneyResume(journey.goal, () => { if (this.journey === journey && journey.active) { this.view.journeyTransition(() => { void this.cancel(); }); journey.setPaused(false); } }, () => journey.cancel());
     }
     this.view.open();
+    this.prepareRuntime();
+  }
+  private prepareRuntime(): void {
+    if (this.destroyed || this.preparing || Date.now() - this.preparedAt < 10_000) return;
+    this.preparedAt = Date.now();
+    this.preparing = this.ensureSession().then(async session => {
+      if (this.destroyed || this.lifetime.signal.aborted) return;
+      // Preparation only starts an idle worker. No question, page context,
+      // microphone input or model turn is sent, and older servers may omit it.
+      await this.json('/api/embed/session/prepare', {}, session.token, this.lifetime.signal, 5_000);
+    }).catch(() => { /* Best effort; opening and asking must never wait for preparation. */ }).finally(() => { this.preparing = null; });
   }
   startVoice(): void { if (!this.destroyed) { this.open(); if (!this.voice.active) { void this.cancel(false); this.voice.start(true); } } }
   stopVoice(): void { if (!this.destroyed) this.voice.finishInput(); }
