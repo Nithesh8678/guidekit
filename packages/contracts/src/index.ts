@@ -18,7 +18,8 @@ export type AgentConfig = z.infer<typeof agentConfigSchema>;
 export interface Agent extends AgentConfig { id: string; tenantId: string; createdAt: string; updatedAt: string; publishedVersion: number | null; }
 export interface KnowledgeDocument { id: string; title: string; content: string; createdAt: string; }
 export type VersionStatus = 'preparing' | 'syncing' | 'ready' | 'failed';
-export interface AgentVersion { number: number; createdAt: string; documentCount: number; status: VersionStatus; graphSource: 'local' | 'tigergraph'; error?: string; completedAt?: string; }
+export type KnowledgeSource = 'local' | 'tigergraph' | 'postgres';
+export interface AgentVersion { number: number; createdAt: string; documentCount: number; status: VersionStatus; graphSource: KnowledgeSource; error?: string; completedAt?: string; }
 export interface PublicAgent { id: string; version: number; name: string; companyName: string; greeting: string; accentColor: string; allowedActions: string[]; }
 export interface Citation { documentId: string; title: string; excerpt: string; }
 
@@ -76,7 +77,7 @@ export const modelPlanSchema = z.object({
 }).strict();
 export type ModelPlan = z.infer<typeof modelPlanSchema>;
 export interface KnowledgePath { nodes: string[]; relation: string; }
-export interface RunResult { runId: string; answer: string; steps: ModelPlan['steps']; action: (NonNullable<ModelPlan['action']> & { receiptId: string; requiresConfirmation: true }) | null; citations: Citation[]; provider: ModelProviderId; version: number; knowledge?: { source: 'tigergraph' | 'local'; paths: KnowledgePath[] }; journey?: JourneyResult; }
+export interface RunResult { runId: string; answer: string; steps: ModelPlan['steps']; action: (NonNullable<ModelPlan['action']> & { receiptId: string; requiresConfirmation: true }) | null; citations: Citation[]; provider: ModelProviderId; version: number; knowledge?: { source: KnowledgeSource; paths: KnowledgePath[] }; journey?: JourneyResult; }
 export interface RunSummary { id: string; question: string; answer: string; status: string; createdAt: string; actionName: string | null; }
 export interface AgentDetail { agent: Agent; documents: KnowledgeDocument[]; versions: AgentVersion[]; sessions: RunSummary[]; }
 export type WorkspaceRole = 'owner' | 'admin' | 'editor' | 'viewer';
