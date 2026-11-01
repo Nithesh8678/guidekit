@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { createCodexProvider, type InferenceTiming } from './index.js';
 
 const schema = { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'], additionalProperties: false };
@@ -17,7 +19,11 @@ import {appendFileSync} from 'node:fs';
 const mode=${JSON.stringify(mode)};
 const log=${JSON.stringify(join(directory, 'events.jsonl'))};
 const record=event=>appendFileSync(log,JSON.stringify({event,pid:process.pid})+'\\n');
-record('spawn');process.on('SIGTERM',()=>{record('stop');process.exit(0)});
+record('spawn');
+// stdin EOF may end a healthy process before SIGTERM is dispatched. Record
+// actual exit, so both the graceful and signalled paths have the same evidence.
+process.on('exit',()=>record('stop'));
+process.on('SIGTERM',()=>process.exit(0));
 const send=x=>process.stdout.write(JSON.stringify(x)+'\\n');
 const reply=(m,result)=>send({id:m.id,result});
 const features=Object.fromEntries(process.argv.filter(x=>x.startsWith('features.')).map(x=>[x.slice(9).split('=')[0],false]));
@@ -78,6 +84,25 @@ async function waitEventWithoutTimers(directory: string, event: string, count = 
 }
 async function assertNoRuntimeDirectories(directory: string): Promise<void> {
   assert.deepEqual((await readdir(directory)).filter(name => name.startsWith('guidekit-inference-')), []);
+}
+function processAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ESRCH') return false; throw error; }
+}
+function assertProcessesStopped(pids: number[]): void {
+  assert.ok(pids.length > 0, 'Fixture must have launched a process before checking shutdown.');
+  for (const pid of pids) assert.equal(processAlive(pid), false, `Fixture process ${pid} is still alive.`);
+}
+async function waitRuntimeCleanup(directory: string, pids: number[]): Promise<void> {
+  assert.ok(pids.length > 0, 'Fixture must have launched a process before checking expiry.');
+  const deadline = performance.now() + 5000;
+  do {
+    const remaining = (await readdir(directory)).filter(name => name.startsWith('guidekit-inference-'));
+    if (!pids.some(processAlive) && remaining.length === 0) return;
+    await new Promise<void>(resolve => setImmediate(resolve));
+  } while (performance.now() < deadline);
+  assertProcessesStopped(pids);
+  await assertNoRuntimeDirectories(directory);
 }
 
 test('status distinguishes login from completed schema-constrained inference', async () => {
@@ -205,9 +230,25 @@ test('prepare is idempotent, performs no model turn, and destroys its private id
     assert.equal(initial.some(entry => entry.event === 'thread/start' || entry.event === 'turn/start'), false);
     await provider.close();
     assert.equal((await events(cwd)).filter(entry => entry.event === 'stop').length, 1);
+    assertProcessesStopped(initial.filter(entry => entry.event === 'spawn').map(entry => entry.pid));
     await assertNoRuntimeDirectories(cwd);
     provider.prepare(); await provider.close();
     assert.equal((await events(cwd)).filter(entry => entry.event === 'spawn').length, 1);
+  });
+});
+
+test('fixture shutdown evidence records graceful stdin EOF without requiring a SIGTERM handler', async () => {
+  await fixture('success', async (bin, cwd) => {
+    const child = spawn(process.execPath, [bin], { stdio: ['pipe', 'ignore', 'ignore'] });
+    const exited = once(child, 'exit');
+    try {
+      await waitEvent(cwd, 'spawn');
+      child.stdin.end();
+      assert.deepEqual(await exited, [0, null]);
+      const recorded = await events(cwd);
+      assert.equal(recorded.filter(entry => entry.event === 'stop').length, 1);
+      assertProcessesStopped(recorded.filter(entry => entry.event === 'spawn').map(entry => entry.pid));
+    } finally { if (child.exitCode === null && child.signalCode === null) { child.kill('SIGTERM'); await exited; } }
   });
 });
 
@@ -264,8 +305,10 @@ test('cancellation during preparation destroys only the claimed lease before clo
     assert.equal(beforeClose.filter(entry => entry.event === 'stop').length, 1);
     assert.equal(beforeClose.some(entry => entry.event === 'turn/start'), false);
     assert.deepEqual(timings.map(event => event.phase), ['startup', 'cleanup']);
+    assertProcessesStopped(beforeClose.filter(entry => entry.event === 'stop').map(entry => entry.pid));
     await provider.close();
     assert.equal((await events(cwd)).filter(entry => entry.event === 'stop').length, 2);
+    assertProcessesStopped(beforeClose.filter(entry => entry.event === 'spawn').map(entry => entry.pid));
     await assertNoRuntimeDirectories(cwd);
   });
 });
@@ -297,10 +340,15 @@ for (const mode of ['prepare-wait', 'success']) test(`an unclaimed ${mode === 's
     context.mock.timers.enable({ apis: ['setTimeout'] });
     const provider = createCodexProvider({ bin, cwd });
     provider.prepare();
-    await waitEventWithoutTimers(cwd, mode === 'success' ? 'catalog-settled' : 'initialize');
-    context.mock.timers.tick(60_001);
-    await waitEventWithoutTimers(cwd, 'stop');
-    // The expiry abort completes asynchronously; close joins that cleanup.
+    const prepared = await waitEventWithoutTimers(cwd, mode === 'success' ? 'catalog-settled' : 'initialize');
+    const pids = prepared.filter(entry => entry.event === 'spawn').map(entry => entry.pid);
+    context.mock.timers.tick(59_999);
+    for (const pid of pids) assert.equal(processAlive(pid), true, 'An unclaimed lease must remain alive before its TTL.');
+    context.mock.timers.tick(1);
+    // Prove expiry itself killed the process and removed private state, before
+    // close() can affect either; a handler log is not proof of process death.
+    await waitRuntimeCleanup(cwd, pids);
+    context.mock.timers.tick(120_000);
     await provider.close();
     const recorded = await events(cwd);
     assert.equal(recorded.filter(entry => entry.event === 'spawn').length, 1);
@@ -316,7 +364,7 @@ test('an expired prepared lease is not consumed and later inference uses a fresh
     try {
       provider.prepare(); const initial = await waitEventWithoutTimers(cwd, 'catalog-settled');
       const expiredPid = initial.find(entry => entry.event === 'spawn')!.pid;
-      context.mock.timers.tick(60_001); await waitEventWithoutTimers(cwd, 'stop');
+      context.mock.timers.tick(60_000); await waitRuntimeCleanup(cwd, [expiredPid]);
       assert.deepEqual(JSON.parse(await provider.infer({ prompt: 'fixture prompt', schema })), { answer: 'verified' });
       const recorded = await events(cwd), turn = recorded.find(entry => entry.event === 'turn/start');
       assert.ok(turn); assert.notEqual(turn.pid, expiredPid);
