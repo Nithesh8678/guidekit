@@ -5,6 +5,7 @@ import { BeatScheduler, type SpeechEvents } from './beats';
 import { MotionDirector, type MotionPoint } from './motion';
 import type { VoiceSettingsHandlers, VoiceSettingsState } from './voices';
 import { GuidedReveal, revealedBounds, targetRevealed } from './scroll';
+import { instructionDuration, instructionGraphemes } from './instruction';
 
 const styles = `
 :host{all:initial;position:fixed;inset:0;z-index:2147483000;pointer-events:none;font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#17213b;font-size:14px;line-height:1.5;color-scheme:light;--gk-accent:#365cf5}
@@ -18,7 +19,8 @@ const styles = `
 .messages{padding:20px 18px 8px;overflow-y:auto;flex:1;overscroll-behavior:contain;scrollbar-width:thin;background:linear-gradient(#fafbfe,#fff 100px)}.message{margin-bottom:20px;font-size:13px;overflow-wrap:anywhere}.message.user{background:#eef2ff;padding:11px 14px;border-radius:14px 14px 3px 14px;margin-left:32px}.message.assistant{padding-right:8px}.author{text-transform:uppercase;letter-spacing:.1em;font-weight:700;font-size:9px;color:#71809c;margin-bottom:7px}.content{white-space:pre-wrap}.message.error{border-left:3px solid #df7552;padding-left:12px;color:#74452f}.sources{margin-top:12px;font-size:11px;color:#60708d}.sources summary{cursor:pointer;width:fit-content;padding:3px 0}.source{margin:9px 0;padding:10px;background:#f5f7fc;border-radius:8px}.source strong{display:block;margin-bottom:4px;color:#35425b}.source blockquote{margin:0;white-space:pre-wrap}
 .status{min-height:29px;padding:3px 18px;color:#6b7891;font-size:11px;overflow-wrap:anywhere}.status[data-error=true]{color:#a1422e}.composer{padding:0 14px 12px}.input-box{border:1px solid #dfe5f0;border-radius:13px;background:#fff;padding:10px 10px 8px;transition:border-color .2s}.input-box:focus-within{border-color:#96aaf8;box-shadow:0 0 0 3px #365cf509}textarea{display:block;width:100%;height:50px;max-height:100px;border:0;resize:none;outline:none!important;background:transparent;color:#17213b;font-size:13px;padding:0 3px;line-height:1.5}textarea::placeholder{color:#8b95a8}.input-tools{display:flex;align-items:center;gap:6px}.hint{flex:1;font-size:10px;color:#8691a5}.send{width:32px;height:32px;border-radius:9px;color:#fff;background:var(--gk-accent);display:grid;place-items:center}.stop{font-size:11px;background:#fff2ed;color:#a54428;border-radius:8px;padding:8px 10px}.footer{font-size:9px;color:#8b95a8;text-align:center;padding:0 12px 11px}.footer b{font-weight:650;color:#66748d}
 .action{margin-top:13px;border:1px solid #dfe5f0;border-radius:12px;overflow:hidden;background:#fff}.action-main{padding:13px}.action-title{font-weight:700;font-size:12px}.action-reason{font-size:12px;color:#627089;margin:5px 0 0;white-space:pre-wrap}.action pre{background:#f5f7fb;border-radius:7px;padding:10px;max-height:150px;overflow:auto;font:11px/1.5 ui-monospace,SFMono-Regular,monospace;white-space:pre-wrap;overflow-wrap:anywhere}.action-foot{border-top:1px solid #edf0f7;padding:10px 12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}.primary,.secondary{font-size:12px;font-weight:600;border-radius:8px;padding:8px 11px}.primary{background:var(--gk-accent);color:white}.secondary{background:#f0f3fa;color:#4b5a75}.action-state{font-size:11px;color:#64718a}.action-state[data-success=true]{color:#16815b}.guide-start{margin-top:12px;display:flex;align-items:center;gap:6px;width:fit-content}
-.highlight{position:fixed;border:2px solid var(--gk-accent);border-radius:10px;box-shadow:0 0 0 5px #365cf51a,0 0 0 9999px #111d3a08;pointer-events:none;transform-origin:top left}.guide{pointer-events:auto;position:fixed;width:290px;max-width:calc(100vw - 24px);background:#fff;border:1px solid #dbe3f6;box-shadow:0 12px 45px #17213b26;border-radius:16px;padding:14px;animation:gk-appear .18s ease-out}.guide-header{display:flex;align-items:center;justify-content:space-between;gap:8px}.guide-label{color:var(--gk-accent);font-size:11px;font-weight:700}.guide p{font-size:13px;margin:10px 0 9px;white-space:pre-wrap;overflow-wrap:anywhere;max-height:90px;overflow:auto}.guide-controls{display:flex;align-items:center;justify-content:space-between;gap:6px}.guide .icon{width:25px;height:25px}.guide-hint{font-size:10px;line-height:1.4;color:#71809a;margin:8px 0 12px}.guide-tools{display:flex;gap:4px}.guide-auto{font-size:10px;border-radius:7px;padding:5px 8px;color:#6d7890;background:#f0f3f8}.guide-auto[aria-pressed=true]{background:#edf1ff;color:var(--gk-accent)}.guide-progress{display:block;width:100%;height:3px;border:0;border-radius:3px;overflow:hidden;margin-top:9px;appearance:none;accent-color:var(--gk-accent)}.guide-progress::-webkit-progress-bar{background:#edf0f7}.guide-progress::-webkit-progress-value{background:var(--gk-accent);transition:width .18s}.guide-progress::-moz-progress-bar{background:var(--gk-accent)}.guide[data-paused=true] .guide-label{color:#77839b}.guide[data-waiting=true] .guide-hint{color:#926144}.guide-resume{display:block;margin:6px 18px 12px;width:calc(100% - 36px);text-align:left}.guide-pause{font-size:11px;padding:7px 8px;background:transparent;color:#66748c;border-radius:7px}.guide-pause:hover{background:#f0f3fa}
+.highlight{position:fixed;border:2px solid var(--gk-accent);border-radius:10px;box-shadow:0 0 0 5px #365cf51a,0 0 0 9999px #111d3a08;pointer-events:none;transform-origin:top left}.guide{pointer-events:auto;position:fixed;width:290px;max-width:calc(100vw - 24px);background:#fff;border:1px solid #dbe3f6;box-shadow:0 12px 45px #17213b26;border-radius:16px;padding:14px;animation:gk-appear .18s ease-out}.guide-header{display:flex;align-items:center;justify-content:space-between;gap:8px}.guide-label{color:var(--gk-accent);font-size:11px;font-weight:700}.guide p{font-size:13px;margin:10px 0 9px;white-space:pre-wrap;overflow-wrap:anywhere;overflow:auto}.guide-controls{display:flex;align-items:center;justify-content:space-between;gap:6px}.guide .icon{width:25px;height:25px}.guide-hint{font-size:10px;line-height:1.4;color:#71809a;margin:8px 0 12px}.guide-tools{display:flex;gap:4px}.guide-auto{font-size:10px;border-radius:7px;padding:5px 8px;color:#6d7890;background:#f0f3f8}.guide-auto[aria-pressed=true]{background:#edf1ff;color:var(--gk-accent)}.guide-progress{display:block;width:100%;height:3px;border:0;border-radius:3px;overflow:hidden;margin-top:9px;appearance:none;accent-color:var(--gk-accent)}.guide-progress::-webkit-progress-bar{background:#edf0f7}.guide-progress::-webkit-progress-value{background:var(--gk-accent);transition:width .18s}.guide-progress::-moz-progress-bar{background:var(--gk-accent)}.guide[data-paused=true] .guide-label{color:#77839b}.guide[data-waiting=true] .guide-hint{color:#926144}.guide-resume{display:block;margin:6px 18px 12px;width:calc(100% - 36px);text-align:left}.guide-pause{font-size:11px;padding:7px 8px;background:transparent;color:#66748c;border-radius:7px}.guide-pause:hover{background:#f0f3fa}
+.guide.guide-expressive{width:248px;padding:0;overflow:hidden;isolation:isolate;animation:none;border:1px solid transparent;background:linear-gradient(#fff,#fff) padding-box,linear-gradient(125deg,#b7cdffb3,#e5dcff,#c4d9ffb3) border-box;box-shadow:0 14px 40px #17213b1c,0 3px 9px #17213b0b,-3px -2px 15px #8fb7ff21,3px 3px 17px #c9b6ff24}.guide-body{position:relative;padding:14px;display:flex;flex-direction:column;overflow:hidden}.guide-body>.guide-header,.guide-body>.guide-progress,.guide-body>.guide-hint,.guide-body>.guide-controls{flex-shrink:0}.guide-expressive .guide-instruction{line-height:1.6;min-height:1.6em;max-height:min(260px,max(48px,calc(100dvh - 220px)));flex-shrink:1;scrollbar-width:thin;overscroll-behavior:contain;color:#17213b}.guide-instruction:empty{margin-top:10px}.guide-expressive[data-gk-typing=true] .guide-instruction::after{content:"";display:inline-block;height:1em;width:2px;vertical-align:-.12em;margin-left:3px;border-radius:2px;background:#8da7de;animation:gk-caret .65s ease-in-out 2}.guide-instruction-accessible{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}.guide-skip{align-self:flex-start;margin:-1px 0 2px;padding:3px 0;background:transparent;color:#687b9e;font-size:10px;font-weight:600;border-radius:3px}.guide-skip:hover{color:#334b77}.guide-expressive .guide-controls button,.guide-expressive .guide-tools button{transition:background .15s,color .15s,box-shadow .15s}.guide-expressive .primary:hover{box-shadow:0 3px 10px color-mix(in srgb,var(--gk-accent) 24%,transparent)}.guide-expressive .secondary:hover{background:#e7edf7}.guide-rim{position:absolute;inset:-1px;z-index:2;pointer-events:none;border-radius:inherit;padding:1px;background:linear-gradient(115deg,transparent 20%,#8fb7ff 40%,#d7c6ff 52%,transparent 72%);background-size:260% 100%;opacity:0;mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);mask-composite:exclude}.guide-expressive[data-gk-typing=true] .guide-rim{animation:gk-rim-sweep 1.15s ease-out 1}.guide-measure{position:fixed;visibility:hidden;pointer-events:none;inset:0 auto auto 0;white-space:pre;width:max-content;max-width:none;font-size:13px;line-height:1.6}.guide-expressive[data-paused=true]{box-shadow:0 10px 30px #17213b16,0 0 12px #a7baff15}@keyframes gk-rim-sweep{0%{background-position:100% 0;opacity:0}18%{opacity:.9}100%{background-position:0 0;opacity:0}}@keyframes gk-caret{0%,100%{opacity:.25}50%{opacity:1}}
 @media(max-width:520px){.panel{right:12px;bottom:12px;max-width:calc(100vw - 24px);max-height:calc(100dvh - 24px);width:390px}.launcher{right:16px;bottom:16px}.guide{width:270px}.hint{font-size:9px}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
 `;
@@ -264,29 +266,88 @@ export class View {
     if (this.opened && this.cursorDocked && this.motion.location !== 'flight') this.alignDock(false, true);
     this.clearGuide(false); if (!steps.length) return;
     this.departDock(); this.motion.setPaused(false); this.motion.setVisible(true);
-    const motion = this.motion, card = element('section', 'guide'), beats = new BeatScheduler();
+    const motion = this.motion, card = element('section', 'guide guide-expressive'), body = element('div', 'guide-body'), beats = new BeatScheduler();
     card.setAttribute('role', 'region'); card.setAttribute('aria-label', 'Visual guidance');
     const head = element('div', 'guide-header'), label = element('span', 'guide-label'), tools = element('div', 'guide-tools');
     tools.append(iconButton('Open chat', 'chat', () => this.open()), iconButton('Stop visual guidance', 'close', () => this.stopGuide())); head.append(label, tools);
     const progress = element('progress', 'guide-progress'); progress.setAttribute('aria-label', 'Guide progress');
-    const text = element('p'), hint = element('div', 'guide-hint'); text.setAttribute('aria-live', 'polite'); hint.setAttribute('role', 'status');
+    // The visual prefix is decorative. Assistive technology receives the whole
+    // instruction once, without a live announcement for each typed character.
+    const text = element('p', 'guide-instruction'), accessibleText = element('span', 'guide-instruction-accessible'), hint = element('div', 'guide-hint');
+    text.setAttribute('aria-hidden', 'true'); accessibleText.setAttribute('role', 'status'); accessibleText.setAttribute('aria-live', 'polite'); accessibleText.setAttribute('aria-atomic', 'true'); hint.setAttribute('role', 'status');
+    const skip = button('Show full instruction', 'guide-skip', () => finishInstruction()); skip.hidden = true;
+    const measure = element('span', 'guide-measure'); measure.setAttribute('aria-hidden', 'true');
+    const rim = element('span', 'guide-rim'); rim.setAttribute('aria-hidden', 'true');
     const controls = element('div', 'guide-controls');
     const previous = button('Back', 'secondary', () => session.back()), next = button('Next', 'primary', () => session.next());
     const automatic = button('Auto', 'guide-auto', () => session.setAutomatic(!state?.automatic)); automatic.setAttribute('aria-label', 'Automatic progress'); automatic.setAttribute('aria-pressed', 'true');
     const pause = button('Pause', 'guide-pause', () => { this.handlers.guidePause?.(); session.setPaused(!state?.paused); }); pause.setAttribute('aria-label', 'Pause guide');
-    controls.append(previous, automatic, pause, next); card.append(head, progress, text, hint, controls); this.shadow.append(card);
+    controls.append(previous, automatic, pause, next); body.append(head, progress, text, accessibleText, skip, hint, controls); card.append(body, rim); this.shadow.append(card, measure);
     let state: GuidanceState | null = null, disposed = false, frame = 0, lastIndex = -1, lastNarrated = -1, narration = 0, animateNext = false;
     let cardAnimation: Animation | null = null, observed: HTMLElement | null = null, markReady = false, lastPresented = -1, hasPresented = false, fromChat = true, presentedTarget: HTMLElement | null = null, motionUntil = 0, lastBox = '';
     let reveal: GuidedReveal | null = null, revealTarget: HTMLElement | null = null, revealIndex = -1;
+    let instructionFrame = 0, instructionStarted = false, instructionStart = 0, instructionCommit = 0, instructionCount = -1, instruction = '', graphemes: string[] | null = null;
+    let sizeDirty = true, cardWidth = 248, cardHeight = 0, placementSide = -1, placement = '';
     card.dataset.gkScrollState = 'ready';
-    const reduced = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+    card.dataset.gkTyping = 'false';
+    const motionPreference = matchMedia('(prefers-reduced-motion: reduce)');
+    const reduced = () => motionPreference.matches;
     const viewport = () => ({ left: window.visualViewport?.offsetLeft ?? 0, top: window.visualViewport?.offsetTop ?? 0, width: window.visualViewport?.width ?? document.documentElement.clientWidth, height: window.visualViewport?.height ?? window.innerHeight });
     const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(Math.max(min, max), value));
+    const queueSize = () => { sizeDirty = true; if (!disposed && !document.hidden && !this.guideChatOpen) schedulePosition(); };
+    const finishInstruction = () => {
+      cancelAnimationFrame(instructionFrame); instructionFrame = 0; instructionStarted = true;
+      text.textContent = instruction; card.dataset.gkTyping = 'false'; skip.hidden = true;
+      queueSize();
+    };
+    const settlePresentation = () => { finishInstruction(); cardAnimation?.cancel(); cardAnimation = null; };
+    const prepareInstruction = (value: string) => {
+      cancelAnimationFrame(instructionFrame); instructionFrame = 0;
+      instruction = value; graphemes = instructionGraphemes(value); instructionStarted = false; instructionCount = -1;
+      text.textContent = ''; accessibleText.textContent = value; text.scrollTop = 0; card.dataset.gkTyping = 'false'; skip.hidden = true; placementSide = -1;
+      if (reduced() || !graphemes?.length) finishInstruction();
+      else queueSize();
+    };
+    const startInstruction = () => {
+      if (instructionStarted || disposed || !state || state.paused || this.guideChatOpen || document.hidden || reveal?.active) return;
+      instructionStarted = true;
+      if (reduced() || !graphemes?.length) { finishInstruction(); return; }
+      card.dataset.gkTyping = 'true'; skip.hidden = false; instructionStart = performance.now(); instructionCommit = 0;
+      const parts = graphemes, duration = instructionDuration(parts.length);
+      const tick = (now: number) => {
+        instructionFrame = 0;
+        if (disposed) return;
+        if (document.hidden || state?.paused || this.guideChatOpen || reduced()) { settlePresentation(); return; }
+        const progress = Math.min(1, (now - instructionStart) / duration), count = Math.max(1, Math.floor(parts.length * progress));
+        // One coalesced layout at most every 40 ms, never a layout per letter.
+        if (progress === 1 || now - instructionCommit >= 40) {
+          instructionCommit = now;
+          if (count !== instructionCount) { instructionCount = count; text.textContent = parts.slice(0, count).join(''); queueSize(); }
+        }
+        if (progress < 1) instructionFrame = requestAnimationFrame(tick); else finishInstruction();
+      };
+      instructionFrame = requestAnimationFrame(tick); queueSize();
+    };
+    const measureCard = (area: ReturnType<typeof viewport>) => {
+      if (!sizeDirty) return false;
+      sizeDirty = false;
+      const maximum = Math.max(1, Math.min(360, area.width - 24)), minimum = Math.min(248, maximum);
+      // Only the current visual prefix participates in measurement. There is no
+      // hidden final paragraph reserving its eventual width or height.
+      measure.textContent = text.textContent;
+      const width = Math.ceil(clamp(measure.getBoundingClientRect().width + 32, minimum, maximum));
+      body.style.width = `${Math.max(1, width - 2)}px`; body.style.maxHeight = `${Math.max(100, area.height - 26)}px`;
+      const height = Math.ceil(body.getBoundingClientRect().height + 2);
+      const changed = width !== cardWidth || height !== cardHeight;
+      cardWidth = width; cardHeight = height; card.style.width = `${width}px`; card.style.height = `${height}px`;
+      return changed;
+    };
     const position = () => {
       frame = 0; if (disposed || this.guideChatOpen || !state) return;
-      if (document.hidden) { reveal?.cancel(); motion.setVisible(false); return; }
+      if (document.hidden) { reveal?.cancel(); settlePresentation(); motion.setVisible(false); return; }
       const area = viewport(), edge = 12, width = area.width, height = area.height;
-      card.style.maxHeight = `${Math.max(100, height - edge * 2)}px`; card.style.overflowY = 'auto';
+      const oldCard = card.getBoundingClientRect(), resized = measureCard(area);
+      card.style.maxHeight = `${Math.max(100, height - edge * 2)}px`;
       const current = state.target ? resolve(state.step.targetId) : null;
       if (current !== state.target) { session.refresh(); return; }
       beginReveal();
@@ -294,15 +355,13 @@ export class View {
       const targetVisible = !!current && !!clipped && targetRevealed(current);
       if (!state.paused && !state.waiting) hint.textContent = reveal?.active ? 'Scrolling to this step…' : targetVisible ? state.hint : 'Scroll to this control to continue. I’ll point when it’s visible.';
       lastBox = rect ? `${rect.left},${rect.top},${rect.width},${rect.height}` : '';
-      const oldCard = card.getBoundingClientRect();
-      const cardWidth = card.offsetWidth, cardHeight = card.offsetHeight;
       let cardLeft = area.left + width - cardWidth - edge, cardTop = area.top + height - cardHeight - edge;
       if (rect && clipped && !reveal?.active) {
         const left = clamp(clipped.left - 5, area.left + 3, area.left + width - 3), top = clamp(clipped.top - 5, area.top + 3, area.top + height - 3);
         const right = clamp(clipped.right + 5, left, area.left + width - 3), bottom = clamp(clipped.bottom + 5, top, area.top + height - 3);
         const visible = targetVisible && right - left >= .25 && bottom - top >= .25;
         const box = { left, top, width: right - left, height: bottom - top };
-        if (visible) narrate();
+        if (visible) { startInstruction(); narrate(); }
         if (markReady && visible) {
           if (lastPresented !== state.index || presentedTarget !== current) {
             motion.present({ id: `step-${state.index}-${state.step.targetId}`, kind: state.step.annotation ?? 'target', box, index: state.index + 1 }, { animate: !reduced(), first: fromChat || !hasPresented });
@@ -312,17 +371,28 @@ export class View {
         motion.setVisible(visible && !state.paused);
         const candidates = [[rect.right + 14, rect.top], [rect.left - cardWidth - 14, rect.top], [rect.left, rect.bottom + 14], [rect.left, rect.top - cardHeight - 14]];
         let best = Infinity;
-        for (const candidate of candidates) {
+        let chosenSide = -1;
+        for (const [side, candidate] of candidates.entries()) {
           const x = clamp(candidate[0]!, area.left + edge, area.left + width - cardWidth - edge), y = clamp(candidate[1]!, area.top + edge, area.top + height - cardHeight - edge);
           const overlap = Math.max(0, Math.min(x + cardWidth, right + 7) - Math.max(x, left - 7)) * Math.max(0, Math.min(y + cardHeight, bottom + 7) - Math.max(y, top - 7));
-          const score = overlap * 1000 + Math.hypot(x - candidate[0]!, y - candidate[1]!);
-          if (score < best) { best = score; cardLeft = x; cardTop = y; }
+          // Keep the same anchor while text grows. Move to another side only
+          // when it meaningfully improves visibility or prevents occlusion.
+          const score = overlap * 1000 + Math.hypot(x - candidate[0]!, y - candidate[1]!) + (placementSide >= 0 && side !== placementSide ? 90 : 0);
+          if (score < best) { best = score; cardLeft = x; cardTop = y; chosenSide = side; }
         }
+        placementSide = chosenSide;
       } else motion.setVisible(false);
       card.style.left = `${cardLeft}px`; card.style.top = `${cardTop}px`;
-      if (animateNext && lastIndex >= 0 && !reduced() && oldCard.width) {
-        cardAnimation?.cancel(); cardAnimation = card.animate([{ transform: `translate(${oldCard.left - cardLeft}px,${oldCard.top - cardTop}px)` }, { transform: 'none' }], { duration: 180, easing: 'cubic-bezier(.2,.8,.2,1)' });
+      const destination = `${cardLeft},${cardTop},${cardWidth},${cardHeight}`;
+      if ((resized || animateNext) && placement && destination !== placement && !reduced() && !state.paused && oldCard.width) {
+        // Animate actual dimensions, never scale glyphs. Retarget from the
+        // current rendered bounds so successive batches remain continuous.
+        cardAnimation?.cancel(); cardAnimation = card.animate([
+          { left: `${oldCard.left}px`, top: `${oldCard.top}px`, width: `${oldCard.width}px`, height: `${oldCard.height}px` },
+          { left: `${cardLeft}px`, top: `${cardTop}px`, width: `${cardWidth}px`, height: `${cardHeight}px` }
+        ], { duration: resized ? 140 : 180, easing: 'cubic-bezier(.2,.8,.2,1)' });
       }
+      placement = destination;
       animateNext = false;
       // Follow actual host transitions/WAAPI transforms only while they run.
       // There is no animation-frame loop in a settled or hidden page.
@@ -336,11 +406,12 @@ export class View {
       }
     };
     const schedulePosition = (animate = false) => { animateNext ||= animate; if (!frame && !disposed) frame = requestAnimationFrame(position); };
-    const reposition = () => { cardAnimation?.cancel(); schedulePosition(); };
+    const reposition = () => { cardAnimation?.cancel(); sizeDirty = true; schedulePosition(); };
     const hostMotion = (event: Event) => {
       if (event.target instanceof Element && state?.target && event.target.contains(state.target)) { motionUntil = performance.now() + 10000; reposition(); }
     };
-    const visibility = () => { if (this.cursorDocked) return; if (document.hidden) { reveal?.cancel(); motion.setVisible(false); } else schedulePosition(); };
+    const visibility = () => { if (document.hidden) { settlePresentation(); cancelAnimationFrame(frame); frame = 0; } if (this.cursorDocked) return; if (document.hidden) { reveal?.cancel(); motion.setVisible(false); } else schedulePosition(); };
+    const preferenceChanged = () => { if (reduced()) settlePresentation(); sizeDirty = true; schedulePosition(); };
     const narrate = () => {
       if (!state || state.paused || state.waiting || reveal?.active || lastNarrated === state.index || this.guideChatOpen) return;
       const update = state; lastNarrated = update.index; const index = update.index, beat = ++narration;
@@ -379,8 +450,8 @@ export class View {
       const rect = target?.getBoundingClientRect(), box = rect ? `${rect.left},${rect.top},${rect.width},${rect.height}` : '';
       if (box !== lastBox) schedulePosition();
     }, 250);
-    const resize = new ResizeObserver(() => schedulePosition());
-    resize.observe(document.documentElement);
+    const resize = new ResizeObserver(entries => { if (entries.some(entry => entry.target !== card)) sizeDirty = true; schedulePosition(); });
+    resize.observe(document.documentElement); resize.observe(card); resize.observe(body);
     const mutations = new MutationObserver(records => { if (records.some(record => !(record.target instanceof Element && record.target.closest('[data-guidekit-root]')))) schedulePosition(); });
     mutations.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['style', 'class', 'hidden', 'open'] });
     const session = new GuidanceSession(steps, resolve, {
@@ -394,13 +465,16 @@ export class View {
         const ownsMotion = !this.guideChatOpen && !this.cursorDocked;
         if (changedStep || changedTarget || update.waiting) { reveal?.cancel(); ++narration; markReady = false; lastPresented = -1; lastNarrated = -1; beats.cancel(); if (ownsMotion) motion.erase({ animate: false, preserveCursor: true }); this.handlers.guidePause?.(); }
         const focusFirst = lastIndex < 0 && (document.activeElement === this.host || document.activeElement === document.body);
-        label.textContent = `Step ${update.index + 1} of ${update.total}`; text.textContent = update.step.text; hint.textContent = update.hint;
+        label.textContent = `Step ${update.index + 1} of ${update.total}`; hint.textContent = update.hint;
+        if (changedStep) prepareInstruction(update.step.text);
+        if (update.paused || update.waiting) settlePresentation();
+        sizeDirty = true;
         progress.max = update.total; progress.value = update.completed; previous.disabled = update.index === 0;
         next.textContent = update.index === update.total - 1 ? 'Finish guide' : 'Next';
         automatic.setAttribute('aria-pressed', String(update.automatic)); pause.textContent = update.paused ? 'Resume' : 'Pause'; pause.setAttribute('aria-label', update.paused ? 'Resume guide' : 'Pause guide');
         card.dataset.paused = String(update.paused); card.dataset.waiting = String(update.waiting); if (ownsMotion) { motion.setPaused(update.paused); motion.element.style.opacity = update.paused ? '.45' : '1'; }
         if (observed !== update.target) {
-          resize.disconnect(); resize.observe(document.documentElement); observed = update.target;
+          resize.disconnect(); resize.observe(document.documentElement); resize.observe(card); resize.observe(body); observed = update.target;
           for (let ancestor = observed, depth = 0; ancestor && depth < 64; ancestor = ancestor.parentElement, depth++) resize.observe(ancestor);
         }
         if (!this.guideChatOpen) { this.panel.hidden = true; this.launcher.hidden = true; card.hidden = false; }
@@ -421,19 +495,20 @@ export class View {
       onComplete: (index, step, evidence) => hooks?.progress?.(index, step, evidence)
     });
     this.guideSession = session; this.guideChatOpen = false; this.resumeGuide.hidden = true;
-    this.guideVisibility = visible => { card.hidden = !visible; if (!visible) { reveal?.cancel(); if (!this.cursorDocked) motion.setVisible(false); fromChat = true; beats.cancel(); } else schedulePosition(); };
+    this.guideVisibility = visible => { card.hidden = !visible; if (!visible) { settlePresentation(); reveal?.cancel(); if (!this.cursorDocked) motion.setVisible(false); fromChat = true; beats.cancel(); } else schedulePosition(); };
     this.guideFocus = () => {
       if ((document.activeElement === this.host || document.activeElement === document.body) && state?.target && resolve(state.step.targetId) === state.target && state.target.matches('input:not(:disabled),textarea:not(:disabled),select:not(:disabled)')) state.target.focus({ preventScroll: true });
     };
     this.guideCleanup = () => {
-      disposed = true; reveal?.cancel(); session.destroy(); beats.cancel(); motion.erase({ animate: false, preserveCursor: true }); resize.disconnect(); mutations.disconnect(); clearInterval(groundingPoll); cancelAnimationFrame(frame); cardAnimation?.cancel();
+      disposed = true; reveal?.cancel(); session.destroy(); beats.cancel(); motion.erase({ animate: false, preserveCursor: true }); resize.disconnect(); mutations.disconnect(); clearInterval(groundingPoll); cancelAnimationFrame(frame); cancelAnimationFrame(instructionFrame); cardAnimation?.cancel();
       document.removeEventListener('scroll', reposition, true); window.removeEventListener('resize', reposition); window.visualViewport?.removeEventListener('resize', reposition); window.visualViewport?.removeEventListener('scroll', reposition);
       for (const event of ['transitionrun', 'transitionend', 'transitioncancel', 'animationstart', 'animationend', 'animationcancel']) document.removeEventListener(event, hostMotion, true);
-      document.removeEventListener('visibilitychange', visibility); card.remove();
+      document.removeEventListener('visibilitychange', visibility); motionPreference.removeEventListener('change', preferenceChanged); card.remove(); measure.remove();
     };
     document.addEventListener('scroll', reposition, true); window.addEventListener('resize', reposition); window.visualViewport?.addEventListener('resize', reposition); window.visualViewport?.addEventListener('scroll', reposition);
     for (const event of ['transitionrun', 'transitionend', 'transitioncancel', 'animationstart', 'animationend', 'animationcancel']) document.addEventListener(event, hostMotion, true);
     document.addEventListener('visibilitychange', visibility);
+    motionPreference.addEventListener('change', preferenceChanged);
     session.start();
   }
   clearGuide(restoreChat = true): void {
