@@ -1,6 +1,6 @@
-# SDK 0.3 release candidate
+# SDK 0.4 release candidate
 
-The current build target is `0.3.0-alpha.1`. This is the reusable SDK's release-candidate version; building or packing it does not publish it to npm or establish hosted availability.
+The current build target is `0.4.0-alpha.1`. This is the reusable SDK's release-candidate version; building or packing it does not publish it to npm or establish hosted availability.
 
 `npm run build` produces three reusable forms from the same SDK source:
 
@@ -36,7 +36,7 @@ The default browser integration supports accessible same-document HTML controls.
 Check both the trusted release manifest and the loaded runtime for `hostWorkflowProgress: true` before depending on this API. The runtime exports the frozen `SDK_CAPABILITIES`, also available as `GuideKit.capabilities`:
 
 ```ts
-{ apiVersion: 1, explicitTargets: true, adaptiveJourneys: true, hostWorkflowProgress: true }
+{ apiVersion: 1, explicitTargets: true, adaptiveJourneys: true, hostWorkflowProgress: true, guideTargetCatalog: true }
 ```
 
 For longer applications, mount with `journey: { maxContinuations: 12 }`. The default remains six continuation requests; explicit limits must be integers from 1 through 24. One request is allowed in flight. The collector shares at most 160 safe controls while scanning at most 2,000 candidates. These are limits, not a promise that every offscreen, private or custom-rendered control is discoverable.
@@ -75,3 +75,26 @@ The SDK-owned overlay has `aria-live="off"`; its authored step text keeps `aria-
 Validation includes loading the packed ESM artifact, compiling a separate TypeScript consumer against its declarations and verifying manifest hashes. npm registry publication, a CDN, long-lived hosted availability and every customer framework/browser combination are separate release gates.
 
 Browser narration supports `voice.output: {voiceURI?, language?, rate?, remember?}`. The visitor can use Voice settings and Preview without starting a microphone or changing future answer playback. Only the chosen URI/language/rate persist per website origin; `remember:false` disables this preference storage.
+
+
+## Local guidance across future panels
+
+A host may opt into `guideTargetCatalog: true` with a bounded `guideTargets` catalog. This is developer-authored public metadata, separate from the currently observed `page.targets`. It works only with `targetMode: 'explicit'`. Never put entered text, filenames, arbitrary selectors, personal records or credentials in a catalog.
+
+```ts
+const assistant = mount({
+  agentId: 'YOUR_PUBLISHED_AGENT_ID', endpoint: 'http://127.0.0.1:4410',
+  targetMode: 'explicit',
+  guideTargets: [
+    { id: 'open_details', label: 'Open details', role: 'button' },
+    { id: 'save_details', label: 'Save details', role: 'button',
+      description: 'Appears after opening Details and completing required fields.' }
+  ]
+});
+```
+
+Use the same explicit ID, public label and role on the real controls. The catalog accepts at most 64 unique descriptors and 16,384 UTF-8 JSON bytes; normal visible collection remains limited to 160 controls. The first planned step must be currently visible. Later steps may name declared catalog controls, up to eight steps in one response. A future control resolves only after it appears as one safe, connected, matching public DOM control. Hidden/private fields, duplicate IDs, changed identity and changed routes cannot inherit an old target. Guidance observes actual interaction, waits for host receipts, and replans on divergence or missing controls. Catalog metadata grants no action authority.
+
+Known steps continue locally while their identities remain valid, including expected panel reveals and verified intermediate saves. A new unrelated control or unchanged context publication no longer discards an already-grounded plan. DOM rendering coalesces around asynchronous context reads; explicit context revisions, route changes, pause and destroy still invalidate obsolete work. The 1.2-second typing quiet window is unchanged; field exit/choice/click progress remains event-driven. See [latency architecture and measured evidence](guidance-latency.md).
+
+Opening the assistant may make a best-effort authenticated `POST /api/embed/session/prepare` with an empty body. It contains no question, page, audio or model turn. The local provider prepares at most one fresh restricted process, expires it after 60 seconds, and consumes it once. Every inference still owns a fresh ephemeral thread and tears its process down. Preparation does not select a paid provider or weaken validation. SDKs tolerate older servers that omit preparation.

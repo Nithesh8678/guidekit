@@ -21,7 +21,7 @@ test('a settled relevant scene triggers one bounded continuation, without geomet
   try {
     for (let index = 0; index < 10; index++) state.scene(page()); context.mock.timers.tick(5000); assert.equal(state.requests.length, 0);
     state.journey.record(0, { targetId: 'open', label: 'Open form', role: 'button', evidence: 'observed' });
-    state.scene(page(['open', 'name'])); state.scene(page(['open', 'name'])); context.mock.timers.tick(749); assert.equal(state.requests.length, 0);
+    state.scene(page(['open', 'name'])); state.scene(page(['open', 'name'])); context.mock.timers.tick(119); assert.equal(state.requests.length, 0);
     context.mock.timers.tick(1); await settled(); assert.equal(state.requests.length, 1); assert.equal(state.requests[0]!.reason, 'scene_changed'); assert.equal(state.requests[0]!.revision, 1); assert.equal(state.plans.length, 1);
     state.scene(page(['open', 'name'])); context.mock.timers.tick(5000); await settled(); assert.equal(state.requests.length, 1);
   } finally { state.journey.cancel(); context.mock.timers.reset(); }
@@ -141,6 +141,38 @@ test('disappearing completed controls do not replan when the remaining segment i
     state.journey.adopt(plan(page(['open', 'name']), state.journey.initial()));
     state.journey.record(0, { targetId: 'open', label: 'Open', role: 'button', evidence: 'observed' });
     state.scene(page(['name'])); context.mock.timers.tick(1000); await settled(); assert.equal(state.requests.length, 0);
+  } finally { state.journey.cancel(); context.mock.timers.reset(); }
+});
+test('new controls and host revisions preserve a grounded local remainder without inference', async context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] }); const state = fixture();
+  try {
+    state.journey.adopt(plan(page(['open', 'name', 'save']), state.journey.initial()));
+    state.journey.seed(page(['open', 'name', 'save']), page().url, 'number:0');
+    state.journey.record(0, { targetId: 'open', label: 'Open', role: 'button', evidence: 'observed' });
+    state.journey.expectTransition();
+    state.journey.observe(page(['name', 'save', 'new_row']), page().url, 'number:1');
+    context.mock.timers.tick(2000); await settled();
+    assert.equal(state.requests.length, 0); assert.equal(state.pending(), 0);
+    state.journey.record(1, { targetId: 'name', label: 'Name', role: 'textbox', evidence: 'observed' });
+    state.journey.observe(page(['name', 'save', 'new_row', 'new_menu']), page().url, 'number:2');
+    context.mock.timers.tick(2000); await settled(); assert.equal(state.requests.length, 0);
+    state.journey.record(2, { targetId: 'save', label: 'Save', role: 'button', evidence: 'host_verified' });
+    state.journey.segmentFinished({ reason: 'completed', verified: true, scope: 'step' });
+    context.mock.timers.tick(119); await settled(); assert.equal(state.requests.length, 0);
+    context.mock.timers.tick(1); await settled(); assert.equal(state.requests.length, 1);
+    assert.equal(state.requests[0]!.reason, 'segment_completed');
+  } finally { state.journey.cancel(); context.mock.timers.reset(); }
+});
+test('a replaced remaining control still invalidates a local remainder and coalesces its latest scene', async context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] }); const state = fixture();
+  try {
+    state.journey.adopt(plan(page(['open', 'name']), state.journey.initial()));
+    state.journey.record(0, { targetId: 'open', label: 'Open', role: 'button', evidence: 'observed' });
+    const changed = page(['name', 'new_row']); changed.targets[0]!.label = 'Different field';
+    state.scene(changed); context.mock.timers.tick(60);
+    state.scene(page(['replacement'])); context.mock.timers.tick(119); await settled(); assert.equal(state.requests.length, 0);
+    context.mock.timers.tick(1); await settled(); assert.equal(state.requests.length, 1);
+    assert.deepEqual(state.plans[0]!.page.targets.map(target => target.id), ['replacement']);
   } finally { state.journey.cancel(); context.mock.timers.reset(); }
 });
 test('an explicitly expected asynchronous modal transition can continue after the short input interaction window', async context => {

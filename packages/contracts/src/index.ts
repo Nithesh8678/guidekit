@@ -33,9 +33,25 @@ export const actionDescriptorSchema = z.object({
 export const pageContextSchema = z.object({
   url: z.string().url().max(1800), title: z.string().max(200),
   targets: z.array(pageTargetSchema).max(160),
+  /** Host-authored public controls that may appear later; not currently observed DOM. */
+  guideTargets: z.array(pageTargetSchema).max(64).optional(),
   actions: z.array(actionDescriptorSchema).max(30),
   context: z.record(z.string(), z.unknown()).default({})
-}).strict();
+}).strict().superRefine((page, ctx) => {
+  if (page.guideTargets && new TextEncoder().encode(JSON.stringify(page.guideTargets)).byteLength > 16384) ctx.addIssue({ code: 'custom', path: ['guideTargets'], message: 'The public guide target catalog is too large.' });
+  for (const [name, targets] of [['targets', page.targets], ['guideTargets', page.guideTargets ?? []]] as const) {
+    const ids = new Set<string>();
+    for (const target of targets) {
+      if (ids.has(target.id)) ctx.addIssue({ code: 'custom', path: [name], message: 'Target IDs must be unique.' });
+      ids.add(target.id);
+    }
+  }
+  const visible = new Map(page.targets.map(target => [target.id, target]));
+  for (const target of page.guideTargets ?? []) {
+    const current = visible.get(target.id);
+    if (current && (current.label !== target.label || current.role !== target.role)) ctx.addIssue({ code: 'custom', path: ['guideTargets'], message: 'A guide target conflicts with the currently observed control.' });
+  }
+});
 export type PageContext = z.infer<typeof pageContextSchema>;
 export type PageTarget = z.infer<typeof pageTargetSchema>;
 

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { getEventListeners } from 'node:events';
 import { createOpenAIProvider, type OpenAIProviderOptions } from './openai.js';
+import type { InferenceTiming } from './index.js';
 
 const model = 'fixture-model', apiKey = 'fixture-credential-only';
 const schema = { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'], additionalProperties: false };
@@ -45,6 +46,39 @@ test('completed inference sends an explicit nonstored strict request without too
   });
   try { assert.deepEqual(JSON.parse(await value.infer(input)), { answer: 'fixture answer' }); assert.equal(posts, 1); assert.match((await value.status()).message, /inference completed/); }
   finally { await value.close(); }
+});
+
+test('timing diagnostics report only inference duration without changing hosted opt-in or results', async () => {
+  const events: InferenceTiming[] = [];
+  const value = provider(async () => json(completed()));
+  try {
+    assert.deepEqual(JSON.parse(await value.infer({ ...input, onTiming: event => { events.push(event); throw new Error('private diagnostic failure'); } })), { answer: 'fixture answer' });
+    assert.equal(events.length, 1); assert.equal(events[0]!.phase, 'inference');
+    assert.deepEqual(Object.keys(events[0]!).sort(), ['durationMs', 'elapsedMs', 'phase']);
+    assert.ok(Number.isInteger(events[0]!.durationMs) && events[0]!.durationMs >= 0);
+    assert.ok(Number.isInteger(events[0]!.elapsedMs) && events[0]!.elapsedMs >= events[0]!.durationMs);
+    assert.equal(JSON.stringify(events).includes(apiKey), false);
+    assert.equal(JSON.stringify(events).includes('fixture'), false);
+  } finally { await value.close(); }
+  let calls = 0;
+  const disabled = provider(async () => { calls++; return json(completed()); }, { enabled: false });
+  try { await assert.rejects(disabled.infer({ ...input, onTiming: event => events.push(event) }), /disabled/); assert.equal(events.length, 1); assert.equal(calls, 0); }
+  finally { await disabled.close(); }
+});
+
+test('failed and cancelled hosted inference still reports duration without sensitive details', async () => {
+  for (const cancel of [false, true]) {
+    const events: InferenceTiming[] = [], controller = new AbortController();
+    const value = provider(async () => cancel ? new Promise<Response>(() => {}) : json({ error: 'fixture-private-error' }, { status: 503 }));
+    try {
+      const pending = value.infer({ ...input, signal: controller.signal, onTiming: event => events.push(event) });
+      const rejected = assert.rejects(pending, cancel ? { name: 'AbortError' } : /request failed/);
+      if (cancel) controller.abort('private reason');
+      await rejected;
+      assert.equal(events.length, 1); assert.equal(events[0]!.phase, 'inference');
+      assert.equal(JSON.stringify(events).includes('private'), false);
+    } finally { await value.close(); }
+  }
 });
 
 test('refusals, incomplete answers, tool calls, duplicate messages and malformed model JSON are rejected', async () => {

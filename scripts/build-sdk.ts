@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile, cp, rm } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 
-const SDK_VERSION = '0.3.0-alpha.1';
+const SDK_VERSION = '0.4.0-alpha.1';
 export async function buildSDK() {
   const output = resolve('dist/sdk'), packageDir = resolve('dist/sdk-package');
   await mkdir(output, { recursive: true });
@@ -14,7 +14,7 @@ export async function buildSDK() {
   const release = createHash('sha256').update(script).update(module).digest('hex').slice(0, 24), releaseDir = join(output, 'releases', release);
   await mkdir(releaseDir, { recursive: true });
   for (const file of ['guidekit.js', 'guidekit.mjs']) await cp(join(output, file), join(releaseDir, file));
-  const manifest = { version: SDK_VERSION, release, capabilities: { apiVersion: 1, explicitTargets: true, adaptiveJourneys: true, hostWorkflowProgress: true }, script: { path: `/sdk/releases/${release}/guidekit.js`, integrity: `sha384-${createHash('sha384').update(script).digest('base64')}` }, module: { path: `/sdk/releases/${release}/guidekit.mjs`, integrity: `sha384-${createHash('sha384').update(module).digest('base64')}` } };
+  const manifest = { version: SDK_VERSION, release, capabilities: { apiVersion: 1, explicitTargets: true, adaptiveJourneys: true, hostWorkflowProgress: true, guideTargetCatalog: true }, script: { path: `/sdk/releases/${release}/guidekit.js`, integrity: `sha384-${createHash('sha384').update(script).digest('base64')}` }, module: { path: `/sdk/releases/${release}/guidekit.mjs`, integrity: `sha384-${createHash('sha384').update(module).digest('base64')}` } };
   await writeFile(join(output, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
   await writeFile(join(releaseDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
   await rm(packageDir, { recursive: true, force: true }); await mkdir(join(packageDir, 'dist'), { recursive: true });
@@ -26,6 +26,6 @@ export async function buildSDK() {
   const rootPackage = JSON.parse(await readFile('package.json', 'utf8'));
   await writeFile(join(packageDir, 'package.json'), `${JSON.stringify({ name: '@guidekit/sdk', version: SDK_VERSION, description: 'Company-scoped visual and voice guidance SDK', type: 'module', main: './dist/guidekit.mjs', module: './dist/guidekit.mjs', types: './dist/types/sdk/src/index.d.ts', exports: { '.': { types: './dist/types/sdk/src/index.d.ts', import: './dist/guidekit.mjs', default: './dist/guidekit.mjs' }, './script': './dist/guidekit.js' }, files: ['dist', 'README.md', 'LICENSE'], sideEffects: true, license: 'MIT', dependencies: { zod: rootPackage.dependencies.zod }, engines: { node: '>=20' }, repository: { type: 'git', url: 'git+https://github.com/Nithesh8678/guidekit.git', directory: 'packages/sdk' } }, null, 2)}\n`);
   await cp('LICENSE', join(packageDir, 'LICENSE'));
-  await writeFile(join(packageDir, 'README.md'), `# GuideKit SDK\n\nBrowser SDK build ${SDK_VERSION}; release ${release}.\n\nImport { mount } from '@guidekit/sdk' and provide your published agentId and trusted GuideKit endpoint. Register typed host actions with validation, authorization, explicit approval, idempotency and verified outcomes. Browser voice requires supported Chrome/Edge, localhost/HTTPS and microphone permission. See https://github.com/Nithesh8678/guidekit/blob/feat/platform-completion/docs/sdk-release.md for configuration and privacy boundaries.\n\nThis archive is a locally verified release candidate. It has not been published to the npm registry.\n`);
+  await writeFile(join(packageDir, 'README.md'), `# GuideKit SDK\n\nBrowser SDK build ${SDK_VERSION}; release ${release}.\n\nImport { mount } from '@guidekit/sdk' and provide your published agentId and trusted GuideKit endpoint. Register typed host actions with validation, authorization, explicit approval, idempotency and verified outcomes. Browser voice requires supported Chrome/Edge, localhost/HTTPS and microphone permission. See https://github.com/Nithesh8678/guidekit/blob/feat/guidance-latency/docs/sdk-release.md for configuration and privacy boundaries.\n\nThis archive is a locally verified release candidate. It has not been published to the npm registry.\n`);
   return manifest;
 }
