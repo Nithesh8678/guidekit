@@ -98,3 +98,34 @@ test('an authenticated response already in flight cannot restore a session delet
     assert.equal((await state.request('/api/account', oldCookie)).status, 401);
   } finally { release(); await state.close(); }
 });
+
+test('concurrent password recovery can consume a reset link only once', async () => {
+  const state = await fixture();
+  try {
+    const owner = await state.core.repo.register({ email: 'parallel-reset@example.invalid', name: 'Recovery owner', companyName: 'Recovery' }, await passwordHash('synthetic-original-password'));
+    assert.equal((await state.request('/api/auth/forgot-password', '', { email: owner.user.email })).status, 200);
+    const value = new URLSearchParams(state.messages.at(-1)!.link.split('?')[1]).get('token')!;
+    const passwords = ['synthetic-replacement-one', 'synthetic-replacement-two'];
+    const responses = await Promise.all(passwords.map(password => state.request('/api/auth/reset-password', '', { token: value, password })));
+    assert.deepEqual(responses.map(response => response.status).sort(), [200, 400]);
+    assert.equal((await state.core.repo.row('SELECT auth_epoch FROM users WHERE id=?', owner.user.id))!.auth_epoch, 1);
+    const winner = passwords[responses.findIndex(response => response.status === 200)]!;
+    assert.equal((await state.request('/api/auth/login', '', { email: owner.user.email, password: winner })).status, 200);
+    assert.equal((await state.request('/api/auth/login', '', { email: owner.user.email, password: 'synthetic-original-password' })).status, 401);
+  } finally { await state.close(); }
+});
+
+test('parallel invitations enforce the pending capacity within a tenant transaction', async () => {
+  const state = await fixture();
+  try {
+    const owner = await state.core.repo.register({ email: 'parallel-invite@example.invalid', name: 'Invitation owner', companyName: 'Invitations' }, 'synthetic-no-login-hash');
+    const cookie = await state.staleSession(owner.user.id, 0);
+    const responses = await Promise.all(Array.from({ length: 31 }, (_, index) => state.request('/api/workspace/invitations', cookie, { email: `invited-${index}@example.invalid`, role: 'viewer' })));
+    assert.equal(responses.filter(response => response.status === 201).length, 30);
+    assert.equal(responses.filter(response => response.status === 409).length, 1);
+    assert.equal((await state.core.repo.row("SELECT COUNT(*) AS count FROM account_tokens WHERE tenant_id=? AND purpose='invite' AND consumed_at IS NULL", owner.tenant.id))!.count, 30);
+    // Rotating an existing invitation does not occupy an additional capacity slot.
+    assert.equal((await state.request('/api/workspace/invitations', cookie, { email: 'invited-0@example.invalid', role: 'editor' })).status, 201);
+    assert.equal((await state.core.repo.row("SELECT COUNT(*) AS count FROM account_tokens WHERE tenant_id=? AND purpose='invite' AND consumed_at IS NULL", owner.tenant.id))!.count, 30);
+  } finally { await state.close(); }
+});

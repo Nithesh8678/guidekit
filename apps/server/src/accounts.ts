@@ -72,7 +72,7 @@ export function registerAccounts(app: Express, repo: AsyncRepository, options: {
   app.post('/api/account/verification', authLimit, async (req, res) => { const actor = await workspace(req); if (!actor.user.emailVerified) await issue('verify', actor.user.email, actor.user.id, actor.tenant.id, {}, origin(req)); res.json({ ok: true, delivery: delivery.mode }); });
   app.post('/api/auth/verify', authLimit, async (req, res) => {
     const input = z.object({ token }).strict().parse(req.body);
-    await repo.transaction(async () => { const record = await findToken(input.token, 'verify'); await claimToken(record); await repo.db.prepare('UPDATE users SET verified_at=? WHERE id=?').run(now(), String(record.user_id)); await repo.audit(String(record.tenant_id), String(record.user_id), 'account.email_verified', String(record.user_id)); }); res.json({ ok: true });
+    await repo.transaction(async () => { const record = await findToken(input.token, 'verify'); await repo.lockUser(String(record.user_id)); await claimToken(record); await repo.db.prepare('UPDATE users SET verified_at=? WHERE id=?').run(now(), String(record.user_id)); await repo.audit(String(record.tenant_id), String(record.user_id), 'account.email_verified', String(record.user_id)); }); res.json({ ok: true });
   });
   app.post('/api/auth/forgot-password', authLimit, async (req, res) => {
     const input = z.object({ email }).strict().parse(req.body), user = await repo.row('SELECT id,tenant_id FROM users WHERE email=?', input.email);

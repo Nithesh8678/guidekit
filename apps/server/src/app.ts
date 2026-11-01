@@ -334,6 +334,7 @@ export async function createApp(options: AppOptions) {
         if (action) (await repo.db.prepare('INSERT INTO receipts (id,session_id,run_id,action_name,arguments) VALUES (?,?,?,?,?)').run(action.receiptId, String(sessionRow.id), runId, action.name, JSON.stringify(action.arguments)));
         controller.signal.throwIfAborted();
         (await repo.db.prepare('UPDATE runs SET answer=?,status=?,response=?,action_name=? WHERE id=?').run(result.answer, action ? 'awaiting_confirmation' : 'answered', JSON.stringify(result), action?.name ?? null, runId));
+        controller.signal.throwIfAborted();
       }));
       return result;
     };
