@@ -43,13 +43,14 @@ export function createPostgresKnowledgeProvider(config?: PostgresKnowledgeConfig
   let closed = false;
   async function assertRuntime(client: PoolClient, scope?: KnowledgeScope) {
     const result = await client.query(`SELECT r.rolsuper,r.rolbypassrls,r.rolcreaterole,r.rolcreatedb,
-      EXISTS(SELECT 1 FROM pg_roles p WHERE (p.rolsuper OR p.rolbypassrls) AND pg_has_role(current_user,p.oid,'MEMBER')) AS privileged_member,
+      (has_schema_privilege(current_user,'guidekit_knowledge','CREATE') OR has_schema_privilege(current_user,'public','CREATE')) AS can_create_objects,
+      EXISTS(SELECT 1 FROM pg_roles p WHERE pg_has_role(current_user,p.oid,'MEMBER') AND (p.rolsuper OR p.rolbypassrls OR p.rolcreatedb OR p.rolcreaterole OR has_schema_privilege(p.oid,'guidekit_knowledge','CREATE') OR has_schema_privilege(p.oid,'public','CREATE'))) AS privileged_member,
       (SELECT count(*)::int FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='guidekit_knowledge' AND c.relname IN('versions','documents','chunks') AND c.relrowsecurity AND c.relforcerowsecurity AND NOT pg_has_role(current_user,c.relowner,'MEMBER') AND EXISTS(SELECT 1 FROM pg_policy p WHERE p.polrelid=c.oid AND p.polname='scope_boundary' AND NOT p.polpermissive)) AS protected_tables,
       (SELECT schema_version FROM guidekit_knowledge.metadata WHERE singleton=true) AS schema_version
       ${scope ? ",set_config('guidekit.tenant_id',$1,true),set_config('guidekit.agent_id',$2,true),set_config('guidekit.version',$3,true)" : ''}
       FROM pg_roles r WHERE r.rolname=current_user`, scope ? [scope.tenantId, scope.agentId, String(scope.version)] : []);
     const role = result.rows[0];
-    if (!role || role.rolsuper || role.rolbypassrls || role.rolcreaterole || role.rolcreatedb || role.privileged_member || role.protected_tables !== 3) fail('invalid_config', 'PostgreSQL knowledge requires a separate restricted runtime role and forced row-level security. Owner, privileged and migration connections are refused.');
+    if (!role || role.rolsuper || role.rolbypassrls || role.rolcreaterole || role.rolcreatedb || role.privileged_member || role.can_create_objects || role.protected_tables !== 3) fail('invalid_config', 'PostgreSQL knowledge requires a separate restricted runtime role and forced row-level security. Owner, privileged and migration connections are refused.');
     if (role.schema_version !== KNOWLEDGE_SCHEMA_VERSION) fail('invalid_config', 'PostgreSQL knowledge schema version is incompatible.');
   }
   async function scoped<T>(scope: KnowledgeScope, task: (client: PoolClient) => Promise<T>): Promise<T> {

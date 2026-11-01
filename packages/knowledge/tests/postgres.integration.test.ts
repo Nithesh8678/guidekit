@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { Pool } from 'pg';
 import { createPostgresKnowledgeProvider, createLocalEmbeddingProvider, installPostgresKnowledgeSchema, type EmbeddingProvider, type KnowledgeSnapshot } from '../src/index.js';
 
@@ -103,4 +103,53 @@ test('real pinned local embeddings retrieve a paraphrase through PostgreSQL pgve
     assert.equal(result.citations[0]!.documentId, 'dissolve'); assert.equal(result.source, 'postgres'); assert.equal(result.citations[0]!.excerpt, snapshot.documents[0]!.content);
     console.log(JSON.stringify({ check: 'real-local-pgvector-paraphrase', model: embeddings.model, firstSource: result.citations[0]!.documentId, citationCount: result.citations.length }));
   } finally { await provider.close?.(); }
+});
+
+test('knowledge runtime rejects privileged parent roles and schema CREATE capability before retrieval', { skip: !enabled, timeout: 120_000 }, async () => {
+  assert.equal(new URL(ownerUrl!).pathname, '/guidekit_test', 'Role regression tests require the disposable test database.');
+  await installPostgresKnowledgeSchema({ connectionString: ownerUrl!, runtimeRole: decodeURIComponent(new URL(runtimeUrl!).username) });
+  const owner = new Pool({ connectionString: ownerUrl, max: 1 });
+  const suffix = randomUUID().replaceAll('-', ''), child = `gk_guard_child_${suffix}`, databaseParent = `gk_guard_database_${suffix}`, roleParent = `gk_guard_roles_${suffix}`, schemaParent = `gk_guard_schema_${suffix}`;
+  const password = randomBytes(24).toString('hex'), url = new URL(ownerUrl!);
+  url.username = child; url.password = password;
+  const created: string[] = [];
+  let calls = 0;
+  const provider = createPostgresKnowledgeProvider({ connectionString: url.toString(), embeddings: { ...fixtureEmbeddings(), embed: async () => { calls++; throw new Error('The role guard must reject before embedding'); } } });
+  try {
+    await owner.query(`CREATE ROLE ${child} LOGIN PASSWORD '${password}' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOINHERIT`); created.push(child);
+    await owner.query(`GRANT USAGE ON SCHEMA guidekit_knowledge TO ${child}; GRANT SELECT ON guidekit_knowledge.metadata TO ${child}`);
+    assert.equal((await provider.status()).connected, true, 'The fresh role has no direct or inherited administration privileges.');
+    for (const [parent, flag] of [[databaseParent, 'CREATEDB NOCREATEROLE'], [roleParent, 'NOCREATEDB CREATEROLE']]) {
+      await owner.query(`CREATE ROLE ${parent} NOLOGIN NOSUPERUSER NOBYPASSRLS ${flag} NOINHERIT`); created.push(parent!);
+      await owner.query(`GRANT ${parent} TO ${child}`);
+      assert.equal((await provider.status()).connected, false, `Membership in ${flag} must be refused even with NOINHERIT.`);
+      await assert.rejects(provider.retrieve({ tenantId: 'test_guard', agentId: 'agent', version: 1, question: 'Find workflow instructions' }), /restricted runtime role/);
+      await owner.query(`REVOKE ${parent} FROM ${child}`);
+      assert.equal((await provider.status()).connected, true, 'Removing the unsafe membership restores the baseline.');
+    }
+    await owner.query(`CREATE ROLE ${schemaParent} NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOINHERIT`); created.push(schemaParent);
+    for (const schema of ['guidekit_knowledge', 'public']) {
+      await owner.query(`GRANT CREATE ON SCHEMA ${schema} TO ${child}`);
+      assert.equal((await provider.status()).connected, false, `A role with CREATE on ${schema} is an administrator.`);
+      await assert.rejects(provider.retrieve({ tenantId: 'test_guard', agentId: 'agent', version: 1, question: 'Find workflow instructions' }), /restricted runtime role/);
+      await owner.query(`REVOKE CREATE ON SCHEMA ${schema} FROM ${child}`);
+      assert.equal((await provider.status()).connected, true);
+      await owner.query(`GRANT CREATE ON SCHEMA ${schema} TO ${schemaParent}; GRANT ${schemaParent} TO ${child}`);
+      assert.equal((await provider.status()).connected, false, `A NOINHERIT child can SET ROLE to its ${schema} administrator parent.`);
+      await owner.query(`REVOKE ${schemaParent} FROM ${child}; REVOKE CREATE ON SCHEMA ${schema} FROM ${schemaParent}`);
+      assert.equal((await provider.status()).connected, true);
+    }
+    assert.equal(calls, 0);
+  } finally {
+    await provider.close?.();
+    // The hosted migration role can administer these test roles without SET ROLE
+    // permission. Revoke our exact grants instead of requiring DROP OWNED access.
+    if (created.includes(child)) {
+      for (const role of created.filter(role => role !== child)) await owner.query(`REVOKE ${role} FROM ${child}`);
+      await owner.query(`REVOKE ALL ON guidekit_knowledge.metadata FROM ${child}; REVOKE ALL ON SCHEMA guidekit_knowledge FROM ${child}; REVOKE CREATE ON SCHEMA public FROM ${child}`);
+    }
+    if (created.includes(schemaParent)) await owner.query(`REVOKE CREATE ON SCHEMA guidekit_knowledge,public FROM ${schemaParent}`);
+    for (const role of [...created].reverse()) await owner.query(`DROP ROLE ${role}`);
+    await owner.end();
+  }
 });
