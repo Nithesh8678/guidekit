@@ -136,8 +136,15 @@ test('real intermediate instruction prefixes grow a compact amber label after cu
     expect(Math.max(...samples.map(sample => sample.width)) - Math.min(...samples.map(sample => sample.width)), 'Revealed content grows the compact card width').toBeGreaterThan(15);
     expect(Math.max(...samples.map(sample => sample.height)) - Math.min(...samples.map(sample => sample.height)), 'Wrapped content grows the card height').toBeGreaterThan(30);
     expect(new Set(samples.map(sample => Math.round(sample.width))).size, 'The card travels through intermediate widths').toBeGreaterThan(4);
-    const style = await guide(page).locator('.guide-surface').evaluate(node => ({ shadow: getComputedStyle(node).boxShadow, background: getComputedStyle(node).backgroundColor, color: getComputedStyle(node).color }));
-    expect(style.shadow).not.toBe('none'); expect(style.background).not.toBe('rgb(255, 255, 255)'); expect(style.background).not.toBe('rgba(0, 0, 0, 0)'); expect(style.color).not.toBe(style.background);
+    const style = await guide(page).locator('.guide-surface').evaluate(node => ({ shadow: getComputedStyle(node).boxShadow, background: getComputedStyle(node).backgroundColor, image: getComputedStyle(node).backgroundImage, text: getComputedStyle(node.querySelector('.guide-instruction')!).color }));
+    const rgb = (color: string) => color.match(/[\d.]+/g)!.map(Number);
+    const solid = rgb(style.background), gradient = [...style.image.matchAll(/rgba?\(([^)]+)\)/g)].map(match => rgb(match[0]));
+    const paint = (solid[3] ?? 1) > 0 ? [solid] : gradient;
+    expect(style.shadow).not.toBe('none'); expect(paint.length, 'The label has an actual painted surface, including gradient backgrounds').toBeGreaterThan(0);
+    expect(paint.every(([r, g, b, alpha = 1]) => alpha >= .95 && r! > g! && g! > b! && r! >= 240), 'Every painted stop is opaque warm amber, rather than a transparent or white card').toBe(true);
+    const luminance = (channels: number[]) => channels.slice(0, 3).map(channel => { const value = channel / 255; return value <= .04045 ? value / 12.92 : ((value + .055) / 1.055) ** 2.4; }).reduce((sum, value, index) => sum + value * [ .2126, .7152, .0722 ][index]!, 0);
+    const ink = luminance(rgb(style.text));
+    expect(paint.every(color => { const surface = luminance(color); return (Math.max(ink, surface) + .05) / (Math.min(ink, surface) + .05) >= 4.5; }), 'Instruction text remains readable against every actual gradient stop').toBe(true);
     const textStyle = await instruction(page).evaluate(node => ({ font: parseFloat(getComputedStyle(node).fontSize), line: parseFloat(getComputedStyle(node).lineHeight), transform: getComputedStyle(node).transform }));
     expect(textStyle.font).toBeGreaterThanOrEqual(12); expect(textStyle.line).toBeGreaterThanOrEqual(textStyle.font * 1.4); expect(textStyle.transform).toBe('none');
     expect(Math.max(...samples.map(sample => sample.width))).toBeLessThanOrEqual(320);
@@ -354,6 +361,43 @@ test('smoothly revealing an offscreen control finishes before instruction typing
     expect(samples.some(sample => sample.scroll === 'ready' && sample.typing && sample.text.length > 0)).toBe(true);
     expect(await page.evaluate(() => scrollY)).toBeGreaterThan(4000);
   } finally { await stopProbe(page); }
+});
+
+test('hiding during the first cursor flight restores the arrived label without replay or another model request', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'no-preference' }); await openFixture(page, [longInstruction]);
+  const requests: string[] = []; page.on('request', request => { if (request.url().endsWith('/api/embed/session/ask')) requests.push(request.url()); });
+  try {
+    await ask(page); await expect(guide(page)).toHaveAttribute('data-gk-arrival', 'pending');
+    await expect(page.locator('[data-guidekit-root] [data-gk-cursor]')).toHaveAttribute('data-gk-cursor-location', 'flight');
+    // This deterministic visibility fixture is not a claim that Chromium was
+    // physically backgrounded by an operating-system window manager.
+    await page.evaluate(() => {
+      const hidden = Object.getOwnPropertyDescriptor(document, 'hidden'), state = Object.getOwnPropertyDescriptor(document, 'visibilityState');
+      (window as Window & { __gkRestoreVisibility?: () => void }).__gkRestoreVisibility = () => {
+        if (hidden) Object.defineProperty(document, 'hidden', hidden); else Reflect.deleteProperty(document, 'hidden');
+        if (state) Object.defineProperty(document, 'visibilityState', state); else Reflect.deleteProperty(document, 'visibilityState');
+        document.dispatchEvent(new Event('visibilitychange'));
+      };
+      Object.defineProperty(document, 'hidden', { configurable: true, value: true });
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    await frames(page, 20); await expect(guide(page)).toHaveAttribute('data-gk-arrival', 'pending');
+    expect(await guide(page).locator('.guide-surface').evaluate(node => getComputedStyle(node).opacity)).toBe('0');
+    await startProbe(page);
+    await page.evaluate(() => (window as Window & { __gkRestoreVisibility?: () => void }).__gkRestoreVisibility?.());
+    await expect(guide(page)).toHaveAttribute('data-gk-arrival', 'ready', { timeout: 10_000 });
+    await finished(page, longInstruction); await frames(page, 12);
+    const recovered = (await stopProbe(page)).filter(sample => sample.arrival === 'ready');
+    expect(recovered.length).toBeGreaterThan(0);
+    expect(recovered.every(sample => sample.text === longInstruction && !sample.typing), 'The suspended instruction recovers in full without a typewriter replay').toBe(true);
+    expect(requests).toHaveLength(1);
+    await toolbar(page).getByRole('button', { name: 'Stop visual guidance', exact: true }).click();
+    await expect(guide(page)).toHaveCount(0); await expect(page.locator('[data-guidekit-root] [data-gk-step-badge]')).toHaveCount(0);
+  } finally {
+    await stopProbe(page);
+    await page.evaluate(() => { const state = window as Window & { __gkRestoreVisibility?: () => void }; state.__gkRestoreVisibility?.(); delete state.__gkRestoreVisibility; });
+  }
 });
 
 test('independent rings and step badges stay beside unobscured controls on desktop and mobile edges', async ({ page }) => {
