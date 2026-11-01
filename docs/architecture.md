@@ -4,10 +4,10 @@
 flowchart LR
   Developer --> Dashboard[Developer dashboard]
   Dashboard --> API[Loopback Node API]
-  API --> DB[(SQLite: tenants, roles, drafts, audit)]
+  API --> DB[(PostgreSQL: tenants, roles, drafts, audit)]
   API --> Candidate[Immutable publication candidate]
-  Candidate --> Prepare[Prepare source index and graph]
-  Prepare --> Graph[(TigerGraph relationships)]
+  Candidate --> Prepare[Prepare immutable chunks and local embeddings]
+  Prepare --> Graph[(PostgreSQL full-text and pgvector index)]
   Prepare --> Ready[Ready version]
   Ready --> Active[Explicit active version pointer]
   Visitor --> SDK[Shared browser SDK]

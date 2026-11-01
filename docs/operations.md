@@ -6,7 +6,11 @@ shared inference service. The server's loopback listeners and Host restrictions
 remain in place. Commercial hosting and customer inference identity are separate
 work.
 
-## Online backup
+## Database selection
+
+The selected product data and retrieval path is PostgreSQL with pgvector; see [setup and cutover](postgres-migration.md). The SQLite procedures below apply only when SQLite is explicitly selected. After PostgreSQL cutover, backing up the old SQLite file does not back up new application writes. Keep the direct migration/backup credential separate from restricted runtime credentials, and take a complete PostgreSQL backup including the knowledge index. The original SQLite archive is a pre-cutover recovery point, not an ongoing PostgreSQL backup.
+
+## Online SQLite backup
 
 ```sh
 npm run backup -- --data-dir .data --dest .backups/guidekit-2026-10-29
@@ -159,7 +163,7 @@ Recovery, email-verification and invitation links are delivered through the conf
 
 ## History retention and readiness
 
-`GET /health` checks that the process is serving. `GET /ready` checks SQLite access, the selected runtime account/model and configured graph connectivity; it returns 503 for a failed dependency. It does not execute a paid model request or prove microphone readiness.
+`GET /health` checks that the process is serving. `GET /ready` checks the selected database, runtime account/model and required knowledge-provider connectivity; it returns 503 for a failed dependency. It does not execute a paid model request or prove microphone readiness.
 
 `npm run retention -- --days 30` previews eligible history. After taking a verified backup, append `--apply` to remove completed runs older than the cutoff whose session expired more than a day ago, their receipts, old audit events and expired account/session credentials. Pending approvals, running requests, accounts, company knowledge and immutable publications are retained. No automatic deletion job is enabled. Inspect and remove expired private account-outbox messages separately.
 

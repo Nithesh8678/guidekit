@@ -1,6 +1,6 @@
 # SDK 0.4 release candidate
 
-The current build target is `0.4.0-alpha.1`. This is the reusable SDK's release-candidate version; building or packing it does not publish it to npm or establish hosted availability.
+The current build target is `0.4.1-alpha.1`. This adds validated PostgreSQL knowledge evidence while preserving local and TigerGraph compatibility. This is the reusable SDK's release-candidate version; building or packing it does not publish it to npm or establish hosted availability.
 
 `npm run build` produces three reusable forms from the same SDK source:
 

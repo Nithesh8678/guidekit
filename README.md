@@ -15,11 +15,11 @@ npm run build
 npm start
 ```
 
-Open http://127.0.0.1:4410 and create your own workspace. No owner account or password is shipped. Login and company data persist in the ignored `.data/` directory. The runtime selects the signed-in account's catalog default; an explicit `GUIDEKIT_MODEL` override must be available to that account. A successful sign-in is not a completed inference; runtime status distinguishes the two.
+Open http://127.0.0.1:4410 and create your own workspace. No owner account or password is shipped. The unconfigured local demo stores data in ignored `.data/`; the product path uses managed PostgreSQL with separate restricted application and knowledge roles. Follow the [PostgreSQL setup and safe migration](docs/postgres-migration.md) before selecting it. The runtime selects the signed-in account's catalog default; an explicit `GUIDEKIT_MODEL` override must be available to that account. A successful sign-in is not a completed inference; runtime status distinguishes the two.
 
 1. Create an agent and choose CRM or support capabilities.
 2. Add your own `.txt`/`.md` knowledge or explicitly load an example document.
-3. Save and publish the agent. Wait for knowledge/graph preparation to finish before the version becomes active.
+3. Save and publish the agent. Wait for knowledge preparation to finish before the version becomes active.
 4. Open the CRM or support website from Install. Its URL carries only the public agent ID.
 5. Ask how to do something, or request a supported action. Review its details and approve it.
 
@@ -58,9 +58,9 @@ For actions, use the [SDK API](packages/sdk/README.md) and the complete [CRM hos
 ```mermaid
 flowchart LR
   Dashboard[Company dashboard] --> API[Local API]
-  API --> Store[(Tenant-scoped SQLite, roles and audit)]
+  API --> Store[(Tenant-scoped PostgreSQL, roles and audit)]
   Store --> Candidate[Immutable publication candidate]
-  Candidate --> Graph[(Prepared TigerGraph knowledge)]
+  Candidate --> Graph[(Full-text and pgvector knowledge)]
   Graph --> Version[Ready active version]
   Website[Website + shared SDK] -->|Scoped session + live page context| API
   Version --> API
@@ -100,7 +100,7 @@ Core: authenticated workspaces and team roles, local one-time account recovery, 
 
 Cutroom is a separate demonstration host. Its optional adapter is committed on its own local `feat/guidekit-low-latency` branch, with rename, track mute and selected-clip movement through its authenticated revision/idempotency-aware commands. These workflows are browser/HTTP tested; a real model rename and normal Undo were also verified. Existing projects and personal media were not opened. The separate branch remains unmerged and unpublished.
 
-TigerGraph document relationships are implemented through server-side preparation and scoped retrieval; see [setup and verification](docs/tigergraph.md). Browser speech recognition and synthesis are the selected voice approach; no Wispr key is required. Public HTTPS hosting, live paid inference, external account email, npm/CDN publication and packaged-device acceptance remain separate gates. Billing, SSO, native capture and arbitrary-site automation are separately scoped phases. The SDK cannot bypass a host's permissions or access cross-origin iframe/canvas semantics automatically.
+The selected product architecture combines PostgreSQL full-text and pgvector semantic retrieval with pinned local embeddings; see [setup, migration and evaluation](docs/postgres-migration.md). TigerGraph remains an explicit legacy adapter for migration and rollback. Browser speech recognition and synthesis are the selected voice approach; no Wispr key is required. Public HTTPS hosting, live paid inference, external account email, npm/CDN publication and packaged-device acceptance remain separate gates. Billing, SSO, native capture and arbitrary-site automation are separately scoped phases. The SDK cannot bypass a host's permissions or access cross-origin iframe/canvas semantics automatically.
 
 [viaSocket](https://viasocket.com/developers/docs) is a suitable optional provider for company-connected app actions. Its API can sit behind an approved GuideKit action and an authenticated host backend. It is not connected or live-tested in this release; see the [integration assessment](docs/viasocket.md).
 
