@@ -2,6 +2,11 @@ export type InferencePhase = 'startup' | 'restrictions' | 'authentication' | 'ca
 export interface InferenceTiming { phase: InferencePhase; durationMs: number; elapsedMs: number; }
 export type InferenceTimingObserver = (event: InferenceTiming) => void;
 
+export function reportInferenceTiming(observer: InferenceTimingObserver | undefined, event: InferenceTiming): void {
+  try { observer?.(event); }
+  catch { /* Diagnostics cannot cancel, replace or expose a model response. */ }
+}
+
 /** Duration-only diagnostics. Observer failures must never change inference. */
 export function inferenceTimer(observer?: InferenceTimingObserver) {
   const started = performance.now();
@@ -11,8 +16,7 @@ export function inferenceTimer(observer?: InferenceTimingObserver) {
     try { return await work(); }
     finally {
       const now = performance.now();
-      try { observer?.({ phase, durationMs: Math.max(0, Math.round(now - phaseStarted)), elapsedMs: Math.max(0, Math.round(now - started)) }); }
-      catch { /* Diagnostics cannot cancel, replace or expose a model response. */ }
+      reportInferenceTiming(observer, { phase, durationMs: Math.max(0, Math.round(now - phaseStarted)), elapsedMs: Math.max(0, Math.round(now - started)) });
     }
   };
 }
