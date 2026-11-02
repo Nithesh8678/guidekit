@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { annotationGeometry, createFlight, cubicBezier, cursorFlightDurationMs, MotionDirector, MOTION, penDurationMs, releaseDelayMs, retargetFlight, sampleFlight, smoothstep, stepBadgePlacement, STEP_BADGE_SIZE, validateBox, type AnnotationCommand, type AnnotationKind } from '../src/motion';
+import { annotationGeometry, createFlight, cubicBezier, cursorFlightDurationMs, cursorTravelProgress, MotionDirector, MOTION, penDurationMs, releaseDelayMs, retargetFlight, sampleFlight, smoothstep, stepBadgePlacement, STEP_BADGE_SIZE, validateBox, type AnnotationCommand, type AnnotationKind } from '../src/motion';
 
 const box = { left: 120, top: 80, width: 160, height: 36 };
 const command = (kind: AnnotationKind = 'target', id = 'name'): AnnotationCommand => ({ id, kind, box: { ...box } });
@@ -67,13 +67,71 @@ test('smoothstep and local pen easing have exact endpoints and monotonic progres
   assert.throws(() => smoothstep(NaN)); assert.throws(() => cubicBezier(Infinity));
 });
 
-test('cursor uses quadratic flight, capped upward arc, tangent rotation and a midflight scale', () => {
-  const flight = createFlight({ x: 0, y: 0 }, { x: 800, y: 0 }, 100);
-  assert.deepEqual(flight.control, { x: 400, y: -80 }); close(flight.durationMs, 1000);
-  const start = sampleFlight(flight, 100), middle = sampleFlight(flight, 600), end = sampleFlight(flight, 1100);
-  close(start.x, 0); close(start.y, 0); close(start.scale, 1); close(middle.x, 400); close(middle.y, -40); close(middle.rotation, 90); close(middle.scale, 1.3); close(middle.glowRadius, 14); close(end.x, 800); close(end.y, 0); close(end.scale, 1);
-  assert.deepEqual(sampleFlight(flight, 10000), end);
-  const stationary = sampleFlight(createFlight({ x: 5, y: 7 }, { x: 5, y: 7 }, 0), 300); assert.ok(Object.values(stationary).every(Number.isFinite));
+test('cursor travel accelerates, cruises and brakes with continuous bounded progress', () => {
+  assert.equal(cursorTravelProgress(-10), 0); assert.equal(cursorTravelProgress(10), 1); assert.throws(() => cursorTravelProgress(NaN));
+  let previous = 0;
+  for (let index = 0; index <= 200; index++) {
+    const progress = cursorTravelProgress(index / 200); assert.ok(progress >= previous && progress >= 0 && progress <= 1); previous = progress;
+  }
+  const speed = (time: number) => (cursorTravelProgress(time + .0001) - cursorTravelProgress(time - .0001)) / .0002;
+  close(speed(.3), speed(.45), .00001);
+  assert.ok(speed(.02) < speed(.3) * .1); assert.ok(speed(.98) < speed(.3) * .02);
+  for (const boundary of [.22, .52]) close(speed(boundary - .0001), speed(boundary + .0001), .0001);
+});
+
+test('perpendicular cubic flights visibly swoop in every direction and land without overshoot or spinning', () => {
+  for (const [dx, dy] of [[400, 0], [-400, 0], [0, 400], [0, -400], [300, 400], [-300, 400], [300, -400], [-300, -400]]) {
+    const start = { x: 100, y: 150 }, end = { x: start.x + dx!, y: start.y + dy! }, distance = Math.hypot(dx!, dy!);
+    const flight = createFlight(start, end, 100), poses = Array.from({ length: 201 }, (_, index) => sampleFlight(flight, 100 + flight.durationMs * index / 200));
+    assert.ok(flight.control2); assert.ok(flight.durationMs >= 600 && flight.durationMs <= 1400);
+    assert.deepEqual(poses[0], { ...start, rotation: 0, scale: 1, glowRadius: 8, progress: 0 });
+    assert.deepEqual(poses.at(-1), { ...end, rotation: 0, scale: 1, glowRadius: 8, progress: 1 });
+    assert.deepEqual(sampleFlight(flight, 10000), poses.at(-1));
+    let previous = 0, deviation = 0;
+    for (const pose of poses) {
+      const x = pose.x - start.x, y = pose.y - start.y, projection = (x * dx! + y * dy!) / distance ** 2;
+      assert.ok(projection >= previous - 1e-9 && projection >= -1e-9 && projection <= 1 + 1e-9); previous = projection;
+      deviation = Math.max(deviation, Math.abs(x * dy! - y * dx!) / distance);
+      assert.ok(Math.abs(pose.rotation) <= 24.00001 && pose.scale >= 1 && pose.scale <= 1.16001);
+    }
+    assert.ok(deviation > distance * .12, `Travel direction ${dx},${dy} needs a visible sideways bow.`);
+    assert.ok(Math.max(...poses.map(pose => Math.abs(pose.rotation))) > 3);
+    assert.ok(Math.max(...poses.map(pose => pose.scale)) > 1.15);
+    assert.ok(Math.hypot(poses[1]!.x - start.x, poses[1]!.y - start.y) < .1);
+    assert.ok(Math.hypot(poses.at(-2)!.x - end.x, poses.at(-2)!.y - end.y) < .1);
+  }
+});
+
+test('viewport-aware swoops choose available room for edge-to-edge and diagonal travel', () => {
+  const viewport = { left: 40, top: 20, width: 640, height: 480 };
+  for (const [start, end] of [
+    [{ x: 48, y: 40 }, { x: 48, y: 480 }], [{ x: 660, y: 480 }, { x: 660, y: 40 }],
+    [{ x: 60, y: 28 }, { x: 660, y: 28 }], [{ x: 660, y: 490 }, { x: 60, y: 490 }],
+    [{ x: 48, y: 28 }, { x: 660, y: 490 }], [{ x: 660, y: 28 }, { x: 48, y: 490 }],
+  ]) {
+    const flight = createFlight(start!, end!, 0, { viewport }), dx = end!.x - start!.x, dy = end!.y - start!.y, distance = Math.hypot(dx, dy);
+    let deviation = 0, previous = 0;
+    for (let index = 0; index <= 200; index++) {
+      const pose = sampleFlight(flight, flight.durationMs * index / 200), projection = ((pose.x - start!.x) * dx + (pose.y - start!.y) * dy) / distance ** 2;
+      assert.ok(pose.x >= viewport.left - 1e-9 && pose.x <= viewport.left + viewport.width + 1e-9);
+      assert.ok(pose.y >= viewport.top - 1e-9 && pose.y <= viewport.top + viewport.height + 1e-9);
+      assert.ok(projection >= previous - 1e-9 && projection <= 1 + 1e-9); previous = projection;
+      deviation = Math.max(deviation, Math.abs((pose.x - start!.x) * dy - (pose.y - start!.y) * dx) / distance);
+    }
+    assert.ok(deviation > 20, 'Viewport fitting preserves a visible arc instead of flattening into a straight route.');
+  }
+});
+
+test('stationary flights do not pulse, while an interrupted pose can settle in place without a jump', () => {
+  const at = { x: 5, y: 7 }, stationary = createFlight(at, at, 0);
+  assert.equal(stationary.durationMs, 0); assert.deepEqual(sampleFlight(stationary, 0), { ...at, rotation: 0, scale: 1, glowRadius: 8, progress: 1 });
+  const settling = createFlight(at, at, 0, { fromRotation: 18, fromScale: 1.12 }); assert.equal(settling.durationMs, 200);
+  close(sampleFlight(settling, 0).rotation, 18); close(sampleFlight(settling, 0).scale, 1.12);
+  for (let index = 0; index <= 200; index += 10) {
+    const pose = sampleFlight(settling, index); close(pose.x, at.x); close(pose.y, at.y); assert.ok(Number.isFinite(pose.rotation) && Number.isFinite(pose.scale));
+  }
+  assert.deepEqual(sampleFlight(settling, 200), { ...at, rotation: 0, scale: 1, glowRadius: 8, progress: 1 });
+  assert.throws(() => createFlight(at, at, 0, { fromScale: 0 })); assert.throws(() => createFlight(at, at, 0, { fromRotation: NaN }));
 });
 
 test('interruption retargets from the current presentation pose rather than either stale endpoint', () => {
@@ -322,4 +380,14 @@ test('docked and outbound poses freeze hidden/paused, and reduced motion stays s
     reduced.director.dock({ x: 10, y: 20 }, { animate: true }); assert.equal(reduced.director.location, 'docked'); reduced.director.present(command(), { first: true }); assert.equal(reduced.director.location, 'target'); assert.equal(reduced.director.ready, true); assert.equal(reduced.frames.size, 0);
     reduced.director.dock({ x: 30, y: 40 }, { animate: true }); close(reduced.director.diagnostics.cursor!.x, 30); close(reduced.director.diagnostics.cursor!.y, 40); assert.equal(reduced.frames.size, 0);
   } finally { reduced.director.destroy(); }
+});
+
+test('a neutral cursor already at its dock needs no stationary animation frames', () => {
+  const state = renderer(); let ready = 0;
+  try {
+    state.director.present(command(), { animate: false }); const pose = state.director.diagnostics.cursor!;
+    state.director.dock({ x: pose.x, y: pose.y }, { animate: true, onReady: () => ready++ });
+    assert.equal(state.director.location, 'docked'); assert.equal(ready, 1); assert.equal(state.frames.size, 0);
+    assert.equal(state.director.diagnostics.flightDurationMs, 0); assert.equal(state.active().length, 0);
+  } finally { state.director.destroy(); }
 });

@@ -79,23 +79,65 @@ export function cubicBezier(progress: number, controls: readonly [number, number
 }
 
 export interface CursorPose extends MotionPoint { rotation: number; scale: number; glowRadius: number; progress: number; }
-export interface CursorFlight { start: MotionPoint; end: MotionPoint; control: MotionPoint; startedAt: number; durationMs: number; fromRotation?: number; fromScale?: number; }
-export function createFlight(start: MotionPoint, end: MotionPoint, startedAt: number): CursorFlight {
-  const from = point(start), to = point(end), distance = Math.hypot(to.x - from.x, to.y - from.y);
-  return { start: from, end: to, control: { x: (from.x + to.x) / 2, y: (from.y + to.y) / 2 - Math.min(distance * 0.2, 80) }, startedAt: finite(startedAt, 'startedAt'), durationMs: cursorFlightDurationMs(distance) };
+export interface CursorFlight {
+  start: MotionPoint; end: MotionPoint; control: MotionPoint;
+  /** Absent only for legacy quadratic flight records. New flights use two controls. */
+  control2?: MotionPoint;
+  startedAt: number; durationMs: number; fromRotation?: number; fromScale?: number;
+}
+export interface CursorFlightOptions { viewport?: MotionBox; fromRotation?: number; fromScale?: number; }
+/** Integrated smooth velocity ramps: accelerate, cruise briefly, then brake softly. */
+export function cursorTravelProgress(progress: number): number {
+  const value = clamp(finite(progress, 'progress'), 0, 1), accelerate = .22, cruise = .30, brake = .48, distance = accelerate / 2 + cruise + brake / 2;
+  if (value === 0 || value === 1) return value;
+  const integral = (time: number) => time ** 3 - time ** 4 / 2;
+  if (value < accelerate) return accelerate * integral(value / accelerate) / distance;
+  if (value < accelerate + cruise) return (accelerate / 2 + value - accelerate) / distance;
+  const time = (value - accelerate - cruise) / brake;
+  return (accelerate / 2 + cruise + brake * (time - integral(time))) / distance;
+}
+export function createFlight(start: MotionPoint, end: MotionPoint, startedAt: number, options: CursorFlightOptions = {}): CursorFlight {
+  const from = point(start), to = point(end), dx = to.x - from.x, dy = to.y - from.y, distance = Math.hypot(dx, dy);
+  const rotation = finite(options.fromRotation ?? 0, 'fromRotation'), scale = finite(options.fromScale ?? 1, 'fromScale');
+  if (scale <= 0) throw new RangeError('Cursor scale must be positive.');
+  const normal = distance ? { x: dy / distance, y: -dx / distance } : { x: 0, y: 0 }, bow = Math.min(distance * .23, 150);
+  const controls = (side: number) => [
+    { x: from.x + dx * .23 + normal.x * bow * side, y: from.y + dy * .23 + normal.y * bow * side },
+    { x: from.x + dx * .78 + normal.x * bow * .82 * side, y: from.y + dy * .78 + normal.y * bow * .82 * side },
+  ] as const;
+  let [control, control2] = controls(1);
+  if (options.viewport) {
+    const area = validateBox(options.viewport), right = area.left + area.width, bottom = area.top + area.height;
+    const cost = (points: readonly MotionPoint[]) => points.reduce((sum, candidate) => sum + Math.max(area.left - candidate.x, 0, candidate.x - right) + Math.max(area.top - candidate.y, 0, candidate.y - bottom), 0);
+    const opposite = controls(-1);
+    if (cost(opposite) < cost([control, control2])) [control, control2] = opposite;
+    const fit = (candidate: MotionPoint) => ({ x: clamp(candidate.x, area.left, right), y: clamp(candidate.y, area.top, bottom) });
+    control = fit(control); control2 = fit(control2);
+  }
+  const durationMs = distance < .25 ? Math.abs(rotation) > .001 || Math.abs(scale - 1) > .001 ? 200 : 0 : cursorFlightDurationMs(distance);
+  return { start: from, end: to, control, control2, startedAt: finite(startedAt, 'startedAt'), durationMs, ...(options.fromRotation !== undefined ? { fromRotation: rotation } : {}), ...(options.fromScale !== undefined ? { fromScale: scale } : {}) };
 }
 export function sampleFlight(flight: CursorFlight, now: number): CursorPose {
-  const progress = clamp((finite(now, 'now') - flight.startedAt) / flight.durationMs, 0, 1), time = smoothstep(progress), inverse = 1 - time;
-  const tangent = { x: 2 * inverse * (flight.control.x - flight.start.x) + 2 * time * (flight.end.x - flight.control.x), y: 2 * inverse * (flight.control.y - flight.start.y) + 2 * time * (flight.end.y - flight.control.y) };
-  let rotation = Math.atan2(tangent.y, tangent.x) * 180 / Math.PI + 90, scale = 1 + 0.3 * Math.sin(Math.PI * progress);
-  if (flight.fromRotation !== undefined) { const delta = ((rotation - flight.fromRotation + 180) % 360 + 360) % 360 - 180; rotation = flight.fromRotation + delta * time; }
-  if (flight.fromScale !== undefined) scale = mix(flight.fromScale, scale, time);
-  return { x: inverse ** 2 * flight.start.x + 2 * inverse * time * flight.control.x + time ** 2 * flight.end.x, y: inverse ** 2 * flight.start.y + 2 * inverse * time * flight.control.y + time ** 2 * flight.end.y, rotation, scale, glowRadius: 8 + (scale - 1) * 20, progress };
+  const elapsed = finite(now, 'now') - flight.startedAt, progress = flight.durationMs ? clamp(elapsed / flight.durationMs, 0, 1) : elapsed < 0 ? 0 : 1;
+  if (progress === 1) return { ...flight.end, rotation: 0, scale: 1, glowRadius: 8, progress };
+  if (progress === 0) { const scale = flight.fromScale ?? 1; return { ...flight.start, rotation: flight.fromRotation ?? 0, scale, glowRadius: 8 + Math.max(0, scale - 1) * 16, progress }; }
+  const time = cursorTravelProgress(progress), inverse = 1 - time;
+  // Converting an older quadratic record to cubic controls preserves its path.
+  const first = flight.control2 ? flight.control : { x: mix(flight.start.x, flight.control.x, 2 / 3), y: mix(flight.start.y, flight.control.y, 2 / 3) };
+  const second = flight.control2 ?? { x: mix(flight.end.x, flight.control.x, 2 / 3), y: mix(flight.end.y, flight.control.y, 2 / 3) };
+  const tangent = { x: 3 * inverse ** 2 * (first.x - flight.start.x) + 6 * inverse * time * (second.x - first.x) + 3 * time ** 2 * (flight.end.x - second.x), y: 3 * inverse ** 2 * (first.y - flight.start.y) + 6 * inverse * time * (second.y - first.y) + 3 * time ** 2 * (flight.end.y - second.y) };
+  const dx = flight.end.x - flight.start.x, dy = flight.end.y - flight.start.y, distance = Math.hypot(dx, dy), speed = Math.hypot(tangent.x, tangent.y);
+  const turn = distance && speed ? (dx * tangent.y - dy * tangent.x) / (distance * speed) : 0;
+  const pulse = distance >= .25 ? Math.sin(Math.PI * progress) ** 2 : 0;
+  const bank = distance ? clamp(18 * dx / distance + 10 * dy / distance + 12 * turn, -24, 24) * pulse : 0;
+  const rotation = bank + (flight.fromRotation ?? 0) * (1 - smoothstep(progress / .30));
+  const scale = 1 + .16 * pulse + ((flight.fromScale ?? 1) - 1) * (1 - smoothstep(progress / .35));
+  return { x: inverse ** 3 * flight.start.x + 3 * inverse ** 2 * time * first.x + 3 * inverse * time ** 2 * second.x + time ** 3 * flight.end.x, y: inverse ** 3 * flight.start.y + 3 * inverse ** 2 * time * first.y + 3 * inverse * time ** 2 * second.y + time ** 3 * flight.end.y, rotation, scale, glowRadius: 8 + Math.max(0, scale - 1) * 16, progress };
 }
 /** A retarget keeps the current presentation position, angle and scale. */
-export function retargetFlight(flight: CursorFlight, end: MotionPoint, now: number): CursorFlight {
+export function retargetFlight(flight: CursorFlight, end: MotionPoint, now: number, viewport?: MotionBox): CursorFlight {
   const current = sampleFlight(flight, Math.max(flight.startedAt, finite(now, 'now')));
-  return { ...createFlight(current, end, now), fromRotation: current.rotation, fromScale: current.scale };
+  return createFlight(current, end, now, { viewport, fromRotation: current.rotation, fromScale: current.scale });
 }
 
 export interface AnnotationPath { d: string; length: number; }
@@ -241,7 +283,7 @@ export class MotionDirector {
     this.stopFrame(); ++this.generation; this.current?.container.remove(); this.erasing?.mark.container.remove(); this.current = null; this.erasing = null;
     this.dockTarget = destination; this.dockReady = options.onReady; this.cursorRetained = true;
     const start = this.cursorPose;
-    this.flight = animate && start ? { ...createFlight(start, destination, now), fromRotation: start.rotation, fromScale: start.scale } : null;
+    this.flight = animate && start ? createFlight(start, destination, now, { viewport: this.flightViewport(), fromRotation: start.rotation, fromScale: start.scale }) : null;
     if (!this.flight) this.cursorPose = { ...destination, rotation: 0, scale: 1, glowRadius: 8, progress: 1 };
     this.locate(this.flight ? 'flight' : 'docked');
     this.timings = { penDurationMs: 0, flightDurationMs: this.flight?.durationMs ?? 0, releaseDelayMs: 0 };
@@ -265,7 +307,7 @@ export class MotionDirector {
     this.erasing?.mark.container.remove(); this.erasing = this.current && animate ? { mark: this.current, startedAt: now } : null;
     if (this.current && !animate) this.current.container.remove();
     const end = anchor(command.box), start = this.cursorPose ?? { x: Math.max(20, end.x - 80), y: Math.max(20, end.y - 60) }, distance = Math.hypot(end.x - start.x, end.y - start.y), first = fromDock || (options.first ?? !this.current);
-    this.flight = animate ? { ...createFlight(start, end, now), ...(this.cursorPose ? { fromRotation: this.cursorPose.rotation, fromScale: this.cursorPose.scale } : {}) } : null;
+    this.flight = animate ? createFlight(start, end, now, { viewport: this.flightViewport(), fromRotation: this.cursorPose?.rotation, fromScale: this.cursorPose?.scale }) : null;
     const delay = animate ? Math.max(releaseDelayMs(distance, first), first ? this.flight?.durationMs ?? 0 : 0) : 0;
     if (!animate) this.cursorPose = { ...end, rotation: 0, scale: 1, glowRadius: 8, progress: 1 };
     this.current = this.createMark(command, geometry, now + delay, animate ? duration : 0, options.onReady);
@@ -283,7 +325,7 @@ export class MotionDirector {
     mark.command = { ...mark.command, box }; mark.geometry = annotationGeometry(mark.command); this.patchPaths(mark); this.patchLabel(mark, mark.geometry);
     mark.move = animate ? { from, to: box, startedAt: now, durationMs: MOTION.moveMs } : null; mark.box = animate ? from : box;
     const end = anchor(box);
-    this.flight = animate || flying ? this.flight ? retargetFlight(this.flight, end, now) : { ...createFlight(this.cursorPose ?? anchor(from), end, now), ...(this.cursorPose ? { fromRotation: this.cursorPose.rotation, fromScale: this.cursorPose.scale } : {}) } : null;
+    this.flight = animate || flying ? this.flight ? retargetFlight(this.flight, end, now, this.flightViewport()) : createFlight(this.cursorPose ?? anchor(from), end, now, { viewport: this.flightViewport(), fromRotation: this.cursorPose?.rotation, fromScale: this.cursorPose?.scale }) : null;
     if (this.flight && mark.waitForArrival && mark.revealed === 0) mark.releaseAt = Math.max(mark.releaseAt, now + this.flight.durationMs);
     if (!this.flight) this.cursorPose = { ...end, rotation: this.cursorPose?.rotation ?? 0, scale: 1, glowRadius: 8, progress: 1 };
     this.locate(this.flight ? 'flight' : 'target');
@@ -331,6 +373,13 @@ export class MotionDirector {
   private patchLabel(mark: Mark, geometry: AnnotationGeometry): void {
     const label = geometry.label; mark.text.textContent = label?.text ?? ''; mark.text.setAttribute('x', String(label?.x ?? 0)); mark.text.setAttribute('y', String(label?.y ?? 0)); mark.text.setAttribute('text-anchor', 'start'); mark.text.setAttribute('dominant-baseline', 'auto'); this.patchBadge(mark);
   }
+  private flightViewport(): MotionBox | undefined {
+    const window = this.document.defaultView, visual = window?.visualViewport;
+    const width = visual?.width ?? this.document.documentElement?.clientWidth ?? window?.innerWidth, height = visual?.height ?? window?.innerHeight;
+    const left = visual?.offsetLeft ?? 0, top = visual?.offsetTop ?? 0;
+    if (width === undefined || height === undefined || ![left, top, width, height].every(Number.isFinite) || width < .25 || height < .25 || width > MAX_SIZE || height > MAX_SIZE) return;
+    return { left, top, width, height };
+  }
   private patchBadge(mark: Mark, opacity?: number): void {
     const index = mark.command.index ?? (mark.command.kind === 'number' ? 1 : undefined);
     if (index === undefined) { mark.badge?.remove(); mark.badge = null; mark.badgeText = null; return; }
@@ -342,9 +391,7 @@ export class MotionDirector {
       badge.style.filter = 'drop-shadow(0px 2px 4px #0003)'; badge.append(disc, text); mark.container.append(badge); mark.badge = badge; mark.badgeText = text;
     }
     mark.badge.setAttribute('data-gk-step-number', String(index)); mark.badgeText!.textContent = String(index);
-    const window = this.document.defaultView, visual = window?.visualViewport;
-    const width = visual?.width ?? this.document.documentElement?.clientWidth ?? window?.innerWidth, height = visual?.height ?? window?.innerHeight;
-    const area = width !== undefined && height !== undefined && width >= 28 && height >= 28 ? { left: visual?.offsetLeft ?? 0, top: visual?.offsetTop ?? 0, width, height } : undefined;
+    const viewport = this.flightViewport(), area = viewport && viewport.width >= 28 && viewport.height >= 28 ? viewport : undefined;
     const center = stepBadgePlacement(mark.box, area);
     mark.badge.setAttribute('transform', `translate(${number(center.x)} ${number(center.y)})`); mark.badge.setAttribute('opacity', number(opacity ?? (this.flight ? 0 : mark.revealed)));
   }
