@@ -183,12 +183,88 @@ test('an explicitly expected asynchronous modal transition can continue after th
   } finally { state.journey.cancel(); context.mock.timers.reset(); }
 });
 test('pausing an in-flight continuation keeps its intent for Resume and rejects the obsolete response', async context => {
-  context.mock.timers.enable({ apis: ['setTimeout'] }); const requests: JourneyRequest[] = [], releases: Array<(plan: JourneyPlan) => void> = []; let applied = 0;
-  const journey = new JourneyCoordinator('Continue the task', { replan: request => { requests.push(request); return new Promise(resolve => releases.push(resolve)); }, onPending() {}, onPlan: () => { applied++; }, onError: assert.fail }, { id: 'journey_pause' });
+  context.mock.timers.enable({ apis: ['setTimeout'] }); const requests: JourneyRequest[] = [], signals: AbortSignal[] = [], releases: Array<(plan: JourneyPlan) => void> = []; let applied = 0;
+  const journey = new JourneyCoordinator('Continue the task', { replan: (request, signal) => { requests.push(request); signals.push(signal); return new Promise(resolve => releases.push(resolve)); }, onPending() {}, onPlan: () => { applied++; }, onError: assert.fail }, { id: 'journey_pause' });
   try {
     journey.adopt(plan(page(), journey.initial())); journey.observe(page(['next']), '/next'); context.mock.timers.tick(750); assert.equal(requests.length, 1);
-    journey.setPaused(true); context.mock.timers.tick(5000); journey.setPaused(false); context.mock.timers.tick(750); assert.equal(requests.length, 2);
-    releases[0]!(plan(page(['next']), requests[0])); await settled(); assert.equal(applied, 0);
+    journey.setPaused(true); assert.equal(signals[0]!.aborted, true); context.mock.timers.tick(5000); journey.setPaused(false); context.mock.timers.tick(750); assert.equal(requests.length, 1, 'Resume waits for the aborted promise to settle');
+    releases[0]!(plan(page(['next']), requests[0])); await settled(); assert.equal(applied, 0); context.mock.timers.tick(120); assert.equal(requests.length, 2);
+    releases[1]!(plan(page(['next']), requests[1])); await settled(); assert.equal(applied, 1);
+  } finally { journey.cancel(); context.mock.timers.reset(); }
+});
+
+test('a late post-save scene matching the actual planning snapshot does not abort or duplicate the continuation', async context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] }); const requests: JourneyRequest[] = [], signals: AbortSignal[] = [], releases: Array<(plan: JourneyPlan) => void> = [], applied: JourneyPlan[] = [];
+  const journey = new JourneyCoordinator('Save then continue', { replan: (request, signal) => { requests.push(request); signals.push(signal); return new Promise(resolve => releases.push(resolve)); }, onPending() {}, onPlan: value => applied.push(value), onError: assert.fail }, { id: 'journey_late_scene' });
+  try {
+    journey.adopt(plan(page(['save']), journey.initial())); journey.record(0, { targetId: 'save', label: 'Save', role: 'button', evidence: 'host_verified' }); journey.segmentFinished({ reason: 'completed', verified: true, scope: 'step' });
+    context.mock.timers.tick(120); assert.equal(requests.length, 1);
+    const current = page(['next', 'saved_item']); journey.observe(current, current.url, 'number:1'); context.mock.timers.tick(5000); assert.equal(requests.length, 1); assert.equal(signals[0]!.aborted, false);
+    const response = plan(current, requests[0]); response.contextRevision = 'number:1'; releases[0]!(response); await settled();
+    assert.equal(applied.length, 1); context.mock.timers.tick(5000); await settled(); assert.equal(requests.length, 1); assert.equal(journey.planning, false);
+  } finally { journey.cancel(); context.mock.timers.reset(); }
+});
+
+test('scene storms keep one unsettled planning promise and discard its stale plan before one fresh replacement', async context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] }); const requests: JourneyRequest[] = [], signals: AbortSignal[] = [], releases: Array<(plan: JourneyPlan) => void> = [], applied: JourneyPlan[] = [];
+  const journey = new JourneyCoordinator('Follow latest scene', { replan: (request, signal) => { requests.push(request); signals.push(signal); return new Promise(resolve => releases.push(resolve)); }, onPending() {}, onPlan: value => applied.push(value), onError: assert.fail }, { id: 'journey_scene_storm' });
+  try {
+    journey.adopt(plan(page(), journey.initial())); const first = page(['first']); journey.observe(first, first.url); context.mock.timers.tick(120); assert.equal(requests.length, 1);
+    let latest = first;
+    for (let index = 0; index < 30; index++) { latest = page([`fresh_${index}`]); journey.observe(latest, latest.url); context.mock.timers.tick(200); }
+    assert.equal(requests.length, 1); assert.equal(signals[0]!.aborted, false);
+    releases[0]!(plan(first, requests[0])); await settled(); assert.equal(applied.length, 0); context.mock.timers.tick(119); assert.equal(requests.length, 1); context.mock.timers.tick(1); assert.equal(requests.length, 2);
+    releases[1]!(plan(latest, requests[1])); await settled(); assert.equal(applied.length, 1); assert.deepEqual(applied[0]!.page.targets.map(target => target.id), ['fresh_29']);
+    context.mock.timers.tick(5000); await settled(); assert.equal(requests.length, 2); assert.deepEqual(requests.map(request => request.revision), [1, 2]);
+  } finally { journey.cancel(); context.mock.timers.reset(); }
+});
+
+test('an observed A to B to A cycle rejects a captured B response even when the final scene matches the starting scene', async context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] }); const requests: JourneyRequest[] = [], releases: Array<(plan: JourneyPlan) => void> = [], applied: JourneyPlan[] = [];
+  const journey = new JourneyCoordinator('Keep current controls grounded', { replan: request => { requests.push(request); return new Promise(resolve => releases.push(resolve)); }, onPending() {}, onPlan: value => applied.push(value), onError: assert.fail });
+  try {
+    journey.adopt(plan(page(), journey.initial())); const sceneA = page(['control_a']), sceneB = page(['control_b']);
+    journey.observe(sceneA, sceneA.url); context.mock.timers.tick(120); assert.equal(requests.length, 1);
+    // The request collected B, while the observer later catches B and returns
+    // to A on the same route. Endpoint equality must not hide that history.
+    journey.observe(sceneB, sceneB.url); journey.observe(sceneA, sceneA.url); context.mock.timers.tick(1000); assert.equal(requests.length, 1);
+    releases[0]!(plan(sceneB, requests[0])); await settled(); assert.equal(applied.length, 0);
+    context.mock.timers.tick(119); assert.equal(requests.length, 1); context.mock.timers.tick(1); assert.equal(requests.length, 2);
+    releases[1]!(plan(sceneA, requests[1])); await settled(); assert.equal(applied.length, 1); assert.deepEqual(applied[0]!.page.targets.map(target => target.id), ['control_a']);
+    context.mock.timers.tick(1000); assert.equal(requests.length, 2);
+  } finally { journey.cancel(); context.mock.timers.reset(); }
+});
+
+test('changed route, target identity, privacy removal and host revision reject stale in-flight plans', async context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const original = page(['field']);
+  const relabelled = page(['field']); relabelled.targets[0]!.label = 'Another field';
+  const cases = [
+    { current: page(['field'], 'https://host.test/settings'), revision: undefined },
+    { current: relabelled, revision: undefined },
+    { current: page([]), revision: undefined },
+    { current: original, revision: 'number:2' }
+  ];
+  for (const item of cases) {
+    const requests: JourneyRequest[] = [], releases: Array<(plan: JourneyPlan) => void> = []; let applied = 0;
+    const journey = new JourneyCoordinator('Current scene only', { replan: request => { requests.push(request); return new Promise(resolve => releases.push(resolve)); }, onPending() {}, onPlan: () => { applied++; }, onError: assert.fail });
+    try {
+      journey.adopt(plan(page(), journey.initial())); journey.observe(original, original.url); context.mock.timers.tick(120);
+      journey.observe(item.current, item.current.url, item.revision); context.mock.timers.tick(1000); assert.equal(requests.length, 1);
+      releases[0]!(plan(original, requests[0])); await settled(); assert.equal(applied, 0); context.mock.timers.tick(120); assert.equal(requests.length, 2);
+      const response = plan(item.current, requests[1]); response.contextRevision = item.revision; releases[1]!(response); await settled(); assert.equal(applied, 1);
+    } finally { journey.cancel(); }
+  }
+  context.mock.timers.reset();
+});
+
+test('host pending aborts immediately and cannot restart before the old planning promise settles', async context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] }); const requests: JourneyRequest[] = [], signals: AbortSignal[] = [], releases: Array<(plan: JourneyPlan) => void> = []; let applied = 0;
+  const journey = new JourneyCoordinator('Wait for host work', { replan: (request, signal) => { requests.push(request); signals.push(signal); return new Promise(resolve => releases.push(resolve)); }, onPending() {}, onPlan: () => { applied++; }, onError: assert.fail });
+  try {
+    journey.adopt(plan(page(), journey.initial())); journey.observe(page(['next']), '/next'); context.mock.timers.tick(120);
+    journey.setAwaitingHost(true); assert.equal(signals[0]!.aborted, true); journey.setAwaitingHost(false); context.mock.timers.tick(5000); assert.equal(requests.length, 1);
+    releases[0]!(plan(page(['next']), requests[0])); await settled(); assert.equal(applied, 0); context.mock.timers.tick(120); assert.equal(requests.length, 2);
     releases[1]!(plan(page(['next']), requests[1])); await settled(); assert.equal(applied, 1);
   } finally { journey.cancel(); context.mock.timers.reset(); }
 });

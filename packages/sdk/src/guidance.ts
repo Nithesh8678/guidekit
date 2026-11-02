@@ -15,6 +15,7 @@ export interface GuidanceState {
   waiting: boolean;
   confirmationPending: boolean;
   hostPending: boolean;
+  attention: boolean;
 }
 export interface GuidanceResult { reason: 'completed' | 'stopped' | 'missing'; verified: boolean; message?: string; scope?: 'step' | 'goal'; }
 interface Callbacks { onUpdate(state: GuidanceState): void; onFinish(result: GuidanceResult): void; onComplete?(index: number, step: Step, evidence: 'observed' | 'manual' | 'host_verified'): void; }
@@ -23,7 +24,7 @@ interface Observation { target: HTMLElement; kind: 'text' | 'textarea' | 'choice
 const quietMs = 1200;
 const recoveryMs = 1200;
 const confirmationMs = 30000;
-const events = ['input', 'change', 'focusin', 'focusout', 'compositionstart', 'compositionend', 'click', 'submit'] as const;
+const events = ['input', 'change', 'focusin', 'focusout', 'compositionstart', 'compositionend', 'click', 'submit', 'keydown', 'pointerdown'] as const;
 
 function input(target: HTMLElement): target is HTMLInputElement { return target.tagName === 'INPUT'; }
 function textarea(target: HTMLElement): target is HTMLTextAreaElement { return target.tagName === 'TEXTAREA'; }
@@ -88,6 +89,8 @@ export class GuidanceSession {
   private clicked: { index: number; target: HTMLElement; nextBefore: HTMLElement | null } | null = null;
   private deferredResult: { id: string; atIndex: number; result: HostResult } | null = null;
   private lastState: GuidanceState | null = null;
+  private selectionExit: { index: number; target: HTMLElement; destination?: HTMLElement } | null = null;
+  private selectionExitTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(steps: ModelPlan['steps'], private readonly resolve: (id: string) => HTMLElement | null, private readonly callbacks: Callbacks) { this.steps = steps.map(step => ({ ...step })); }
   get active(): boolean { return this.running; }
@@ -116,11 +119,13 @@ export class GuidanceSession {
   back(): void { if (this.running) this.move(Math.max(0, this.index - 1), false); }
   setAutomatic(value: boolean): void {
     if (!this.running) return;
+    this.clearSelectionExit();
     this.automatic = value; this.cancelStepTimer(); this.emit();
     if (value && !this.paused) { this.applyDeferredResult(); this.refresh(); this.resumeObservation(); }
   }
   setPaused(value: boolean): void {
     if (!this.running) return;
+    this.clearSelectionExit();
     this.paused = value; this.cancelStepTimer();
     if (value && this.recoveryTimer) { clearTimeout(this.recoveryTimer); this.recoveryTimer = null; }
     if (value) this.clearConfirmationTimer();
@@ -192,6 +197,7 @@ export class GuidanceSession {
     try { const target = this.resolve(step.targetId); return target && isSafeTarget(target) ? target : null; } catch { return null; }
   }
   private move(index: number, consume = true): void {
+    this.clearSelectionExit();
     this.cancelStepTimer();
     this.clearConfirmationTimer();
     if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
@@ -255,6 +261,16 @@ export class GuidanceSession {
     else this.consumeObservation();
   }
   private cancelStepTimer(): void { this.epoch++; if (this.stepTimer) clearTimeout(this.stepTimer); this.stepTimer = null; }
+  private clearSelectionExit(): void {
+    if (this.selectionExitTimer) clearTimeout(this.selectionExitTimer);
+    this.selectionExitTimer = null; this.selectionExit = null;
+  }
+  private rememberSelectionExit(target: HTMLElement, destination?: HTMLElement): void {
+    this.selectionExit = { index: this.index, target, ...(destination ? { destination } : {}) };
+    // A default focus move occurs in this gesture's task. A later script-driven
+    // focus()/blur() must not consume an old keyboard or pointer interaction.
+    this.selectionExitTimer = setTimeout(() => { this.selectionExitTimer = null; this.selectionExit = null; }, 0);
+  }
   private later(target: HTMLElement, delay: number, callback: () => void): void {
     this.cancelStepTimer(); if (!this.automatic || this.paused) return;
     const epoch = this.epoch; const index = this.index;
@@ -268,9 +284,10 @@ export class GuidanceSession {
   private emit(): void {
     if (!this.running) return;
     const target = this.target;
-    let hint = 'Follow this step, then choose Next.';
+    let hint = 'Follow this instruction on the page. The website needs to confirm this step.';
     if (target) {
       if (textarea(target)) hint = 'Write your text, then leave the field to continue.';
+      else if (target.tagName === 'SELECT') hint = 'Choose an option, or leave this field to keep its current selection.';
       else if (choice(target)) hint = 'Make your selection. I’ll follow your changes.';
       else if (input(target) && !clickable(target)) hint = 'Type here. I’ll move on when you finish.';
       else if (clickable(target)) hint = this.index === this.steps.length - 1 ? 'Click this control. I’ll wait for the website to confirm the result.' : 'Click this control to continue.';
@@ -279,9 +296,9 @@ export class GuidanceSession {
     if (this.hostPending) hint = this.hostMessage;
     if (this.failure) hint = this.failure;
     if (!target && !this.waitingForResult) hint = 'This control changed. Waiting for the page…';
-    if (!this.automatic) hint = 'Automatic progress is off. Follow this step, then choose Next.';
+    if (!this.automatic) hint = 'Guidance is suspended. Automatic observation must resume before this step can continue.';
     if (this.paused) hint = 'Guidance is paused. Resume when you’re ready.';
-    const state: GuidanceState = { index: this.index, total: this.steps.length, completed: this.completed.size, step: { ...this.steps[this.index]! }, target, hint, automatic: this.automatic, paused: this.paused, waiting: this.waitingForResult || !target, confirmationPending: this.waitingForResult, hostPending: this.hostPending };
+    const state: GuidanceState = { index: this.index, total: this.steps.length, completed: this.completed.size, step: { ...this.steps[this.index]! }, target, hint, automatic: this.automatic, paused: this.paused, waiting: this.waitingForResult || !target, confirmationPending: this.waitingForResult, hostPending: this.hostPending, attention: Boolean(this.failure) };
     if (this.lastState && Object.entries(state).every(([key, value]) => key === 'step' || this.lastState?.[key as keyof GuidanceState] === value)) return;
     this.lastState = state; this.callbacks.onUpdate(state);
   }
@@ -290,6 +307,16 @@ export class GuidanceSession {
     if (!this.running || event.isTrusted === false || guideControl(event.target) || this.hostPending) return;
     if (event.type === 'submit') { this.onSubmit(event); return; }
     const source = htmlAncestor(event.target); if (!source) return;
+    if (event.type === 'keydown' || event.type === 'pointerdown') {
+      this.clearSelectionExit();
+      const current = this.safeTarget(this.index);
+      if (!this.paused && this.automatic && current?.tagName === 'SELECT' && enabled(current)) {
+        const key = event as KeyboardEvent;
+        if (event.type === 'keydown' && source === current && key.key === 'Tab' && !key.altKey && !key.ctrlKey && !key.metaKey) this.rememberSelectionExit(current);
+        else if (event.type === 'pointerdown' && source !== current && pageControl(source) && this.document?.activeElement === current) this.rememberSelectionExit(current, source);
+      }
+      return;
+    }
     const matches = this.steps.flatMap((_, index) => { const target = this.safeTarget(index); return target === source || (event.type === 'click' && Boolean(target && clickable(target) && target.contains(source))) ? [index] : []; });
     const index = matches.includes(this.index) ? this.index : matches.sort((left, right) => Math.abs(left - this.index) - Math.abs(right - this.index) || right - left)[0] ?? -1;
     if (index < 0) return;
@@ -322,11 +349,15 @@ export class GuidanceSession {
     }
     if (event.type === 'focusout') {
       const destination = (event as FocusEvent).relatedTarget;
+      const selectionExit = this.selectionExit; this.clearSelectionExit();
       if (guideControl(destination)) {
         const observation = this.observations.get(index);
         if (observation?.timer) { clearTimeout(observation.timer); observation.timer = null; }
         if (index === this.index) this.cancelStepTimer();
         return;
+      }
+      if (!this.paused && this.automatic && index === this.index && target.tagName === 'SELECT' && selectionExit?.index === index && selectionExit.target === target && pageControl(destination) && (!selectionExit.destination || selectionExit.destination === destination) && valid(target)) {
+        this.remember(index, target, 'choice', true); return;
       }
       if (this.edited.get(index) === target && valid(target) && !this.composing.has(target)) {
         if (textarea(target)) this.remember(index, target, 'textarea', true);
@@ -369,6 +400,7 @@ export class GuidanceSession {
   }
   private finish(result: GuidanceResult): void { if (!this.running) return; this.running = false; this.cleanup(); this.callbacks.onFinish(result); }
   private cleanup(): void {
+    this.clearSelectionExit();
     this.cancelStepTimer();
     this.clearConfirmationTimer();
     if (this.recoveryTimer) clearTimeout(this.recoveryTimer);

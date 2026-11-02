@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { annotationGeometry, createFlight, cubicBezier, cursorFlightDurationMs, MotionDirector, MOTION, penDurationMs, releaseDelayMs, retargetFlight, sampleFlight, smoothstep, validateBox, type AnnotationCommand, type AnnotationKind } from '../src/motion';
+import { annotationGeometry, createFlight, cubicBezier, cursorFlightDurationMs, cursorTravelProgress, MotionDirector, MOTION, penDurationMs, releaseDelayMs, retargetFlight, sampleFlight, smoothstep, stepBadgePlacement, STEP_BADGE_SIZE, validateBox, type AnnotationCommand, type AnnotationKind } from '../src/motion';
 
 const box = { left: 120, top: 80, width: 160, height: 36 };
 const command = (kind: AnnotationKind = 'target', id = 'name'): AnnotationCommand => ({ id, kind, box: { ...box } });
@@ -32,11 +32,31 @@ test('seeded semantic paths remain stable through renders and local translation'
     assert.deepEqual(first, annotationGeometry({ ...command(kind), box: { ...box, left: -120, top: 400 } }));
   }
   assert.notDeepEqual(annotationGeometry(command('ring', 'first')), annotationGeometry(command('ring', 'second')));
-  assert.equal(annotationGeometry({ ...command('number'), index: 8 }).label?.text, '8');
+  assert.deepEqual(annotationGeometry({ ...command('number'), index: 8 }), annotationGeometry(command('target')));
   assert.throws(() => annotationGeometry({ ...command(), kind: 'script' as AnnotationKind }));
   assert.throws(() => annotationGeometry({ ...command(), id: '<script>' }));
   assert.throws(() => annotationGeometry({ ...command(), label: 'x'.repeat(121) }));
   assert.throws(() => annotationGeometry({ ...command(), index: 0 }));
+});
+
+test('step badges choose an outside edge, respect visual viewport offsets and stay bounded when space is tight', () => {
+  assert.equal(STEP_BADGE_SIZE, 22);
+  assert.deepEqual(stepBadgePlacement(box), { x: 101, y: 98 });
+  const area = { left: 40, top: 20, width: 320, height: 240 }, radius = STEP_BADGE_SIZE / 2;
+  const targets = [
+    { left: 40, top: 20, width: 100, height: 30 }, { left: 260, top: 20, width: 100, height: 30 },
+    { left: 40, top: 230, width: 100, height: 30 }, { left: 260, top: 230, width: 100, height: 30 },
+    { left: 100, top: 70, width: 160, height: 36 },
+  ];
+  for (const target of targets) {
+    const center = stepBadgePlacement(target, area);
+    assert.ok(center.x - radius >= area.left && center.x + radius <= area.left + area.width);
+    assert.ok(center.y - radius >= area.top && center.y + radius <= area.top + area.height);
+    const overlap = Math.max(0, Math.min(center.x + radius, target.left + target.width) - Math.max(center.x - radius, target.left)) * Math.max(0, Math.min(center.y + radius, target.top + target.height) - Math.max(center.y - radius, target.top));
+    assert.equal(overlap, 0, 'An available outside edge is preferred over covering the target.');
+  }
+  assert.deepEqual(stepBadgePlacement(box, { left: -20, top: -10, width: 10, height: 8 }), { x: -15, y: -6 });
+  assert.throws(() => stepBadgePlacement(box, { ...area, width: NaN }));
 });
 
 test('smoothstep and local pen easing have exact endpoints and monotonic progress', () => {
@@ -47,13 +67,71 @@ test('smoothstep and local pen easing have exact endpoints and monotonic progres
   assert.throws(() => smoothstep(NaN)); assert.throws(() => cubicBezier(Infinity));
 });
 
-test('cursor uses quadratic flight, capped upward arc, tangent rotation and a midflight scale', () => {
-  const flight = createFlight({ x: 0, y: 0 }, { x: 800, y: 0 }, 100);
-  assert.deepEqual(flight.control, { x: 400, y: -80 }); close(flight.durationMs, 1000);
-  const start = sampleFlight(flight, 100), middle = sampleFlight(flight, 600), end = sampleFlight(flight, 1100);
-  close(start.x, 0); close(start.y, 0); close(start.scale, 1); close(middle.x, 400); close(middle.y, -40); close(middle.rotation, 90); close(middle.scale, 1.3); close(middle.glowRadius, 14); close(end.x, 800); close(end.y, 0); close(end.scale, 1);
-  assert.deepEqual(sampleFlight(flight, 10000), end);
-  const stationary = sampleFlight(createFlight({ x: 5, y: 7 }, { x: 5, y: 7 }, 0), 300); assert.ok(Object.values(stationary).every(Number.isFinite));
+test('cursor travel accelerates, cruises and brakes with continuous bounded progress', () => {
+  assert.equal(cursorTravelProgress(-10), 0); assert.equal(cursorTravelProgress(10), 1); assert.throws(() => cursorTravelProgress(NaN));
+  let previous = 0;
+  for (let index = 0; index <= 200; index++) {
+    const progress = cursorTravelProgress(index / 200); assert.ok(progress >= previous && progress >= 0 && progress <= 1); previous = progress;
+  }
+  const speed = (time: number) => (cursorTravelProgress(time + .0001) - cursorTravelProgress(time - .0001)) / .0002;
+  close(speed(.3), speed(.45), .00001);
+  assert.ok(speed(.02) < speed(.3) * .1); assert.ok(speed(.98) < speed(.3) * .02);
+  for (const boundary of [.22, .52]) close(speed(boundary - .0001), speed(boundary + .0001), .0001);
+});
+
+test('perpendicular cubic flights visibly swoop in every direction and land without overshoot or spinning', () => {
+  for (const [dx, dy] of [[400, 0], [-400, 0], [0, 400], [0, -400], [300, 400], [-300, 400], [300, -400], [-300, -400]]) {
+    const start = { x: 100, y: 150 }, end = { x: start.x + dx!, y: start.y + dy! }, distance = Math.hypot(dx!, dy!);
+    const flight = createFlight(start, end, 100), poses = Array.from({ length: 201 }, (_, index) => sampleFlight(flight, 100 + flight.durationMs * index / 200));
+    assert.ok(flight.control2); assert.ok(flight.durationMs >= 600 && flight.durationMs <= 1400);
+    assert.deepEqual(poses[0], { ...start, rotation: 0, scale: 1, glowRadius: 8, progress: 0 });
+    assert.deepEqual(poses.at(-1), { ...end, rotation: 0, scale: 1, glowRadius: 8, progress: 1 });
+    assert.deepEqual(sampleFlight(flight, 10000), poses.at(-1));
+    let previous = 0, deviation = 0;
+    for (const pose of poses) {
+      const x = pose.x - start.x, y = pose.y - start.y, projection = (x * dx! + y * dy!) / distance ** 2;
+      assert.ok(projection >= previous - 1e-9 && projection >= -1e-9 && projection <= 1 + 1e-9); previous = projection;
+      deviation = Math.max(deviation, Math.abs(x * dy! - y * dx!) / distance);
+      assert.ok(Math.abs(pose.rotation) <= 24.00001 && pose.scale >= 1 && pose.scale <= 1.16001);
+    }
+    assert.ok(deviation > distance * .12, `Travel direction ${dx},${dy} needs a visible sideways bow.`);
+    assert.ok(Math.max(...poses.map(pose => Math.abs(pose.rotation))) > 3);
+    assert.ok(Math.max(...poses.map(pose => pose.scale)) > 1.15);
+    assert.ok(Math.hypot(poses[1]!.x - start.x, poses[1]!.y - start.y) < .1);
+    assert.ok(Math.hypot(poses.at(-2)!.x - end.x, poses.at(-2)!.y - end.y) < .1);
+  }
+});
+
+test('viewport-aware swoops choose available room for edge-to-edge and diagonal travel', () => {
+  const viewport = { left: 40, top: 20, width: 640, height: 480 };
+  for (const [start, end] of [
+    [{ x: 48, y: 40 }, { x: 48, y: 480 }], [{ x: 660, y: 480 }, { x: 660, y: 40 }],
+    [{ x: 60, y: 28 }, { x: 660, y: 28 }], [{ x: 660, y: 490 }, { x: 60, y: 490 }],
+    [{ x: 48, y: 28 }, { x: 660, y: 490 }], [{ x: 660, y: 28 }, { x: 48, y: 490 }],
+  ]) {
+    const flight = createFlight(start!, end!, 0, { viewport }), dx = end!.x - start!.x, dy = end!.y - start!.y, distance = Math.hypot(dx, dy);
+    let deviation = 0, previous = 0;
+    for (let index = 0; index <= 200; index++) {
+      const pose = sampleFlight(flight, flight.durationMs * index / 200), projection = ((pose.x - start!.x) * dx + (pose.y - start!.y) * dy) / distance ** 2;
+      assert.ok(pose.x >= viewport.left - 1e-9 && pose.x <= viewport.left + viewport.width + 1e-9);
+      assert.ok(pose.y >= viewport.top - 1e-9 && pose.y <= viewport.top + viewport.height + 1e-9);
+      assert.ok(projection >= previous - 1e-9 && projection <= 1 + 1e-9); previous = projection;
+      deviation = Math.max(deviation, Math.abs((pose.x - start!.x) * dy - (pose.y - start!.y) * dx) / distance);
+    }
+    assert.ok(deviation > 20, 'Viewport fitting preserves a visible arc instead of flattening into a straight route.');
+  }
+});
+
+test('stationary flights do not pulse, while an interrupted pose can settle in place without a jump', () => {
+  const at = { x: 5, y: 7 }, stationary = createFlight(at, at, 0);
+  assert.equal(stationary.durationMs, 0); assert.deepEqual(sampleFlight(stationary, 0), { ...at, rotation: 0, scale: 1, glowRadius: 8, progress: 1 });
+  const settling = createFlight(at, at, 0, { fromRotation: 18, fromScale: 1.12 }); assert.equal(settling.durationMs, 200);
+  close(sampleFlight(settling, 0).rotation, 18); close(sampleFlight(settling, 0).scale, 1.12);
+  for (let index = 0; index <= 200; index += 10) {
+    const pose = sampleFlight(settling, index); close(pose.x, at.x); close(pose.y, at.y); assert.ok(Number.isFinite(pose.rotation) && Number.isFinite(pose.scale));
+  }
+  assert.deepEqual(sampleFlight(settling, 200), { ...at, rotation: 0, scale: 1, glowRadius: 8, progress: 1 });
+  assert.throws(() => createFlight(at, at, 0, { fromScale: 0 })); assert.throws(() => createFlight(at, at, 0, { fromRotation: NaN }));
 });
 
 test('interruption retargets from the current presentation pose rather than either stale endpoint', () => {
@@ -85,6 +163,64 @@ function renderer(reducedMotion = false) {
   const tick = (value: number) => { now = value; const callbacks = [...frames.values()]; frames.clear(); for (const callback of callbacks) callback(value); };
   return { director, shadow, doc, listeners, frames, cancelled, tick, time: (value: number) => { now = value; }, all: () => shadow.all(), active: () => shadow.all().filter(node => node.attributes.has('data-gk-shape')) };
 }
+
+test('all requested mark kinds compose a separate fixed-size numbered disc without replacing or scaling their paths', () => {
+  const state = renderer(true);
+  try {
+    assert.equal(state.director.element.style.color, 'var(--gk-guide-ink, #f2b544)');
+    for (const kind of ['target', 'ring', 'frame', 'arrow', 'underline', 'number'] as const) {
+      state.director.present({ ...command(kind, `composed-${kind}`), index: 7 });
+      const mark = state.active()[0]!, badge = state.all().find(node => node.attributes.has('data-gk-step-badge'))!;
+      assert.equal(mark.getAttribute('data-gk-shape'), kind === 'number' ? 'target' : kind);
+      assert.notEqual(badge.parent, mark, 'The badge is independent of target-space scaling and shape bounds.');
+      assert.equal(badge.getAttribute('data-gk-step-number'), '7'); assert.equal(badge.getAttribute('opacity'), '1');
+      assert.equal(badge.getAttribute('transform'), 'translate(101 98)');
+      assert.equal(badge.children.find(node => node.tagName === 'circle')!.getAttribute('r'), '11');
+      assert.equal(badge.children.find(node => node.tagName === 'text')!.textContent, '7');
+      assert.equal(badge.children.find(node => node.tagName === 'circle')!.getAttribute('fill'), 'var(--gk-guide-badge, #f2b544)');
+      assert.equal(badge.children.find(node => node.tagName === 'text')!.getAttribute('fill'), 'var(--gk-guide-text, #352707)');
+      const paths = mark.all().filter(node => node.tagName === 'path'), geometry = annotationGeometry({ ...command(kind, `composed-${kind}`), index: 7 });
+      assert.equal(paths.length, geometry.paths.length * 2);
+      assert.deepEqual(paths.slice(0, geometry.paths.length).map(path => path.getAttribute('d')), geometry.paths.map(path => path.d));
+      assert.ok(badge.all().every(node => node.getAttribute('pointer-events') === 'none'));
+      assert.equal(state.frames.size, 0);
+    }
+    state.director.present(command('number', 'implicit-number')); assert.equal(state.all().find(node => node.attributes.has('data-gk-step-badge'))!.getAttribute('data-gk-step-number'), '1');
+  } finally { state.director.destroy(); }
+});
+
+test('badge identity and size survive bounds/index updates and settled viewport changes without scheduling frames', () => {
+  const state = renderer(true), visual = { offsetLeft: 40, offsetTop: 20, width: 320, height: 240 };
+  Object.assign(state.doc, { defaultView: { visualViewport: visual } });
+  try {
+    state.director.present({ ...command('ring'), index: 1 });
+    const badge = state.all().find(node => node.attributes.has('data-gk-step-badge'))!;
+    state.director.present({ ...command('ring'), index: 12 });
+    assert.equal(state.all().find(node => node.attributes.has('data-gk-step-badge')), badge); assert.equal(badge.getAttribute('data-gk-step-number'), '12');
+    const next = { left: 40, top: 20, width: 280, height: 190 };
+    state.director.updateBounds(next); const center = stepBadgePlacement(next, { left: 40, top: 20, width: 320, height: 240 });
+    assert.equal(badge.getAttribute('transform'), `translate(${center.x} ${center.y})`); assert.equal(badge.children.find(node => node.tagName === 'circle')!.getAttribute('r'), '11');
+    visual.width = 400; visual.height = 300; state.director.updateBounds(next);
+    const moved = stepBadgePlacement(next, { left: 40, top: 20, width: 400, height: 300 });
+    assert.equal(badge.getAttribute('transform'), `translate(${moved.x} ${moved.y})`); assert.equal(state.frames.size, 0);
+    state.director.present({ ...command('ring'), box: next }); assert.equal(state.all().filter(node => node.attributes.has('data-gk-step-badge')).length, 0);
+  } finally { state.director.destroy(); }
+});
+
+test('badge and readiness cannot precede cursor arrival, and stale badges/callbacks leave with their step', () => {
+  const state = renderer(); let ready = 0, stale = 0;
+  try {
+    state.director.present({ ...command('underline'), index: 3 }, { first: false, onReady: () => ready++ });
+    const badge = state.all().find(node => node.attributes.has('data-gk-step-badge'))!;
+    state.tick(400); assert.equal(state.director.location, 'flight'); assert.equal(state.director.ready, false); assert.equal(ready, 0); assert.equal(badge.getAttribute('opacity'), '0');
+    state.director.updateBounds(box); assert.equal(badge.getAttribute('opacity'), '0', 'A settled-layout refresh cannot reveal a badge during flight.');
+    state.tick(600); assert.equal(state.director.location, 'target'); assert.equal(ready, 1); assert.equal(badge.getAttribute('opacity'), '1'); assert.equal(state.frames.size, 0);
+    state.director.present({ ...command('frame', 'replacement'), index: 4 }, { onReady: () => stale++ });
+    assert.equal(state.all().filter(node => node.attributes.has('data-gk-step-badge')).length, 1);
+    state.director.erase({ animate: false, preserveCursor: true }); assert.equal(state.all().filter(node => node.attributes.has('data-gk-step-badge')).length, 0);
+    state.tick(5000); assert.equal(stale, 0); assert.equal(ready, 1); assert.equal(state.frames.size, 0);
+  } finally { state.director.destroy(); }
+});
 
 test('retained SVG is click-through, bounded, stable on repeated bounds and signals readiness once', () => {
   const state = renderer(); let ready = 0;
@@ -244,4 +380,14 @@ test('docked and outbound poses freeze hidden/paused, and reduced motion stays s
     reduced.director.dock({ x: 10, y: 20 }, { animate: true }); assert.equal(reduced.director.location, 'docked'); reduced.director.present(command(), { first: true }); assert.equal(reduced.director.location, 'target'); assert.equal(reduced.director.ready, true); assert.equal(reduced.frames.size, 0);
     reduced.director.dock({ x: 30, y: 40 }, { animate: true }); close(reduced.director.diagnostics.cursor!.x, 30); close(reduced.director.diagnostics.cursor!.y, 40); assert.equal(reduced.frames.size, 0);
   } finally { reduced.director.destroy(); }
+});
+
+test('a neutral cursor already at its dock needs no stationary animation frames', () => {
+  const state = renderer(); let ready = 0;
+  try {
+    state.director.present(command(), { animate: false }); const pose = state.director.diagnostics.cursor!;
+    state.director.dock({ x: pose.x, y: pose.y }, { animate: true, onReady: () => ready++ });
+    assert.equal(state.director.location, 'docked'); assert.equal(ready, 1); assert.equal(state.frames.size, 0);
+    assert.equal(state.director.diagnostics.flightDurationMs, 0); assert.equal(state.active().length, 0);
+  } finally { state.director.destroy(); }
 });

@@ -16,6 +16,7 @@ interface Callbacks {
   onEnd?(): void;
 }
 const fingerprint = (page: PageContext) => JSON.stringify([page.url, page.targets.map(target => [target.id, target.label, target.role])]);
+const sceneFingerprint = (page: PageContext | null, route: string, revision?: string) => JSON.stringify([page ? fingerprint(page) : null, route, revision ?? null]);
 // SceneObserver already waits for the DOM to settle before delivering a scene.
 // Keep only a short coalescing window here for host-confirmed boundaries.
 const continuationSettleMs = 120;
@@ -58,6 +59,7 @@ export class JourneyCoordinator {
   private sceneRoute = '';
   private contextRevision: string | undefined;
   private sceneRevision: string | undefined;
+  private sceneGeneration = 0;
   private readonly maxContinuations: number;
   private disposition: 'continue' | 'needs_input' | 'done' = 'continue';
   private planTargets = new Set<string>();
@@ -77,7 +79,7 @@ export class JourneyCoordinator {
   get canContinue(): boolean { return this.disposition === 'continue'; }
   get suspended(): boolean { return this.paused || this.awaitingHost; }
   initial(): JourneyRequest { return this.request('initial'); }
-  seed(page: PageContext, route: string, revision?: string): void { this.baseline = page; this.scene = page; this.routeKey = route; this.sceneRoute = route; this.contextRevision = revision; this.sceneRevision = revision; this.expectingTransition = false; }
+  seed(page: PageContext, route: string, revision?: string): void { this.baseline = page; this.scene = page; this.routeKey = route; this.sceneRoute = route; this.contextRevision = revision; this.sceneRevision = revision; this.expectingTransition = false; this.sceneGeneration++; }
   memory(): JourneyMemory { return { version: 1, id: this.id, goal: this.goal, completed: this.completed.map(({ targetId, evidence }) => ({ targetId, evidence })), savedAt: Date.now() }; }
 
   adopt(plan: JourneyPlan): void {
@@ -125,6 +127,7 @@ export class JourneyCoordinator {
   observe(page: PageContext, routeKey: string, revision?: string): void {
     if (!this.running || this.paused || this.awaitingHost || !this.baseline) return;
     if (this.scene && fingerprint(page) === fingerprint(this.scene) && routeKey === this.sceneRoute && revision === this.sceneRevision) return;
+    this.sceneGeneration++;
     this.scene = page; this.sceneRoute = routeKey; this.sceneRevision = revision;
     if (fingerprint(page) === fingerprint(this.baseline) && routeKey === this.routeKey && revision === this.contextRevision) return;
     const changedRoute = routeKey !== this.routeKey;
@@ -173,12 +176,14 @@ export class JourneyCoordinator {
     this.pendingReason = reason;
     if (this.paused || this.awaitingHost) return;
     if (this.timer) clearTimeout(this.timer);
-    this.abort();
+    // A settled scene may arrive just after replan() captured that same page.
+    // Keep one current promise; coalesce updates until its snapshot is known.
+    if (this.inFlight) { this.timer = null; return; }
     this.timer = setTimeout(() => { this.timer = null; void this.replan(); }, continuationSettleMs);
   }
-  private abort(): void { ++this.epoch; this.inFlight?.abort(); this.inFlight = null; }
+  private abort(): void { ++this.epoch; this.inFlight?.abort(); }
   private async replan(): Promise<void> {
-    if (!this.running || this.paused || this.awaitingHost || !this.pendingReason) return;
+    if (!this.running || this.paused || this.awaitingHost || this.inFlight || !this.pendingReason) return;
     const reason = this.pendingReason; this.pendingReason = null;
     this.activeReason = reason;
     const key = `${reason}:${this.scene ? fingerprint(this.scene) : ''}:${this.sceneRoute}:${this.sceneRevision ?? ''}:${this.completed.length}`;
@@ -186,17 +191,34 @@ export class JourneyCoordinator {
     if (this.calls >= this.maxContinuations) { this.fail('This task reached its automatic guidance limit. Check your progress, then ask for the next part.'); return; }
     this.calls++; this.revision++;
     const controller = new AbortController(); this.inFlight = controller; const epoch = ++this.epoch;
+    const sceneGenerationBefore = this.sceneGeneration;
     this.callbacks.onPending();
     try {
       const plan = await this.callbacks.replan(this.request(reason), controller.signal);
       if (!this.running || this.paused || this.awaitingHost || controller.signal.aborted || epoch !== this.epoch) return;
+      const metadata = plan.run.journey;
+      if (!metadata || metadata.id !== this.id || metadata.revision !== this.revision) throw new Error('The journey response did not match the active task.');
+      const latestScene = sceneFingerprint(this.scene, this.sceneRoute, this.sceneRevision);
+      if (this.sceneGeneration !== sceneGenerationBefore && sceneFingerprint(plan.page, plan.routeKey, plan.contextRevision) !== latestScene) {
+        // Never apply a response for an obsolete route, control identity or host
+        // revision. Many intermediate scene updates become one fresh request.
+        this.pendingReason = 'scene_changed'; return;
+      }
+      // The observer may have reported the very page already used for this
+      // request. Its queued notification is satisfied by this response.
+      this.pendingReason = null;
       this.adopt(plan); this.requested.add(key); this.callbacks.onPlan(plan);
     } catch (error) {
       if (this.running && !controller.signal.aborted && epoch === this.epoch) {
         if (error instanceof DOMException && error.name === 'AbortError') this.schedule('scene_changed');
         else this.fail(error instanceof Error ? error.message.slice(0, 500) : 'The next part of this task could not be planned.');
       }
-    } finally { if (epoch === this.epoch) { this.inFlight = null; this.activeReason = null; } }
+    } finally {
+      if (this.inFlight === controller) {
+        this.inFlight = null; this.activeReason = null;
+        if (this.running && !this.paused && !this.awaitingHost && this.pendingReason) this.schedule(this.pendingReason);
+      }
+    }
   }
   private fail(message: string): void { this.end(); this.callbacks.onError(message); }
   private end(): void {

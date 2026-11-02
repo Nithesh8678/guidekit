@@ -256,10 +256,33 @@ export class Assistant implements GuideKitInstance {
     const finalTarget = run.steps.length ? resolve(run.steps.at(-1)!.targetId) : null;
     let finalNativeSubmit = Boolean(finalTarget && 'form' in finalTarget && (finalTarget as HTMLButtonElement).form && ['submit', 'image'].includes((finalTarget as HTMLButtonElement).type));
     let submitting = false;
+    let nearbyAnchorId = run.steps[0]?.targetId ?? '', cachedAnchorId = '', nearbyReadAt = -Infinity, nearbyIds: string[] = [];
+    const nearbyTargets = () => {
+      const at = performance.now();
+      if (nearbyAnchorId !== cachedAnchorId || at - nearbyReadAt >= 250) {
+        const anchor = resolve(nearbyAnchorId)?.getBoundingClientRect();
+        const area = window.visualViewport;
+        const left = area?.offsetLeft ?? 0, top = area?.offsetTop ?? 0;
+        const width = area?.width ?? document.documentElement.clientWidth, height = area?.height ?? innerHeight;
+        const x = anchor ? anchor.left + anchor.width / 2 : left + width / 2, y = anchor ? anchor.top + anchor.height / 2 : top + height / 2;
+        // Reuse only already-shared public identities. No extra DOM discovery or
+        // text collection; rank at most 160 controls and retain at most 24 IDs.
+        nearbyIds = page.targets.slice(0, 160).flatMap(target => {
+          const element = resolve(target.id); if (!element) return [];
+          const box = element.getBoundingClientRect();
+          return box.width > 0 && box.height > 0 && box.right > left && box.bottom > top && box.left < left + width && box.top < top + height
+            ? [{ id: target.id, distance: Math.hypot(box.left + box.width / 2 - x, box.top + box.height / 2 - y) }] : [];
+        }).sort((a, b) => a.distance - b.distance).slice(0, 24).map(target => target.id);
+        cachedAnchorId = nearbyAnchorId; nearbyReadAt = at;
+      }
+      return nearbyIds.flatMap(id => { const target = resolve(id); return target ? [target] : []; });
+    };
     const progress: NonNullable<GuideHooks['progress']> = (index, step, evidence) => { if (!current()) return; const target = page.targets.find(target => target.id === step.targetId) ?? page.guideTargets?.find(target => target.id === step.targetId); if (target) { journey!.record(index, { targetId: target.id, label: target.label, role: target.role, evidence }); this.sceneObserver?.refresh(); } };
-    const hooks: GuideHooks | undefined = journey ? {
+    const hooks: GuideHooks = {
+      nearbyTargets,
       progress,
       state: state => {
+        nearbyAnchorId = state.step.targetId;
         if (!current()) return;
         // A catalog's final control may mount after the plan was adopted. Once
         // observed, retain the same native-submit boundary even while paused
@@ -279,7 +302,7 @@ export class Assistant implements GuideKitInstance {
         const handled = journey!.segmentFinished(result, result.scope === 'goal' || (submitting || finalNativeSubmit) && result.scope !== 'step');
         if (handled) { this.view.journeyTransition(() => { void this.cancel(); }); this.sceneObserver?.refresh(); } return handled;
       }
-    } : undefined;
+    };
     const missing = () => { this.view.status('That control changed or is no longer visible. Ask again to refresh the guide.', true); this.view.recoveryButton(container, () => { void this.ask(journey?.goal ?? run.answer); }); this.emit('target-missing', { runId: run.runId }); };
     if (run.steps.length) {
       this.view.guideButton(container, run.steps, resolve, missing, run.action ? () => { void this.cancel(false); } : undefined, hooks);

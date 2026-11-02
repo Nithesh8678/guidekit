@@ -8,7 +8,7 @@ const target = (page: Page, id = 'contact-name') => page.locator(`[data-guidekit
 const shape = (page: Page) => page.locator('[data-guidekit-root] [data-gk-shape]');
 const cursor = (page: Page) => page.locator('[data-guidekit-root] [data-gk-cursor]');
 
-interface Frame { time: number; y: number; panel: number; state: string; ink: boolean; cursor: string; speech: number; }
+interface Frame { time: number; y: number; panel: number; state: string; ink: boolean; badge: boolean; cursor: string; speech: number; }
 interface ScrollProbe { frames: Frame[]; running: boolean; texts: string[]; }
 type ProbeWindow = Window & { __guidekitScrollProbe: ScrollProbe };
 
@@ -110,7 +110,7 @@ async function startProbe(page: Page) {
       const card = root?.querySelector<HTMLElement>('[aria-label="Visual guidance"]');
       const mark = root?.querySelector('[data-gk-shape]') ?? null;
       const cursor = root?.querySelector('[data-gk-cursor]');
-      probe.frames.push({ time, y: window.scrollY, panel: document.querySelector('#scroll-panel')?.scrollTop ?? 0, state: card?.dataset.gkScrollState ?? '', ink: painted(mark) && [...mark!.querySelectorAll('path[stroke-dashoffset]')].some(path => Number(path.getAttribute('stroke-dashoffset')) < 0.999), cursor: cursor && painted(cursor) ? cursor.getAttribute('data-gk-cursor-location') ?? '' : '', speech: probe.texts.length });
+      probe.frames.push({ time, y: window.scrollY, panel: document.querySelector('#scroll-panel')?.scrollTop ?? 0, state: card?.dataset.gkScrollState ?? '', ink: painted(mark) && [...mark!.querySelectorAll('path[stroke-dashoffset]')].some(path => Number(path.getAttribute('stroke-dashoffset')) < 0.999), badge: !!root?.querySelector('[data-gk-step-badge]'), cursor: cursor && painted(cursor) ? cursor.getAttribute('data-gk-cursor-location') ?? '' : '', speech: probe.texts.length });
       if (probe.running) requestAnimationFrame(frame);
     };
     requestAnimationFrame(frame);
@@ -156,6 +156,7 @@ function noLateScroll(frames: Frame[]) {
   expect(frames.length).toBeGreaterThan(20);
   expect(Math.max(...frames.map(frame => frame.y)) - Math.min(...frames.map(frame => frame.y)), 'A cancelled reveal does not resume later').toBeLessThan(1);
   expect(frames.some(frame => frame.ink), 'A cancelled reveal leaves no target ink').toBe(false);
+  expect(frames.some(frame => frame.badge), 'A cancelled reveal leaves no current numbered badge').toBe(false);
 }
 
 test('a below-page target scrolls through intermediate positions before cursor arrival, ink and narration', async ({ page }) => {
@@ -320,7 +321,10 @@ test('changing the step during a reveal cancels the old destination and presents
   await page.emulateMedia({ reducedMotion: 'no-preference' }); await openFixture(page); await arrange(page, 'window');
   const asks: string[] = []; page.on('request', request => { if (request.url().endsWith('/api/embed/session/ask')) asks.push(request.url()); });
   await ask(page); await revealStarted(page);
-  await guide(page).getByRole('button', { name: 'Next', exact: true }).evaluate(button => (button as HTMLButtonElement).click());
+  // Explicit host-observation fixture: this public callback reports a verified
+  // intermediate step while its reveal is still running. It does not execute
+  // an action or claim that a contact was saved.
+  await page.evaluate(() => window.GuideKit.reportStepResult('contact-name', { success: true, scope: 'step' }));
   await expect(guide(page).getByText('Step 2 of 4', { exact: true })).toBeVisible(); await settled(page, 'contact-company');
   await expect(shape(page)).toHaveAttribute('data-gk-mark', /contact-company/);
   const frames = await subsequentFrames(page, 30);

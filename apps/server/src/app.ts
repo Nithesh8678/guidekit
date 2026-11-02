@@ -371,7 +371,12 @@ export async function createApp(options: AppOptions) {
       if (controller.signal.aborted) throw new AppError(408, 'The request was stopped or took too long. You can try again.');
       if (error instanceof AppError) throw error;
       throw new AppError(502, 'The model could not complete this request. Check the runtime connection and try again.');
-    } finally { if (inserted) await repo.db.prepare('UPDATE runs SET duration_ms=? WHERE id=?').run(Math.round(performance.now() - started), runId).catch(() => undefined); clearTimeout(timer); res.off('close', abort); controllers.delete(controller); sessionsBusy.delete(String(sessionRow.id)); inFlight.delete(runId); }
+    } finally {
+      // The response is already complete. Release inference capacity before an
+      // optional metrics write, which may be slow on a remote database.
+      clearTimeout(timer); res.off('close', abort); controllers.delete(controller); sessionsBusy.delete(String(sessionRow.id)); inFlight.delete(runId);
+      if (inserted) await repo.db.prepare('UPDATE runs SET duration_ms=? WHERE id=?').run(Math.round(performance.now() - started), runId).catch(() => undefined);
+    }
   });
   app.post('/api/embed/session/action-result', async (req, res) => {
     const sessionRow = (await embedSession(req, true)), input = actionResultSchema.parse(req.body);
