@@ -502,9 +502,12 @@ function continuousDeparture(frames: CursorFrame[]) {
   expect(frames.some(frame => frame.location === 'target' && frame.ink)).toBe(true);
 }
 function expressiveFlight(frames: CursorFrame[], startState: 'docked' | 'target', endState: 'target' | 'docked') {
-  const start = frames.filter(frame => frame.location === startState).at(-1);
+  const firstFlight = frames.findIndex(frame => frame.location === 'flight'), lastFlight = frames.findLastIndex(frame => frame.location === 'flight');
+  // Preserve-cursor cleanup may briefly report "target" before departure.
+  // Only states outside the actual flight interval define its endpoints.
+  const start = frames.slice(0, firstFlight).filter(frame => frame.location === startState).at(-1);
   const flying = frames.filter(frame => frame.location === 'flight');
-  const end = frames.find(frame => frame.location === endState);
+  const end = frames.slice(lastFlight + 1).find(frame => frame.location === endState);
   expect(start, 'Capture the visible departure point').toBeDefined(); expect(end, 'Capture the settled endpoint').toBeDefined(); expect(flying.length).toBeGreaterThan(8);
   const dx = end!.x - start!.x, dy = end!.y - start!.y, distance = Math.hypot(dx, dy);
   expect(distance).toBeGreaterThan(150);
@@ -517,6 +520,7 @@ function expressiveFlight(frames: CursorFrame[], startState: 'docked' | 'target'
   expect(Math.max(...middle.map(frame => frame.scale)), 'The cursor has a restrained mid-flight scale pulse').toBeGreaterThan(1.03);
   expect(Math.max(...points.map(frame => frame.scale))).toBeLessThan(1.25);
   expect(Math.abs(end!.rotation), 'The cursor lands at neutral rotation').toBeLessThan(.1); expect(Math.abs(end!.scale - 1)).toBeLessThan(.005);
+  return { start: start!, end: end! };
 }
 async function cursorInsideName(page: Page) {
   return page.evaluate(() => {
@@ -561,8 +565,7 @@ for (const direction of ['diagonal', 'vertical'] as const) test(`the ${direction
   try {
     const asking = askForGuide(page); await held.ready;
     const departure = cursorFrames(page, 3_000); await page.waitForTimeout(60); held.release(); await asking;
-    const outgoing = await departure; expressiveFlight(outgoing, 'docked', 'target');
-    const start = outgoing.filter(frame => frame.location === 'docked').at(-1)!, end = outgoing.find(frame => frame.location === 'target')!;
+    const outgoing = await departure, { start, end } = expressiveFlight(outgoing, 'docked', 'target');
     if (direction === 'vertical') expect(Math.abs(end.x - start.x), 'The vertical fixture has a vertical start/end chord').toBeLessThan(1);
     else { expect(Math.abs(end.x - start.x)).toBeGreaterThan(300); expect(Math.abs(end.y - start.y)).toBeGreaterThan(80); }
     expect(await cursorInsideName(page)).toBe(true);
