@@ -7,7 +7,7 @@ import type { VoiceSettingsHandlers, VoiceSettingsState } from './voices';
 import { GuidedReveal, revealedBounds, targetRevealed } from './scroll';
 import { isSafeTarget } from './context';
 import { placeGuidanceControls, placeGuidanceLabel, type PlacementBox } from './placement';
-import { instructionDuration, instructionGraphemes } from './instruction';
+import { INSTRUCTION_LAYOUT_MS, InstructionCadence, instructionGraphemes } from './instruction';
 
 const styles = `
 :host{all:initial;position:fixed;inset:0;z-index:2147483000;pointer-events:none;font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#17213b;font-size:14px;line-height:1.5;color-scheme:light;--gk-accent:#365cf5}
@@ -292,7 +292,7 @@ export class View {
     let cardAnimation: Animation | null = null, observed: HTMLElement | null = null, markReady = false, lastPresented = -1, hasPresented = false, fromChat = true, presentedTarget: HTMLElement | null = null, motionUntil = 0, lastBox = '';
     let reveal: GuidedReveal | null = null, revealTarget: HTMLElement | null = null, revealIndex = -1;
     let labelAnimation: Animation | null = null, labelPending = false, arrivalReady = false, presentationGeneration = 0;
-    let instructionFrame = 0, instructionStarted = false, instructionStart = 0, instructionCommit = 0, instructionCount = -1, instruction = '', graphemes: string[] | null = null;
+    let instructionFrame = 0, instructionStarted = false, instruction = '', graphemes: string[] | null = null, instructionLayoutAt = -Infinity;
     let sizeDirty = true, cardWidth = 80, cardHeight = 0, placementSide = -1, placement = '';
     card.dataset.gkScrollState = 'ready';
     card.dataset.gkTyping = 'false';
@@ -331,13 +331,14 @@ export class View {
     };
     const finishInstruction = () => {
       cancelAnimationFrame(instructionFrame); instructionFrame = 0; instructionStarted = true;
-      text.textContent = instruction; card.dataset.gkTyping = 'false'; skip.hidden = true;
+      if (text.textContent !== instruction) text.textContent = instruction;
+      card.dataset.gkTyping = 'false'; skip.hidden = true;
       queueSize();
     };
     const settlePresentation = () => { finishInstruction(); settleStepLabel(); cardAnimation?.cancel(); cardAnimation = null; };
     const prepareInstruction = (value: string) => {
       cancelAnimationFrame(instructionFrame); instructionFrame = 0;
-      instruction = value; graphemes = instructionGraphemes(value); instructionStarted = false; instructionCount = -1;
+      instruction = value; graphemes = instructionGraphemes(value); instructionStarted = false;
       text.textContent = ''; accessibleText.textContent = `Step ${state!.index + 1} of ${state!.total}. ${value}`; text.scrollTop = 0; card.dataset.gkTyping = 'false'; skip.hidden = true; placementSide = -1;
       if (reduced() || !graphemes?.length) finishInstruction();
       else queueSize();
@@ -348,24 +349,27 @@ export class View {
       if (instructionStarted) return;
       instructionStarted = true;
       if (reduced() || !graphemes?.length) { finishInstruction(); return; }
-      card.dataset.gkTyping = 'true'; skip.hidden = false; instructionStart = performance.now(); instructionCommit = 0;
-      const parts = graphemes, duration = instructionDuration(parts.length);
+      card.dataset.gkTyping = 'true'; skip.hidden = false;
+      const cadence = new InstructionCadence(graphemes, performance.now()); let prefix = '', layoutQueuedAt = -Infinity;
       const tick = (now: number) => {
         instructionFrame = 0;
         if (disposed) return;
         if (document.hidden || state?.paused || this.guideChatOpen || reduced()) { settlePresentation(); return; }
-        const progress = Math.min(1, (now - instructionStart) / duration), count = Math.max(1, Math.floor(parts.length * progress));
-        // One coalesced layout at most every 40 ms, never a layout per letter.
-        if (progress === 1 || now - instructionCommit >= 40) {
-          instructionCommit = now;
-          if (count !== instructionCount) { instructionCount = count; text.textContent = parts.slice(0, count).join(''); queueSize(); }
+        const grapheme = cadence.advance(now);
+        if (grapheme !== null) {
+          prefix += grapheme; text.textContent = prefix;
+          // Text can paint one letter at a time without measuring every letter.
+          if (now - layoutQueuedAt >= INSTRUCTION_LAYOUT_MS) { layoutQueuedAt = now; queueSize(); }
         }
-        if (progress < 1) instructionFrame = requestAnimationFrame(tick); else finishInstruction();
+        if (!cadence.complete) instructionFrame = requestAnimationFrame(tick); else finishInstruction();
       };
       instructionFrame = requestAnimationFrame(tick); queueSize();
     };
     const measureCard = (area: ReturnType<typeof viewport>) => {
       if (!sizeDirty) return false;
+      const now = performance.now();
+      if (card.dataset.gkTyping === 'true' && now - instructionLayoutAt < INSTRUCTION_LAYOUT_MS) return false;
+      instructionLayoutAt = now;
       sizeDirty = false;
       const maximum = Math.max(1, Math.min(320, area.width - 24)), minimum = Math.min(80, maximum);
       // Only the current visual prefix participates in measurement. There is no
@@ -474,7 +478,7 @@ export class View {
       }
     };
     const schedulePosition = (animate = false) => { animateNext ||= animate; if (!frame && !disposed) frame = requestAnimationFrame(position); };
-    const reposition = () => { obstacleCache = null; cardAnimation?.cancel(); sizeDirty = true; schedulePosition(); };
+    const reposition = () => { obstacleCache = null; cardAnimation?.cancel(); instructionLayoutAt = -Infinity; sizeDirty = true; schedulePosition(); };
     const hostMotion = (event: Event) => {
       if (event.target instanceof Element && state?.target && event.target.contains(state.target)) { motionUntil = performance.now() + 10000; reposition(); }
     };
