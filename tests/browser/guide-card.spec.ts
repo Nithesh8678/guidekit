@@ -116,9 +116,67 @@ async function ask(page: Page) {
 }
 
 async function finished(page: Page, text: string) {
-  await expect(instruction(page)).toHaveText(text, { timeout: 10_000 });
+  await expect(instruction(page)).toHaveText(text, { timeout: 20_000 });
   await expect(guide(page)).toHaveAttribute('data-gk-typing', 'false');
 }
+
+interface LetterWrite { text: string; at: number; }
+interface LetterProbe { writes: LetterWrite[]; measurements: number[]; stalledFor: number; dispose: () => void; }
+type LetterWindow = Window & { __gkLetterProbe?: LetterProbe };
+
+async function observeLetters(page: Page, stall: boolean) {
+  await page.evaluate(stall => {
+    const probe: LetterProbe = { writes: [], measurements: [], stalledFor: 0, dispose() {} };
+    (window as LetterWindow).__gkLetterProbe = probe;
+    const native = HTMLElement.prototype.getBoundingClientRect, descriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'getBoundingClientRect');
+    HTMLElement.prototype.getBoundingClientRect = function() {
+      if (this.classList.contains('guide-measure')) probe.measurements.push(performance.now());
+      return native.call(this);
+    };
+    let previous = '';
+    const root = document.querySelector('[data-guidekit-root]')!.shadowRoot!;
+    const observer = new MutationObserver(() => {
+      const text = root.querySelector('.guide-instruction')?.textContent ?? '';
+      if (text === previous) return;
+      previous = text; probe.writes.push({ text, at: performance.now() });
+      if (stall && probe.writes.length === 10 && !probe.stalledFor) {
+        // Deliberate bounded main-thread stall models a dropped animation
+        // frame. The next RAF receives real elapsed time, not a mocked clock.
+        const started = performance.now(); while (performance.now() - started < 240) { /* fixture-only stall */ }
+        probe.stalledFor = performance.now() - started;
+      }
+    });
+    observer.observe(root, { subtree: true, childList: true, characterData: true });
+    probe.dispose = () => { observer.disconnect(); if (descriptor) Object.defineProperty(HTMLElement.prototype, 'getBoundingClientRect', descriptor); else Reflect.deleteProperty(HTMLElement.prototype, 'getBoundingClientRect'); };
+  }, stall);
+}
+
+for (const stall of [false, true]) test(`each actual text write adds one complete grapheme${stall ? ' after a dropped-frame gap' : ' at normal cadence'}`, async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  const text = 'Name 👩🏽‍💻 e\u0301 🇮🇳 — type every letter smoothly, then continue. Keep the contact spelling clear.';
+  const graphemes = [...new Intl.Segmenter('en', { granularity: 'grapheme' }).segment(text)].map(part => part.segment);
+  await openFixture(page, [text]); await observeLetters(page, stall); await startProbe(page);
+  try {
+    await ask(page); await finished(page, text); await frames(page, 12);
+    const measured = await page.evaluate(() => { const probe = (window as LetterWindow).__gkLetterProbe!; return { writes: probe.writes, measurements: probe.measurements, stalledFor: probe.stalledFor }; });
+    let expected = '';
+    expect(measured.writes).toHaveLength(graphemes.length);
+    for (const [index, write] of measured.writes.entries()) { expected += graphemes[index]!; expect(write.text, 'Each committed prefix adds exactly one whole grapheme').toBe(expected); }
+    if (stall) {
+      expect(measured.stalledFor).toBeGreaterThanOrEqual(240);
+      expect(measured.writes.some((write, index) => index > 0 && write.at - measured.writes[index - 1]!.at >= 230), 'The actual write trace includes the injected frame gap').toBe(true);
+    }
+    const during = measured.measurements.filter(at => at > measured.writes[3]!.at && at < measured.writes.at(-3)!.at);
+    expect(during.length).toBeGreaterThan(5);
+    expect(during.length, 'Geometry is measured less often than individual letter writes').toBeLessThan(measured.writes.length * .85);
+    expect(during.slice(1).every((at, index) => at - during[index]! >= 35), 'Active typing coalesces layout independently from letter cadence').toBe(true);
+    const samples = await stopProbe(page);
+    expect(new Set(samples.map(sample => Math.round(sample.width))).size).toBeGreaterThan(5);
+    expect(samples.every(sample => sample.width <= 320 && sample.height <= 876), 'The animated label remains bounded during individual-letter growth').toBe(true);
+  } finally {
+    await stopProbe(page); await page.evaluate(() => { const state = window as LetterWindow; state.__gkLetterProbe?.dispose(); delete state.__gkLetterProbe; });
+  }
+});
 
 test('real intermediate instruction prefixes grow a compact amber label after cursor and mark arrival', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'no-preference' });

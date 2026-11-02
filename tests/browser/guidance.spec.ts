@@ -445,7 +445,7 @@ test('speech beats release drawing on playback start, bound fallback, and ignore
   expect(await page.evaluate(() => (window as unknown as BeatWindow).__guidekitBeatDouble.cancelled)).toBeGreaterThan(0);
 });
 
-interface CursorFrame { time: number; x: number; y: number; location: string; ink: boolean; }
+interface CursorFrame { time: number; x: number; y: number; rotation: number; scale: number; location: string; ink: boolean; }
 async function dockError(page: Page): Promise<number> {
   return page.evaluate(() => {
     const root = document.querySelector('[data-guidekit-root]')?.shadowRoot;
@@ -471,8 +471,9 @@ async function cursorFrames(page: Page, durationMs: number): Promise<CursorFrame
       const matrix = cursor?.getScreenCTM(), mark = root?.querySelector('[data-gk-shape]');
       if (cursor && matrix) {
         const point = new DOMPoint(0, 0).matrixTransform(matrix);
+        const pointing = cursor.querySelector<SVGGraphicsElement>('[data-gk-cursor-surface="pointing"]')?.getScreenCTM();
         const ink = !!mark && getComputedStyle(mark).visibility !== 'hidden' && Number(getComputedStyle(mark).opacity) > 0 && [...mark.querySelectorAll('path[stroke-dashoffset]')].some(path => Number(path.getAttribute('stroke-dashoffset')) < 0.999);
-        frames.push({ time, x: point.x, y: point.y, location: cursor.getAttribute('data-gk-cursor-location') ?? '', ink });
+        frames.push({ time, x: point.x, y: point.y, rotation: pointing ? Math.atan2(pointing.b, pointing.a) * 180 / Math.PI : 0, scale: Math.hypot(matrix.a, matrix.b), location: cursor.getAttribute('data-gk-cursor-location') ?? '', ink });
       }
       if (time - started >= duration) resolve(frames); else requestAnimationFrame(frame);
     };
@@ -499,6 +500,23 @@ function continuousDeparture(frames: CursorFrame[]) {
   expect(new Set(flying.map(frame => `${Math.round(frame.x)},${Math.round(frame.y)}`)).size, 'Flight has intermediate positions').toBeGreaterThan(3);
   expect(frames.some(frame => frame.location === 'flight' && frame.ink), 'First target stroke waits for cursor arrival').toBe(false);
   expect(frames.some(frame => frame.location === 'target' && frame.ink)).toBe(true);
+}
+function expressiveFlight(frames: CursorFrame[], startState: 'docked' | 'target', endState: 'target' | 'docked') {
+  const start = frames.filter(frame => frame.location === startState).at(-1);
+  const flying = frames.filter(frame => frame.location === 'flight');
+  const end = frames.find(frame => frame.location === endState);
+  expect(start, 'Capture the visible departure point').toBeDefined(); expect(end, 'Capture the settled endpoint').toBeDefined(); expect(flying.length).toBeGreaterThan(8);
+  const dx = end!.x - start!.x, dy = end!.y - start!.y, distance = Math.hypot(dx, dy);
+  expect(distance).toBeGreaterThan(150);
+  const points = flying.map(frame => ({ ...frame, projection: ((frame.x - start!.x) * dx + (frame.y - start!.y) * dy) / distance ** 2, perpendicular: Math.abs(dx * (frame.y - start!.y) - dy * (frame.x - start!.x)) / distance }));
+  expect(Math.max(...points.map(frame => frame.perpendicular)), 'The cursor follows a visible arc perpendicular to its chord').toBeGreaterThan(12);
+  expect(points.every(frame => frame.projection >= -.005 && frame.projection <= 1.005), 'The flight never overshoots either endpoint along its direction of travel').toBe(true);
+  expect(Math.hypot(flying[0]!.x - start!.x, flying[0]!.y - start!.y), 'The arc departs continuously from the rendered position').toBeLessThan(5);
+  const middle = points.filter(frame => frame.projection > .15 && frame.projection < .85);
+  expect(Math.max(...middle.map(frame => Math.abs(frame.rotation))), 'The cursor banks during the arc').toBeGreaterThan(3);
+  expect(Math.max(...middle.map(frame => frame.scale)), 'The cursor has a restrained mid-flight scale pulse').toBeGreaterThan(1.03);
+  expect(Math.max(...points.map(frame => frame.scale))).toBeLessThan(1.25);
+  expect(Math.abs(end!.rotation), 'The cursor lands at neutral rotation').toBeLessThan(.1); expect(Math.abs(end!.scale - 1)).toBeLessThan(.005);
 }
 async function cursorInsideName(page: Page) {
   return page.evaluate(() => {
@@ -532,6 +550,27 @@ test('the same visible cursor departs its chat dock continuously, waits to draw,
   } finally { await held.dispose(); await retained.dispose(); }
 });
 
+for (const direction of ['diagonal', 'vertical'] as const) test(`the ${direction} cursor flight visibly swoops, banks and returns precisely to its dock`, async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'no-preference' }); await page.setViewportSize({ width: 1280, height: 900 }); await openFixture(page, false); await visibleDock(page);
+  await nameField(page).evaluate((input, direction) => {
+    const cursor = document.querySelector('[data-guidekit-root]')!.shadowRoot!.querySelector<SVGGraphicsElement>('[data-gk-cursor]')!;
+    const start = new DOMPoint(0, 0).matrixTransform(cursor.getScreenCTM()!);
+    Object.assign((input as HTMLElement).style, { position: 'fixed', left: `${direction === 'vertical' ? start.x - 3 : Math.max(40, start.x - 500)}px`, top: `${Math.max(60, start.y - (direction === 'vertical' ? 300 : 180))}px`, width: '120px', height: '44px' });
+  }, direction);
+  const held = await holdAnswer(page);
+  try {
+    const asking = askForGuide(page); await held.ready;
+    const departure = cursorFrames(page, 3_000); await page.waitForTimeout(60); held.release(); await asking;
+    const outgoing = await departure; expressiveFlight(outgoing, 'docked', 'target');
+    const start = outgoing.filter(frame => frame.location === 'docked').at(-1)!, end = outgoing.find(frame => frame.location === 'target')!;
+    if (direction === 'vertical') expect(Math.abs(end.x - start.x), 'The vertical fixture has a vertical start/end chord').toBeLessThan(1);
+    else { expect(Math.abs(end.x - start.x)).toBeGreaterThan(300); expect(Math.abs(end.y - start.y)).toBeGreaterThan(80); }
+    expect(await cursorInsideName(page)).toBe(true);
+    const returning = cursorFrames(page, 1_800); await guide(page).getByRole('button', { name: 'Open chat', exact: true }).click(); await visibleDock(page);
+    expressiveFlight(await returning, 'target', 'docked'); await noTargetMark(page);
+  } finally { await held.dispose(); }
+});
+
 test('paused target mutations cannot interrupt the cursor returning to its chat dock', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'no-preference' }); await openFixture(page); await askForGuide(page);
   await expect(cursor(page)).toHaveAttribute('data-gk-cursor-location', 'target');
@@ -558,6 +597,9 @@ test('cursor flight retargets through viewport resize and scroll without jumping
     const frames = await recorded;
     const jumps = frames.slice(1).map((frame, index) => Math.hypot(frame.x - frames[index]!.x, frame.y - frames[index]!.y));
     expect(Math.max(...jumps), 'Retargeting starts from the displayed cursor pose').toBeLessThan(50);
+    const adjacent = frames.slice(1).flatMap((frame, index) => frame.time - frames[index]!.time <= 40 ? [{ previous: frames[index]!, current: frame }] : []);
+    expect(adjacent.every(({ previous, current }) => Math.abs(current.rotation - previous.rotation) < 25), 'Retargeting preserves bank continuity').toBe(true);
+    expect(adjacent.every(({ previous, current }) => Math.abs(current.scale - previous.scale) < .08), 'Retargeting preserves scale continuity').toBe(true);
     await expect(cursor(page)).toHaveAttribute('data-gk-cursor-location', 'target'); expect(await cursorInsideName(page)).toBe(true);
     await expect.poll(() => annotationError(page)).toBeLessThan(1.2);
     expect(frames.some(frame => frame.location === 'flight' && frame.ink)).toBe(false);
