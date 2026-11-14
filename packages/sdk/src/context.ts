@@ -65,14 +65,23 @@ export function parseGuideTargets(value: unknown, mode: 'auto' | 'explicit'): Pa
   return targets;
 }
 
+/** Share only identity allocation, never a snapshot's captured label/role evidence. */
+export class TargetIdentityAllocator {
+  private readonly ids = new WeakMap<HTMLElement, string>();
+  private sequence = 0;
+  idFor(element: HTMLElement, reserved: ReadonlyMap<string, number>): string {
+    let id = this.ids.get(element);
+    if (!id || reserved.has(id)) { do { id = `gk_${++this.sequence}`; } while (reserved.has(id)); this.ids.set(element, id); }
+    return id;
+  }
+}
+
 export class ContextCollector {
   private readonly catalog = new Map<string, PageTarget>();
-  constructor(private readonly targetMode: 'auto' | 'explicit' = 'auto', guideTargets?: readonly PageTarget[]) {
+  constructor(private readonly targetMode: 'auto' | 'explicit' = 'auto', guideTargets?: readonly PageTarget[], private readonly allocator = new TargetIdentityAllocator()) {
     if (!['auto', 'explicit'].includes(targetMode)) throw new Error('GuideKit targetMode must be auto or explicit.');
     for (const target of parseGuideTargets(guideTargets, targetMode)) this.catalog.set(target.id, target);
   }
-  private sequence = 0;
-  private ids = new WeakMap<HTMLElement, string>();
   private targets = new Map<string, HTMLElement>();
   private explicit = new Set<string>();
   private identities = new Map<string, string>();
@@ -95,8 +104,7 @@ export class ContextCollector {
       const label = publicLabel(labelFor(element)).slice(0, 160); if (!label) continue;
       const explicit = element.getAttribute('data-guidekit-id');
       if (explicit && (!validId(explicit) || explicitCounts.get(explicit) !== 1)) continue;
-      let id = explicit ?? this.ids.get(element);
-      if (!id) { do { id = `gk_${++this.sequence}`; } while (explicitCounts.has(id)); this.ids.set(element, id); }
+      const id = explicit ?? this.allocator.idFor(element, explicitCounts);
       if (this.targets.has(id)) continue;
       this.targets.set(id, element); if (explicit) this.explicit.add(id);
       this.identities.set(id, this.identity(element));

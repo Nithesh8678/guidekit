@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { compileAction, endpointOrigin, parsePublicAgent, parseRun, safeContext } from '../src/security';
+import { compileAction, endpointOrigin, parsePublicAgent, parseRun, parseVisualScene, safeContext } from '../src/security';
 
 test('SDK endpoint cannot introduce credentials, scripts, paths, or query parameters', () => {
   assert.equal(endpointOrigin('http://127.0.0.1:4410/'), 'http://127.0.0.1:4410');
@@ -47,4 +47,13 @@ test('known model providers and strict journey echoes are accepted without coerc
   assert.equal(parseRun(result).provider, 'openai'); assert.equal(parseRun({ ...result, provider: 'codex' }).journey?.revision, 2);
   for (const journey of [{ ...result.journey, revision: -1 }, { ...result.journey, disposition: ['done'] }, { ...result.journey, fieldValue: 'private' }, { ...result.journey, id: 'bad id' }]) assert.throws(() => parseRun({ ...result, journey }));
   assert.throws(() => parseRun({ ...result, provider: 'unknown' })); assert.throws(() => parseRun({ ...result, provider: ['codex'] }));
+});
+
+test('visual explanations accept only bounded procedural data and snapshot their validated content', () => {
+  const object = { id: 'engine', label: 'Engine', description: 'A conceptual engine', shape: 'cylinder', position: [0, 0, 0], rotation: [0, 0, 0], size: [1, 2, 1], color: '#edb74c' };
+  const scene = { kind: 'scene3d', id: 'rocket', title: 'Rocket', summary: 'A conceptual rocket.', objects: [object], focusId: 'engine' };
+  const parsed = parseVisualScene(scene); object.label = 'Changed later'; assert.equal(parsed.objects[0]!.label, 'Engine');
+  const run = { runId: 'run_scene', answer: 'Explore the engine.', steps: [], action: null, citations: [], provider: 'codex', version: 1, visual: scene };
+  assert.equal(parseRun(run).visual?.id, 'rocket');
+  for (const invalid of [{ ...scene, script: 'alert(1)' }, { ...scene, focusId: 'missing' }, { ...scene, objects: [object, object] }, { ...scene, objects: [{ ...object, shape: ['box'] }] }, { ...scene, objects: [{ ...object, position: [0, 0, Infinity] }] }, { ...scene, objects: [{ ...object, size: [0, 1, 1] }] }, { ...scene, objects: [{ ...object, texture: 'https://external.test/asset' }] }, { ...scene, objects: Array(37).fill(object) }]) assert.throws(() => parseRun({ ...run, visual: invalid }), /invalid visual/);
 });

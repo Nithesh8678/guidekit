@@ -74,6 +74,28 @@ test('cancel during permission prompt aborts recognition and discards delayed st
   } finally { voice.destroy(); state.restore(); }
 });
 
+test('hold voice reports truthful controller-owned phases and submits only after release finalization', () => {
+  const state = environment(), phases: string[] = [], busy: boolean[] = []; state.view.busy = value => { busy.push(value); };
+  const voice = new Voice(state.view, {}, state.submit, { phase: (phase, ending) => phases.push(`${phase}${ending ? `:${ending}` : ''}`) });
+  try {
+    voice.start(true, true); const recognition = Recognition.instances[0]!; assert.deepEqual(phases, ['starting']);
+    recognition.onstart?.(); recognition.result('Show a rocket', true); assert.deepEqual(state.submissions, []);
+    voice.finishInput(); voice.finishInput(); assert.deepEqual(phases, ['starting', 'listening', 'finalizing']); assert.equal(recognition.stopped, 1);
+    recognition.onend?.(); assert.deepEqual(state.submissions, ['Show a rocket']); assert.deepEqual(phases, ['starting', 'listening', 'finalizing', 'idle:submitted']);
+    assert.deepEqual(busy, [], 'Voice phase notifications do not overwrite controller-owned thinking state');
+  } finally { voice.destroy(); state.restore(); }
+});
+
+test('unexpected hold recognition end, early release and cancellation cannot submit an uncommitted transcript', () => {
+  const state = environment(), phases: string[] = [], voice = new Voice(state.view, {}, state.submit, { phase: (phase, ending) => phases.push(`${phase}:${ending ?? ''}`) });
+  try {
+    voice.start(true, true); const early = Recognition.instances[0]!; voice.finishInput(); assert.equal(early.aborted, 1);
+    voice.start(true, true); const ended = Recognition.instances[1]!; ended.onstart?.(); ended.result('Do not submit yet', true); const delayedEnd = ended.onend; ended.onend?.(); voice.finishInput(); delayedEnd?.();
+    assert.deepEqual(state.submissions, []); assert.match(state.statuses.at(-1)!, /before you released Control/); assert.equal(phases.at(-1), 'idle:error');
+    voice.start(true, true); const cancelled = Recognition.instances[2]!; cancelled.onstart?.(); cancelled.result('Discard', true); const delayed = cancelled.onend; voice.stopInput(); delayed?.(); assert.deepEqual(state.submissions, []);
+  } finally { voice.destroy(); state.restore(); }
+});
+
 test('cancel after finish and destroy both discard late final callbacks without submitting', () => {
   const state = environment(); const voice = new Voice(state.view, {}, state.submit);
   try {

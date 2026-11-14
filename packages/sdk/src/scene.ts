@@ -20,11 +20,17 @@ export class SceneObserver {
   private generation = 0;
   private reading: AbortController | null = null;
   private dirty = false;
+  private readonly interaction = (event: Event) => {
+    if (!event.isTrusted || !(event.target instanceof Element) || owned(event.target)) return;
+    if (event.target.closest('[data-guidekit-private],[inert],[aria-hidden="true"],input[type="password"],input[type="hidden"],input[type="file"],[contenteditable]:not([contenteditable="false"])')) return;
+    this.queue(false);
+  };
   constructor(private readonly read: (signal: AbortSignal) => PageContext | Promise<PageContext>, private readonly notify: (page: PageContext, route: string) => void, private readonly enabled: () => boolean = () => true) {
     this.observer = new MutationObserver(records => { if (records.some(record => !owned(record.target))) this.queue(false); });
     this.observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['hidden', 'open', 'class', 'style', 'aria-hidden', 'aria-label', 'aria-labelledby', 'role', 'title', 'data-guidekit-id', 'data-guidekit-label', 'data-guidekit-private'] });
     window.addEventListener('popstate', this.refresh); window.addEventListener('hashchange', this.refresh);
     document.addEventListener('visibilitychange', this.refresh);
+    for (const name of ['focusin', 'change', 'pointerover', 'pointerup']) document.addEventListener(name, this.interaction, true);
     // pushState/replaceState have no native event. Check only the small local route key.
     this.interval = setInterval(() => { const route = routeKey(); if (route !== this.route) { this.route = route; this.refresh(); } }, 500);
   }
@@ -70,5 +76,6 @@ export class SceneObserver {
   destroy(): void {
     this.destroyed = true; this.invalidate(); this.observer.disconnect(); clearInterval(this.interval);
     window.removeEventListener('popstate', this.refresh); window.removeEventListener('hashchange', this.refresh); document.removeEventListener('visibilitychange', this.refresh);
+    for (const name of ['focusin', 'change', 'pointerover', 'pointerup']) document.removeEventListener(name, this.interaction, true);
   }
 }

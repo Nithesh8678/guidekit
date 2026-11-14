@@ -7,16 +7,17 @@ const page: PageContext = { url: 'https://host.test/editor', title: 'Editor', ta
 const settled = async () => { for (let index = 0; index < 8; index++) await Promise.resolve(); };
 function environment() {
   let mutate: (() => void) | undefined;
-  class ElementDouble { parentElement = null; closest() { return null; } }
+  class ElementDouble { parentElement = null; private = false; owned = false; closest(selector: string) { return this.owned && selector.includes('[data-guidekit-root]') || this.private && selector.includes('[data-guidekit-private]') ? this : null; } }
   class ObserverDouble { constructor(callback: (records: Array<{ target: ElementDouble }>) => void) { mutate = () => callback([{ target: new ElementDouble() }]); } observe() {} disconnect() {} }
-  const events = { addEventListener() {}, removeEventListener() {} };
+  const listeners = new Map<string, Set<(event?: Event) => void>>();
+  const events = { addEventListener(name: string, callback: (event?: Event) => void) { const set = listeners.get(name) ?? new Set(); set.add(callback); listeners.set(name, set); }, removeEventListener(name: string, callback: (event?: Event) => void) { listeners.get(name)?.delete(callback); } };
   const doc = { ...events, hidden: false, documentElement: new ElementDouble() };
   const route = { origin: 'https://host.test', pathname: '/editor', search: '', hash: '' };
   const descriptors = new Map<string, PropertyDescriptor | undefined>();
   for (const [key, value] of Object.entries({ document: doc, window: events, location: route, Element: ElementDouble, MutationObserver: ObserverDouble })) {
     descriptors.set(key, Object.getOwnPropertyDescriptor(globalThis, key)); Object.defineProperty(globalThis, key, { value, configurable: true });
   }
-  return { doc, route, mutate: () => mutate?.(), restore: () => { for (const [key, descriptor] of descriptors) { if (descriptor) Object.defineProperty(globalThis, key, descriptor); else Reflect.deleteProperty(globalThis, key); } } };
+  return { doc, route, mutate: () => mutate?.(), fire(name: string, flags: { private?: boolean; owned?: boolean; trusted?: boolean } = {}) { const target = new ElementDouble(); target.private = flags.private ?? false; target.owned = flags.owned ?? false; for (const listener of [...listeners.get(name) ?? []]) listener({ type: name, isTrusted: flags.trusted !== false, target } as unknown as Event); }, listenerCount: () => [...listeners.values()].reduce((count, set) => count + set.size, 0), restore: () => { for (const [key, descriptor] of descriptors) { if (descriptor) Object.defineProperty(globalThis, key, descriptor); else Reflect.deleteProperty(globalThis, key); } } };
 }
 
 test('fresh async scene reads debounce, abort obsolete snapshots, and discard completion after destroy', async context => {
@@ -75,5 +76,15 @@ test('soft DOM storms let asynchronous context finish with fresh targets and que
     context.mock.timers.tick(1); await settled(); assert.equal(reads.length, 2);
     observer.refresh(); assert.equal(reads[1]!.signal.aborted, true); label = 'explicit-new-state'; reads[1]!.release(); await settled(); assert.equal(snapshots.length, 1);
     context.mock.timers.tick(180); await settled(); reads[2]!.release(); await settled(); assert.deepEqual(snapshots, ['render_6', 'explicit-new-state']);
+  } finally { observer.destroy(); state.restore(); context.mock.timers.reset(); }
+});
+
+test('trusted public focus and hover refresh locally while private/SDK events and stopped sessions stay silent', async context => {
+  context.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] }); const state = environment(); let reads = 0;
+  const observer = new SceneObserver(() => { reads++; return page; }, () => {});
+  try {
+    state.fire('pointerover', { private: true }); state.fire('focusin', { owned: true }); state.fire('change', { trusted: false }); context.mock.timers.tick(500); await settled(); assert.equal(reads, 0);
+    state.fire('pointerover'); state.fire('focusin'); state.fire('change'); context.mock.timers.tick(179); await settled(); assert.equal(reads, 0); context.mock.timers.tick(1); await settled(); assert.equal(reads, 1);
+    assert.ok(state.listenerCount() >= 7); observer.destroy(); assert.equal(state.listenerCount(), 0); state.fire('pointerup'); context.mock.timers.tick(1000); await settled(); assert.equal(reads, 1);
   } finally { observer.destroy(); state.restore(); context.mock.timers.reset(); }
 });
