@@ -1,4 +1,5 @@
-import type { PageContext, PageTarget, PublicAgent, RunResult } from '../../contracts/src/index';
+import type { AssistantMode, PageContext, PageTarget, PublicAgent, RunResult } from '../../contracts/src/index';
+export type { AssistantMode } from '../../contracts/src/index';
 
 export interface ActionResult { success: boolean; message: string; }
 /** Local host observation for a guided step. This does not authorize or execute an action. */
@@ -52,6 +53,9 @@ export interface GuideKitInstance {
   readonly ready: Promise<PublicAgent>;
   open(): void;
   close(): void;
+  startSession(mode?: AssistantMode): void;
+  setMode(mode: AssistantMode): void;
+  stopSession(): void;
   /** Call from a real user gesture. Starts voice input and enables browser spoken answers. */
   startVoice(): void;
   /** Commits the current recording; close/Escape/destroy instead discard it. */
@@ -64,12 +68,15 @@ export interface GuideKitInstance {
   getPageContext(): Promise<PageContext>;
 }
 export interface GuideKitAPI {
-  readonly capabilities: Readonly<{ apiVersion: 1; explicitTargets: true; adaptiveJourneys: true; hostWorkflowProgress: true; guideTargetCatalog: true }>;
+  readonly capabilities: Readonly<{ apiVersion: 1; explicitTargets: true; adaptiveJourneys: true; hostWorkflowProgress: true; guideTargetCatalog: true; activeSessions: true; controlHoldVoice: true; scene3d: 1 }>;
   mount(options: MountOptions): GuideKitInstance;
   registerAction(name: string, action: RegisteredAction): void;
   setContext(context: Record<string, unknown>, options?: GuideContextOptions): void;
   open(): void;
   close(): void;
+  startSession(mode?: AssistantMode): void;
+  setMode(mode: AssistantMode): void;
+  stopSession(): void;
   startVoice(): void;
   stopVoice(): void;
   reportStepResult(targetId: string, result: GuideStepResult): void;

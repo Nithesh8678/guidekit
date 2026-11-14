@@ -55,8 +55,12 @@ test('view maps citation titles and renders graph paths as safe text with a trut
     assert.ok(!container.allText.includes('unknown_doc'), 'Internal IDs from uncited sources must not appear in the visitor interface.');
     assert.ok(container.allText.includes('<img src=x onerror=alert(1)>'));
     assert.ok(tags.every(tag => ['details', 'summary', 'div', 'strong'].includes(tag)));
-    const empty = new TextElement('div'); view.knowledgeEvidence(empty as unknown as HTMLElement, { source: 'tigergraph', paths: [] }, []);
+    const empty = new TextElement('div'); view.knowledgeEvidence(empty as unknown as HTMLElement, { source: 'tigergraph', paths: [] }, run.citations);
     assert.equal(empty.allText, 'Knowledge retrieved with TigerGraph');
+    for (const source of ['postgres', 'tigergraph'] as const) {
+      const uncited = new TextElement('div'); view.knowledgeEvidence(uncited as unknown as HTMLElement, { source, paths: [] }, []);
+      assert.equal(uncited.children.length, 0, `${source} metadata alone cannot claim company-knowledge grounding.`);
+    }
     const local = new TextElement('div'); view.knowledgeEvidence(local as unknown as HTMLElement, { source: 'local', paths: [] }, []);
     assert.equal(local.children.length, 0);
     const postgres = new TextElement('div'); view.knowledgeEvidence(postgres as unknown as HTMLElement, { source: 'postgres', paths: [] }, run.citations);

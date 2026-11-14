@@ -1,4 +1,17 @@
 import { z } from 'zod';
+import { visualSceneSchema, type VisualScene } from './visual';
+export { visualSceneSchema, visualObjectSchema, visualSceneOutputSchema } from './visual';
+export type { VisualScene, VisualObject } from './visual';
+
+export type AssistantMode = 'guide' | 'explain';
+export const assistantContextSchema = z.object({
+  mode: z.enum(['guide', 'explain']),
+  capabilities: z.object({ scene3d: z.literal(1).optional() }).strict(),
+  /** References an answered run in this exact origin/version-bound embed session. */
+  sceneRunId: z.string().min(1).max(160).regex(/^[a-zA-Z0-9_-]+$/).optional(),
+  selectedObjectId: z.string().min(1).max(80).regex(/^[a-zA-Z0-9_-]+$/).optional()
+}).strict();
+export type AssistantContext = z.infer<typeof assistantContextSchema>;
 
 export const idSchema = z.string().min(1).max(160).regex(/^[a-zA-Z0-9_-]+$/);
 export const originSchema = z.string().url().refine(value => {
@@ -73,11 +86,12 @@ export const modelPlanSchema = z.object({
   steps: z.array(guideStepSchema).max(8),
   action: proposedActionSchema.nullable(),
   citationIds: z.array(idSchema).max(8),
-  journeyDisposition: z.enum(['continue', 'needs_input', 'done']).optional()
+  journeyDisposition: z.enum(['continue', 'needs_input', 'done']).optional(),
+  visual: visualSceneSchema.nullable().optional()
 }).strict();
 export type ModelPlan = z.infer<typeof modelPlanSchema>;
 export interface KnowledgePath { nodes: string[]; relation: string; }
-export interface RunResult { runId: string; answer: string; steps: ModelPlan['steps']; action: (NonNullable<ModelPlan['action']> & { receiptId: string; requiresConfirmation: true }) | null; citations: Citation[]; provider: ModelProviderId; version: number; knowledge?: { source: KnowledgeSource; paths: KnowledgePath[] }; journey?: JourneyResult; }
+export interface RunResult { runId: string; answer: string; steps: ModelPlan['steps']; action: (NonNullable<ModelPlan['action']> & { receiptId: string; requiresConfirmation: true }) | null; citations: Citation[]; provider: ModelProviderId; version: number; knowledge?: { source: KnowledgeSource; paths: KnowledgePath[] }; journey?: JourneyResult; visual?: VisualScene; }
 export interface RunSummary { id: string; question: string; answer: string; status: string; createdAt: string; actionName: string | null; }
 export interface AgentDetail { agent: Agent; documents: KnowledgeDocument[]; versions: AgentVersion[]; sessions: RunSummary[]; }
 export type WorkspaceRole = 'owner' | 'admin' | 'editor' | 'viewer';
@@ -86,7 +100,7 @@ export interface RuntimeStatus { provider: ModelProviderId; available: boolean; 
 
 export const askSchema = z.object({
   message: z.string().trim().min(1).max(3000), page: pageContextSchema,
-  requestId: idSchema, journey: journeyRequestSchema.optional()
+  requestId: idSchema, journey: journeyRequestSchema.optional(), assistant: assistantContextSchema.optional()
 }).strict();
 export const actionResultSchema = z.object({
   receiptId: idSchema, status: z.enum(['succeeded', 'failed', 'cancelled']),

@@ -116,7 +116,7 @@ test('autoSubmit:false microphone dictation keeps its transcript for review and 
   await page.getByRole('button', { name: 'Dictate with your browser, then review your question. Your browser may process audio online.', exact: true }).click();
   const finish = page.getByRole('button', { name: 'Finish dictation and review transcript', exact: true }); await expect(finish).toBeVisible(); await finish.click();
   await expect(question(page)).toHaveValue('Please explain our voice support policy'); await expect(question(page)).not.toHaveAttribute('readonly', '');
-  await expect(page.getByRole('dialog', { name: 'Website assistant' }).getByRole('status')).toContainText('Transcript ready'); expect(asks).toEqual([]);
+  await expect(page.getByRole('dialog', { name: 'Website assistant' }).getByRole('status').filter({ hasText: 'Transcript ready' })).toBeVisible(); expect(asks).toEqual([]);
   expect(await page.evaluate(() => (window as unknown as VoiceWindow).__guidekitVoiceDouble.spoken)).toEqual([]);
   const reply = page.waitForResponse(response => response.url().endsWith('/api/embed/session/ask'));
   await page.getByRole('button', { name: 'Send question', exact: true }).click(); expect((await reply).status()).toBe(200);
@@ -126,7 +126,7 @@ test('autoSubmit:false microphone dictation keeps its transcript for review and 
 test('unsupported browser exposes a disabled microphone with recovery guidance and keeps text chat available', async ({ page }) => {
   await installSpeechDouble(page, false); await publishedHost(page); await page.keyboard.press(shortcut);
   const mic = page.getByRole('button', { name: 'Speech recognition is unavailable in this browser. Try Chrome or Edge with microphone access, or type your question.', exact: true });
-  await expect(mic).toBeDisabled(); await expect(page.getByRole('dialog', { name: 'Website assistant' }).getByRole('status')).toContainText('Try Chrome or Edge');
+  await expect(mic).toBeDisabled(); await expect(page.getByRole('dialog', { name: 'Website assistant' }).getByRole('status').filter({ hasText: 'Try Chrome or Edge' })).toBeVisible();
   expect(await page.evaluate(() => (window as unknown as VoiceWindow).__guidekitVoiceDouble.started)).toBe(0);
   await expect(question(page)).toBeEditable(); await question(page).fill('What is our voice support policy?');
   const reply = page.waitForResponse(response => response.url().endsWith('/api/embed/session/ask'));

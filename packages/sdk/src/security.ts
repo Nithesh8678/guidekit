@@ -1,5 +1,5 @@
 import { compileInputSchema, type InputValidator } from '../../contracts/src/schema';
-import type { PublicAgent, RunResult } from '../../contracts/src/index';
+import type { PublicAgent, RunResult, VisualScene } from '../../contracts/src/index';
 import type { RegisteredAction } from './types';
 
 export const validId = (value: unknown): value is string => typeof value === 'string' && /^[a-zA-Z0-9_-]{1,160}$/.test(value);
@@ -53,6 +53,21 @@ export function parsePublicAgent(value: unknown): PublicAgent {
   if (!record(value) || !validId(value.id) || !Number.isInteger(value.version) || Number(value.version) < 1 || typeof value.name !== 'string' || value.name.length > 80 || typeof value.companyName !== 'string' || value.companyName.length > 100 || typeof value.greeting !== 'string' || value.greeting.length > 250 || typeof value.accentColor !== 'string' || !/^#[0-9a-f]{6}$/i.test(value.accentColor) || !Array.isArray(value.allowedActions) || value.allowedActions.length > 30 || !value.allowedActions.every(validId)) throw new Error('The agent returned an invalid published configuration.');
   return value as unknown as PublicAgent;
 }
+/** Independent browser validation, without executable assets or a schema runtime. */
+export function parseVisualScene(value: unknown): VisualScene {
+  const id = (input: unknown) => typeof input === 'string' && /^[a-zA-Z0-9_-]{1,80}$/.test(input);
+  const text = (input: unknown, maximum: number, minimum = 0) => typeof input === 'string' && input.length >= minimum && input.length <= maximum;
+  const vector = (input: unknown, minimum: number, maximum: number) => Array.isArray(input) && input.length === 3 && input.every(value => typeof value === 'number' && Number.isFinite(value) && value >= minimum && value <= maximum);
+  const fail = () => { throw new Error('The assistant returned an invalid visual explanation.'); };
+  if (!record(value) || !Object.keys(value).every(key => ['kind', 'id', 'title', 'summary', 'objects', 'focusId'].includes(key)) || value.kind !== 'scene3d' || !id(value.id) || !text(value.title, 120, 1) || !text(value.summary, 1200, 1) || !Array.isArray(value.objects) || value.objects.length < 1 || value.objects.length > 36) return fail();
+  const ids = new Set<string>();
+  for (const object of value.objects) {
+    if (!record(object) || !Object.keys(object).every(key => ['id', 'label', 'description', 'shape', 'position', 'rotation', 'size', 'color'].includes(key)) || !id(object.id) || ids.has(String(object.id)) || !text(object.label, 80, 1) || !text(object.description, 400) || (typeof object.shape !== 'string' || !['box', 'sphere', 'cylinder', 'cone', 'torus', 'arrow'].includes(object.shape)) || !vector(object.position, -20, 20) || !vector(object.rotation, -6.284, 6.284) || !vector(object.size, .05, 12) || typeof object.color !== 'string' || !/^#[0-9a-fA-F]{6}$/.test(object.color)) return fail();
+    ids.add(String(object.id));
+  }
+  if (value.focusId !== null && (!id(value.focusId) || !ids.has(String(value.focusId))) || new TextEncoder().encode(JSON.stringify(value)).byteLength > 24000) return fail();
+  return JSON.parse(JSON.stringify(value)) as VisualScene;
+}
 export function parseRun(value: unknown): RunResult {
   if (!record(value) || !validId(value.runId) || typeof value.answer !== 'string' || value.answer.length < 1 || value.answer.length > 5000 || typeof value.provider !== 'string' || !['codex', 'openai'].includes(value.provider) || !Number.isInteger(value.version) || !Array.isArray(value.steps) || value.steps.length > 8 || !Array.isArray(value.citations) || value.citations.length > 8) throw new Error('The assistant returned an invalid response. Please try again.');
   if (value.journey !== undefined && (!record(value.journey) || !Object.keys(value.journey).every(key => ['id', 'revision', 'disposition'].includes(key)) || !validId(value.journey.id) || !Number.isInteger(value.journey.revision) || Number(value.journey.revision) < 0 || Number(value.journey.revision) > 100 || typeof value.journey.disposition !== 'string' || !['continue', 'needs_input', 'done'].includes(value.journey.disposition))) throw new Error('The assistant returned invalid journey metadata.');
@@ -64,5 +79,6 @@ export function parseRun(value: unknown): RunResult {
     for (const path of knowledge.paths) if (!record(path) || !Object.keys(path).every(key => key === 'nodes' || key === 'relation') || !Array.isArray(path.nodes) || path.nodes.length !== 3 || !validId(path.nodes[0]) || !validId(path.nodes[2]) || typeof path.nodes[1] !== 'string' || path.nodes[1].length < 1 || path.nodes[1].length > 64 || typeof path.relation !== 'string' || path.relation.length > 300) throw new Error('The assistant returned an invalid knowledge relationship.');
   }
   if (value.action !== null && (!record(value.action) || !validId(value.action.name) || !validId(value.action.receiptId) || value.action.requiresConfirmation !== true || typeof value.action.reason !== 'string' || value.action.reason.length > 600 || !record(value.action.arguments) || JSON.stringify(value.action.arguments).length > 20_000)) throw new Error('The assistant returned an invalid action.');
+  if (value.visual !== undefined) value.visual = parseVisualScene(value.visual);
   return value as unknown as RunResult;
 }

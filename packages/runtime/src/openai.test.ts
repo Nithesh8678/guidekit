@@ -3,6 +3,7 @@ import test from 'node:test';
 import { getEventListeners } from 'node:events';
 import { createOpenAIProvider, type OpenAIProviderOptions } from './openai.js';
 import type { InferenceTiming } from './index.js';
+import { visualSceneOutputSchema, visualSceneSchema } from '../../contracts/src/index.js';
 
 const model = 'fixture-model', apiKey = 'fixture-credential-only';
 const schema = { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'], additionalProperties: false };
@@ -46,6 +47,24 @@ test('completed inference sends an explicit nonstored strict request without too
   });
   try { assert.deepEqual(JSON.parse(await value.infer(input)), { answer: 'fixture answer' }); assert.equal(posts, 1); assert.match((await value.status()).message, /inference completed/); }
   finally { await value.close(); }
+});
+
+test('hosted instructions acknowledge a declared procedural browser renderer while preserving strict data-only inference', async () => {
+  const visual = { kind: 'scene3d', id: 'test_scene', title: 'A labelled cone', summary: 'A procedural explanation fixture.', focusId: 'nose', objects: [{ id: 'nose', label: 'Nose', description: 'Synthetic cone.', shape: 'cone', position: [0, 0, 0], rotation: [0, 0, 0], size: [1, 2, 1], color: '#f2b544' }] };
+  const sceneSchema = { ...schema, properties: { ...schema.properties, visual: visualSceneOutputSchema }, required: ['answer', 'visual'] };
+  const value = provider(async (_url, init) => {
+    const body = JSON.parse(String(init?.body));
+    assert.match(body.instructions, /browser renderer can present validated procedural 3D scene data/);
+    assert.match(body.instructions, /Do not invent an undeclared capability/); assert.match(body.instructions, /no code, external assets, URLs, textures or shaders/);
+    assert.match(body.instructions, /You have no tools/); assert.match(body.instructions, /never execute actions/);
+    assert.deepEqual(body.tools, []); assert.equal(body.tool_choice, 'none'); assert.equal(body.stream, false);
+    assert.deepEqual(body.text.format.schema, sceneSchema);
+    return json(completed([message(JSON.stringify({ answer: 'A procedural explanation.', visual }))]));
+  });
+  try {
+    const result = JSON.parse(await value.infer({ ...input, schema: sceneSchema }));
+    assert.deepEqual(visualSceneSchema.parse(result.visual), visual);
+  } finally { await value.close(); }
 });
 
 test('timing diagnostics report only inference duration without changing hosted opt-in or results', async () => {

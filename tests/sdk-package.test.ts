@@ -14,9 +14,9 @@ test('packed SDK installs as a standalone ESM/types consumer and immutable manif
   const dir = await mkdtemp(join(tmpdir(), 'guidekit-sdk-package-'));
   try {
     const manifest = await buildSDK();
-    for (const asset of [manifest.script, manifest.module]) { const file = await readFile(resolve('dist', asset.path.slice(1))); assert.equal(asset.integrity, `sha384-${createHash('sha384').update(file).digest('base64')}`); }
+    for (const asset of [manifest.script, manifest.module, manifest.assets.viewer3d]) { const file = await readFile(resolve('dist', asset.path.slice(1))); assert.equal(asset.integrity, `sha384-${createHash('sha384').update(file).digest('base64')}`); }
     const packed = await exec('npm', ['pack', '--offline', '--ignore-scripts', '--json', '--pack-destination', dir, '--cache', join(dir, 'cache')], { cwd: resolve('dist/sdk-package'), maxBuffer: 1024 * 1024 });
-    const [{ filename, files }] = JSON.parse(packed.stdout); assert.ok(files.some((file: any) => file.path === 'dist/types/sdk/src/index.d.ts')); assert.ok(!files.some((file: any) => /\.env|\.data|\.sqlite|auth\.json/.test(file.path)));
+    const [{ filename, files }] = JSON.parse(packed.stdout); assert.ok(files.some((file: any) => file.path === 'dist/types/sdk/src/index.d.ts')); assert.ok(files.some((file: any) => /^dist\/viewer3d-[a-f0-9]{24}\.mjs$/.test(file.path))); assert.ok(files.some((file: any) => file.path === 'dist/THIRD_PARTY_NOTICES.txt')); assert.ok(!files.some((file: any) => /\.env|\.data|\.sqlite|auth\.json/.test(file.path)));
     const modules = join(dir, 'node_modules'); await mkdir(join(modules, '@guidekit'), { recursive: true });
     await exec('tar', ['-xzf', join(dir, filename), '-C', dir]); await symlink(join(dir, 'package'), join(modules, '@guidekit/sdk'), 'dir'); await symlink(resolve('node_modules/zod'), join(modules, 'zod'), 'dir');
     await writeFile(join(dir, 'package.json'), JSON.stringify({ type: 'module' }));

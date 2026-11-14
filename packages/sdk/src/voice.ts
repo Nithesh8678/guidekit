@@ -18,7 +18,11 @@ interface Capture {
   generation: number; phase: 'starting' | 'listening' | 'finishing';
   original: string; autoSubmit: boolean; recognition: Recognition | null;
   final: Map<number, string>; timer?: ReturnType<typeof setTimeout>;
+  releaseToSubmit: boolean;
 }
+export type VoicePhase = 'starting' | 'listening' | 'finalizing' | 'idle';
+export type VoiceEnding = 'submitted' | 'review' | 'cancelled' | 'error';
+export interface VoiceLifecycle { phase(phase: VoicePhase, ending?: VoiceEnding): void; }
 
 /** Browser-managed speech recognition. No audio stream, provider key or server voice route. */
 export class Voice {
@@ -34,7 +38,7 @@ export class Voice {
   private preference: OutputPreference;
   private readonly voicesChanged = () => { if (!this.destroyed) this.refreshVoices(); };
   private readonly Constructor = (window as SpeechWindow).SpeechRecognition ?? (window as SpeechWindow).webkitSpeechRecognition;
-  constructor(private readonly view: View, private readonly options: VoiceOptions, private readonly submit: (message: string) => void) {
+  constructor(private readonly view: View, private readonly options: VoiceOptions, private readonly submit: (message: string) => void, private readonly lifecycle?: VoiceLifecycle) {
     const language = languageTag(options.output?.language) ?? languageTag(document.documentElement.lang) ?? languageTag(navigator.language) ?? 'en-US';
     // A bare English page does not request the system's regional default voice.
     // Prefer US English; explicit regions and a visitor's chosen voice still win.
@@ -87,13 +91,13 @@ export class Voice {
     this.play('Hi, I’m your website guide. I’ll explain each step as you go.', undefined, true);
   }
   get active(): boolean { return this.capture !== null; }
-  start(voiceFlow = true): void {
+  start(voiceFlow = true, releaseToSubmit = false): void {
     if (this.destroyed || this.capture) return;
     if (this.view.mic.disabled) { this.view.status(this.view.mic.title, true); return; }
     if (navigator.userActivation && !navigator.userActivation.isActive) { this.view.status('Click the microphone or press the voice shortcut to allow voice input.', true); return; }
     this.stopSpeaking(); if (voiceFlow && 'speechSynthesis' in window) this.setOutput(true);
-    const capture: Capture = { generation: ++this.generation, phase: 'starting', original: this.view.input.value, autoSubmit: this.options.autoSubmit ?? voiceFlow, recognition: null, final: new Map() };
-    this.capture = capture; this.view.input.readOnly = true; this.view.busy(true); this.view.voiceRecording(true);
+    const capture: Capture = { generation: ++this.generation, phase: 'starting', original: this.view.input.value, autoSubmit: this.options.autoSubmit ?? voiceFlow, recognition: null, final: new Map(), releaseToSubmit };
+    this.capture = capture; this.view.input.readOnly = true; if (!this.lifecycle) this.view.busy(true); this.view.voiceRecording(false); this.lifecycle?.phase('starting');
     this.settings();
     this.view.mic.setAttribute('aria-pressed', 'true');
     const finishLabel = capture.autoSubmit ? 'Finish voice input and send question' : 'Finish dictation and review transcript';
@@ -104,8 +108,8 @@ export class Voice {
       recognition.lang = document.documentElement.lang || navigator.language || 'en-US'; recognition.continuous = true; recognition.interimResults = true;
       recognition.onstart = () => {
         if (!this.current(capture)) return;
-        capture.phase = 'listening'; this.clearTimer(capture); capture.timer = setTimeout(() => this.finishInput(), 60000);
-        this.view.status(capture.autoSubmit ? 'Listening… Press the shortcut or microphone again to send. Cancel voice or Escape discards it. Your browser may process audio online.' : 'Listening… Press the microphone again to review your transcript. Cancel voice or Escape discards it. Your browser may process audio online.');
+        capture.phase = 'listening'; this.view.voiceRecording(true); this.lifecycle?.phase('listening'); this.clearTimer(capture); capture.timer = setTimeout(() => capture.releaseToSubmit ? this.fail(capture, 'Voice input reached its time limit. Nothing was sent. Release Control and try a shorter question.') : this.finishInput(), 60000);
+        this.view.status(capture.releaseToSubmit ? 'Listening… Release Control to send. Escape, another shortcut or leaving the page discards this recording.' : capture.autoSubmit ? 'Listening… Press the shortcut or microphone again to send. Cancel voice or Escape discards it. Your browser may process audio online.' : 'Listening… Press the microphone again to review your transcript. Cancel voice or Escape discards it. Your browser may process audio online.');
       };
       recognition.onresult = event => {
         if (!this.current(capture)) return;
@@ -117,7 +121,7 @@ export class Voice {
         }
         // Keep final results in their original order without duplicating repeated events.
         if (capture.final.size > 100 || [...capture.final.values()].join(' ').length > 3000) { this.fail(capture, 'Voice input was too long. Nothing was sent. Try a shorter question.'); return; }
-        if (interim && capture.phase === 'listening') this.view.status(`Listening: ${interim.slice(0, 150)} · Press the microphone to finish; Escape cancels.`);
+        if (interim && capture.phase === 'listening') this.view.status(`Listening: ${interim.slice(0, 150)} · ${capture.releaseToSubmit ? 'Release Control to send' : 'Press the microphone to finish'}; Escape cancels.`);
       };
       recognition.onerror = event => {
         if (!this.current(capture)) return;
@@ -125,7 +129,9 @@ export class Voice {
         this.fail(capture, message);
       };
       recognition.onend = () => {
-        if (this.current(capture)) this.accept(capture, [...capture.final.entries()].sort(([left], [right]) => left - right).map(([, text]) => text).join(' '));
+        if (!this.current(capture)) return;
+        if (capture.releaseToSubmit && capture.phase !== 'finishing') { this.fail(capture, 'Browser recognition stopped before you released Control. Nothing was sent. Release Control and try again.'); return; }
+        this.accept(capture, [...capture.final.entries()].sort(([left], [right]) => left - right).map(([, text]) => text).join(' '));
       };
       capture.timer = setTimeout(() => this.fail(capture, 'Speech recognition did not start. Allow microphone access and try again, or type your question.'), 20000);
       recognition.start();
@@ -136,7 +142,7 @@ export class Voice {
   finishInput(): void {
     const capture = this.capture; if (!capture || capture.phase === 'finishing') return;
     if (capture.phase === 'starting') { this.stopInput(); this.view.status('Voice input cancelled before listening. Nothing was sent.'); return; }
-    capture.phase = 'finishing'; this.clearTimer(capture);
+    capture.phase = 'finishing'; this.clearTimer(capture); this.view.voiceRecording(false); this.lifecycle?.phase('finalizing');
     this.view.status(capture.autoSubmit ? 'Finishing your transcript, then sending your question… Escape cancels.' : 'Finishing your transcript for review… Escape cancels.');
     capture.timer = setTimeout(() => this.fail(capture, 'Browser dictation did not finish in time. Nothing was sent. Please try again.'), 10000);
     try { capture.recognition?.stop(); } catch { this.fail(capture, 'Browser dictation could not finish. Nothing was sent. Please try again.'); }
@@ -144,24 +150,24 @@ export class Voice {
   private accept(capture: Capture, transcript: string): void {
     if (!this.current(capture)) return;
     const text = transcript.trim(); const combined = `${capture.original}${capture.original && text ? ' ' : ''}${text}`;
-    this.stopInput();
+    this.stopInput(!text || combined.length > 3000 ? 'error' : capture.autoSubmit ? 'submitted' : 'review');
     if (!text) { this.view.status('No speech was detected. Nothing was sent. Try again or type your question.', true); return; }
     if (combined.length > 3000) { this.view.input.value = combined.slice(0, 3000); this.view.status('Your question was too long. Review and shorten it before sending.', true); return; }
     this.view.input.value = combined;
     if (capture.autoSubmit) { this.view.input.value = ''; this.submit(combined); }
     else this.view.status('Transcript ready. Review your question, then send it.');
   }
-  private fail(capture: Capture, message: string): void { if (!this.current(capture)) return; this.stopInput(); this.view.status(message, true); }
+  private fail(capture: Capture, message: string): void { if (!this.current(capture)) return; this.stopInput('error'); this.view.status(message, true); }
   private resetMic(): void {
     this.view.mic.setAttribute('aria-pressed', 'false'); this.view.mic.title = 'Dictate with your browser, then review your question. Your browser may process audio online.'; this.view.mic.setAttribute('aria-label', this.view.mic.title);
   }
-  stopInput(): void {
+  stopInput(ending: VoiceEnding = 'cancelled'): void {
     ++this.generation; const capture = this.capture; this.capture = null;
     if (capture) {
       this.clearTimer(capture);
       const recognition = capture.recognition;
       if (recognition) { recognition.onstart = null; recognition.onresult = null; recognition.onend = null; recognition.onerror = null; try { recognition.abort(); } catch { /* Already ended. */ } }
-      this.view.input.readOnly = false; this.view.busy(false); this.view.voiceRecording(false);
+      this.view.input.readOnly = false; if (!this.lifecycle) this.view.busy(false); this.view.voiceRecording(false); this.lifecycle?.phase('idle', ending);
     }
     if (!this.view.mic.disabled) this.resetMic();
     this.settings();

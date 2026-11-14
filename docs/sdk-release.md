@@ -1,12 +1,18 @@
-# SDK 0.4 release candidate
+# SDK 0.5 release candidate
 
-The current build target is `0.4.6-alpha.1`. It presents guidance as a compact target-adjacent instruction label, a separate numbered badge and a composed target mark. The cursor follows a curved, banking flight and lands before drawing and individual Unicode letters reveal. Text never catches up in whole-word chunks after a stalled frame; geometry measurement remains separately coalesced. A separate control strip keeps Pause, chat, stop and full-text access available. Automatic observed progress and verified host completion remain in use, with no Back, Next or Finish controls. It preserves PostgreSQL, local and TigerGraph evidence compatibility. This is the reusable SDK's release-candidate version; building or packing it does not publish it to npm or establish hosted availability.
+The current build target is `0.5.0-alpha.1`. It presents guidance as a compact target-adjacent instruction label, a separate numbered badge and a composed target mark. The cursor follows a curved, banking flight and lands before drawing and individual Unicode letters reveal. Text never catches up in whole-word chunks after a stalled frame; geometry measurement remains separately coalesced. A separate control strip keeps Pause, chat, stop and full-text access available. Automatic observed progress and verified host completion remain in use, with no Back, Next or Finish controls. It preserves PostgreSQL, local and TigerGraph evidence compatibility. This is the reusable SDK's release-candidate version; building or packing it does not publish it to npm or establish hosted availability.
+
+The assistant now has explicit **Guide me** and **Explain** sessions. Hold Control to speak after opening the assistant or choosing a mode, release to finalize once. The existing shortcut, microphone and text input remain available. `startSession('guide' | 'explain')`, `setMode(...)` and `stopSession()` are available on the instance and global API. Stop ends observation, speech, requests and owned presentation.
+
+Explain can present validated procedural 3D geometry with orbit, zoom, keyboard controls, object selection and a GPU-independent SVG fallback. It is a conceptual illustration, not CAD or unrestricted mesh generation. Follow-ups refer only to an acknowledged scene in the same origin/version-bound embed session. Expiry clears it and asks for a fresh explanation; scenes never migrate between sessions. A unique explicit focus command uses local geometry without inference. Conceptual follow-ups use the model, with compact focus responses reusing exact server-validated geometry.
+
+The browser observes bounded public controls throughout an active session, including listening and thinking. It does not continuously capture pixels, field values, private controls, cross-origin frames or arbitrary canvas internals. Ordinary hover, focus, typing and camera movement do not generate model requests.
 
 `npm run build` produces three reusable forms from the same SDK source:
 
 - `dist/sdk/guidekit.js` and `guidekit.mjs`: local development aliases, revalidated on each load.
-- `dist/sdk/releases/<content-hash>/`: script/ESM bundles and a manifest with SHA-384 integrity values. These URLs receive immutable caching.
-- `dist/sdk-package/`: the `@guidekit/sdk` npm release candidate with ESM, script, generated TypeScript declarations, license and explicit package exports. It has not been published to npm.
+- `dist/sdk/releases/<content-hash>/`: script/ESM bundles, a content-addressed `viewer3d-<hash>.mjs` and a manifest with SHA-384 integrity values. These URLs receive immutable caching.
+- `dist/sdk-package/`: the `@guidekit/sdk` npm release candidate with ESM, script, generated TypeScript declarations, license, bundled Three.js notices, the lazy renderer and explicit package exports. It has not been published to npm.
 
 Read `/sdk/manifest.json` from your trusted GuideKit endpoint to choose a release. Pin the returned script path and integrity value in your website code. Keep a prior release directory when deploying new assets; rollback is a host change to the prior pinned path, independently of selecting an older ready agent knowledge version. Do not replace content under a hash URL. The mutable manifest is a build-time installation aid, not an instruction to hot-upgrade every installed customer.
 
@@ -36,7 +42,7 @@ The default browser integration supports accessible same-document HTML controls.
 Check both the trusted release manifest and the loaded runtime for `hostWorkflowProgress: true` before depending on this API. The runtime exports the frozen `SDK_CAPABILITIES`, also available as `GuideKit.capabilities`:
 
 ```ts
-{ apiVersion: 1, explicitTargets: true, adaptiveJourneys: true, hostWorkflowProgress: true, guideTargetCatalog: true }
+{ apiVersion: 1, explicitTargets: true, adaptiveJourneys: true, hostWorkflowProgress: true, guideTargetCatalog: true, activeSessions: true, controlHoldVoice: true, scene3d: 1 }
 ```
 
 For longer applications, mount with `journey: { maxContinuations: 12 }`. The default remains six continuation requests; explicit limits must be integers from 1 through 24. One request is allowed in flight. The collector shares at most 160 safe controls while scanning at most 2,000 candidates. These are limits, not a promise that every offscreen, private or custom-rendered control is discoverable.
@@ -98,3 +104,7 @@ Use the same explicit ID, public label and role on the real controls. The catalo
 Known steps continue locally while their identities remain valid, including expected panel reveals and verified intermediate saves. A new unrelated control or unchanged context publication no longer discards an already-grounded plan. DOM rendering coalesces around asynchronous context reads; explicit context revisions, route changes, pause and destroy still invalidate obsolete work. The 1.2-second typing quiet window is unchanged; field exit/choice/click progress remains event-driven. See [latency architecture and measured evidence](guidance-latency.md).
 
 Opening the assistant may make a best-effort authenticated `POST /api/embed/session/prepare` with an empty body. It contains no question, page, audio or model turn. The local provider prepares at most one fresh restricted process, expires it after 60 seconds, and consumes it once. Every inference still owns a fresh ephemeral thread and tears its process down. Preparation does not select a paid provider or weaken validation. SDKs tolerate older servers that omit preparation.
+
+## Lazy viewer installation
+
+Serve the renderer beside its SDK core file, retaining the complete immutable release directory. The core embeds that renderer's content-addressed filename and SHA-384 value. The direct script build resolves it beside the actual SDK script. The ESM build uses the configured trusted GuideKit endpoint at `/sdk/viewer3d-<hash>.mjs`, including when an npm consumer rebundles it into an ESM or IIFE application chunk; customers do not need to copy that file into their application build. A compiled format marker survives rebundling, so the loader does not guess from the customer bundle filename. Keep older hashed endpoint chunks when deploying newer releases, alongside the immutable release directories. Explain activation preloads the verified module, without opening a microphone, sending a model turn or creating geometry. The scene appears only after independent validation and an actual first-frame acknowledgement. Both script and packaged ESM installations use this boundary. CSP must permit the trusted renderer origin in `script-src` (the GuideKit endpoint for bundled npm consumers), as well as the endpoint in `connect-src`; the loader uses no blob URLs or dynamic evaluation. A failed/stopped load cannot create a late viewer. Generated package artifacts include the renderer and Three.js MIT notice.

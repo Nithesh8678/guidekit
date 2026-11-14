@@ -2,7 +2,7 @@ import { Assistant } from './controller';
 import { compileAction, safeContext } from './security';
 import { semanticRevision } from './journey';
 import type { GuideContextOptions, GuideKitAPI, GuideKitInstance, MountOptions, RegisteredAction } from './types';
-export type { ActionResult, GuideContextOptions, GuideKitAPI, GuideKitInstance, GuideStepResult, MountOptions, RegisteredAction, VoiceOptions } from './types';
+export type { ActionResult, AssistantMode, GuideContextOptions, GuideKitAPI, GuideKitInstance, GuideStepResult, MountOptions, RegisteredAction, VoiceOptions } from './types';
 
 let instance: GuideKitInstance | null = null;
 const registered = new Map<string, RegisteredAction>();
@@ -29,13 +29,16 @@ export function setContext(value: Record<string, unknown>, options?: GuideContex
 }
 export function open(): void { instance?.open(); }
 export function close(): void { instance?.close(); }
+export function startSession(mode?: import('./types').AssistantMode): void { instance?.startSession(mode); }
+export function setMode(mode: import('./types').AssistantMode): void { instance?.setMode(mode); }
+export function stopSession(): void { instance?.stopSession(); }
 export function startVoice(): void { instance?.startVoice(); }
 export function stopVoice(): void { instance?.stopVoice(); }
 export function reportStepResult(targetId: string, result: import('./types').GuideStepResult): void { instance?.reportStepResult(targetId, result); }
 export function destroy(): void { instance?.destroy(); instance = null; }
 
-export const SDK_CAPABILITIES: GuideKitAPI['capabilities'] = Object.freeze({ apiVersion: 1, explicitTargets: true, adaptiveJourneys: true, hostWorkflowProgress: true, guideTargetCatalog: true });
-export const GuideKit: GuideKitAPI = { capabilities: SDK_CAPABILITIES, mount, registerAction, setContext, open, close, startVoice, stopVoice, reportStepResult, destroy };
+export const SDK_CAPABILITIES: GuideKitAPI['capabilities'] = Object.freeze({ apiVersion: 1, explicitTargets: true, adaptiveJourneys: true, hostWorkflowProgress: true, guideTargetCatalog: true, activeSessions: true, controlHoldVoice: true, scene3d: 1 });
+export const GuideKit: GuideKitAPI = { capabilities: SDK_CAPABILITIES, mount, registerAction, setContext, open, close, startSession, setMode, stopSession, startVoice, stopVoice, reportStepResult, destroy };
 
 if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   const script = document.currentScript instanceof HTMLScriptElement ? document.currentScript : null;
