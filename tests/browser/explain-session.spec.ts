@@ -14,7 +14,7 @@ const viewerChunk = /\/viewer3d(?:-[a-f0-9]{24})?\.mjs(?:\?|$)/;
 interface Ask { message: string; page: PageContext; assistant?: AssistantContext; }
 interface SessionInstance extends GuideKitInstance { startSession(mode?: 'guide' | 'explain'): void; setMode(mode: 'guide' | 'explain'): void; stopSession(): void; }
 interface SpeechProbe { started: number; stopped: number; aborted: number; autoStart: boolean; autoFinalize: boolean; denied: boolean; finalText: string; result(text: string): void; end(): void; late(text: string): void; }
-interface ExplainProbe { instance: SessionInstance; collects: number; revision: number; speech: SpeechProbe; timings: { responseJsonToGeometryMs: number[]; localFocusToSelectionMs: number[] }; measureFocus: boolean; wheelPrevented: boolean[]; }
+interface ExplainProbe { instance: SessionInstance; collects: number; revision: number; speech: SpeechProbe; timings: { responseTextToGeometryMs: number[]; localFocusToSelectionMs: number[] }; measureFocus: boolean; wheelPrevented: boolean[]; }
 type ProbeWindow = Window & { __guidekitExplainProbe: ExplainProbe };
 interface Camera { position: number[]; target: number[]; }
 
@@ -34,13 +34,19 @@ async function installProbe(page: Page, fallback = false) {
     let current: Recognition | null = null, lateStart: (() => void) | null = null, lateEnd: (() => void) | null = null, lateResult: ((event: ResultEvent) => void) | null = null;
     const speech: SpeechProbe = { started: 0, stopped: 0, aborted: 0, autoStart: true, autoFinalize: true, denied: false, finalText: 'Show a rocket in 3D', result: text => current?.onresult?.(result(text)), end: () => current?.onend?.(), late: text => { lateStart?.(); lateResult?.(result(text)); lateEnd?.(); } };
     // The public instance is assigned by the intercepted mount below.
-    const probe = { collects: 0, revision: 0, speech, timings: { responseJsonToGeometryMs: [], localFocusToSelectionMs: [] }, measureFocus: false, wheelPrevented: [] } as unknown as ExplainProbe;
+    const probe = { collects: 0, revision: 0, speech, timings: { responseTextToGeometryMs: [], localFocusToSelectionMs: [] }, measureFocus: false, wheelPrevented: [] } as unknown as ExplainProbe;
     (window as unknown as ProbeWindow).__guidekitExplainProbe = probe;
     let presentation: { at: number; runId: string } | null = null, focusAt: number | null = null;
-    const json = Response.prototype.json;
-    Response.prototype.json = async function () {
-      const value = await Reflect.apply(json, this, []);
-      if (this.url.endsWith('/api/embed/session/ask') && this.ok && value?.visual?.kind === 'scene3d' && typeof value.runId === 'string') presentation = { at: performance.now(), runId: value.runId };
+    const text = Response.prototype.text;
+    Response.prototype.text = async function () {
+      const value = await Reflect.apply(text, this, []);
+      if (this.url.endsWith('/api/embed/session/ask') && this.ok) {
+        const at = performance.now();
+        try {
+          const parsed = JSON.parse(value) as RunResult;
+          if (parsed.visual?.kind === 'scene3d' && typeof parsed.runId === 'string') presentation = { at, runId: parsed.runId };
+        } catch { /* Preserve the SDK's own malformed-response handling. */ }
+      }
       return value;
     };
     document.addEventListener('click', event => {
@@ -73,7 +79,7 @@ async function installProbe(page: Page, fallback = false) {
         if (shadow) {
           const timing = new MutationObserver(() => {
             const model = shadow.querySelector<HTMLElement>('[data-gk-viewer]');
-            if (presentation && model?.dataset.gkSceneRun === presentation.runId && Number(model.dataset.gkRenderedFrames) > 0) { probe.timings.responseJsonToGeometryMs.push(performance.now() - presentation.at); presentation = null; }
+            if (presentation && model?.dataset.gkSceneRun === presentation.runId && Number(model.dataset.gkRenderedFrames) > 0) { probe.timings.responseTextToGeometryMs.push(performance.now() - presentation.at); presentation = null; }
             if (focusAt !== null && model?.querySelector('[data-gk-object-id="body"][aria-pressed="true"]')) { probe.timings.localFocusToSelectionMs.push(performance.now() - focusAt); focusAt = null; }
           });
           timing.observe(shadow, { subtree: true, childList: true, attributes: true, attributeFilter: ['data-gk-scene-run', 'data-gk-rendered-frames', 'aria-pressed'] });
@@ -129,7 +135,7 @@ function cameraDifference(a: Camera, b: Camera) { return Math.max(...a.position.
 async function timingEvidence(page: Page, info: TestInfo, name: string) {
   const path = info.outputPath(`${name}.json`);
   const evidence = { renderer: await viewer(page).getAttribute('data-gk-renderer'), samples: await page.evaluate(() => (window as unknown as ProbeWindow).__guidekitExplainProbe.timings), methodology: {
-    responseJsonToGeometryMs: 'Completed response.json, immediately before SDK validation, to a committed matching scene-run and rendered-frame DOM update. Includes validation, rendering and mutation-observer delivery; no model or network time.',
+    responseTextToGeometryMs: 'Completed response.text, immediately before SDK JSON parsing and validation, to a committed matching scene-run and rendered-frame DOM update. Includes parsing, validation, rendering and mutation-observer delivery; no model or network time.',
     localFocusToSelectionMs: 'Trusted Send click capture to the requested existing object selection DOM update. No model request or camera-paint latency is included.',
   } };
   await writeFile(path, JSON.stringify(evidence, null, 2));
