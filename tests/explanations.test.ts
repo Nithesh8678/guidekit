@@ -52,6 +52,19 @@ test('HTTP Explain supplies real viewer capabilities, retains scoped scenes and 
     output = { ...output, visual: rocketScene('engine') };
     const followup = await ask('Show me the engine.', { assistant: { ...assistant, sceneRunId: first.runId, selectedObjectId: 'engine' } }); assert.equal(followup.status, 200);
     const updated = await followup.json() as { visual: { id: string; focusId: string } }; assert.equal(updated.visual.id, 'rocket'); assert.equal(updated.visual.focusId, 'engine'); assert.match(prompt, /Current validated explanation:.*"id":"rocket"/);
+    output = { ...output, visual: { kind: 'scene3d-focus', sceneId: 'rocket', focusId: 'payload' } };
+    const focused = await ask('Explain and highlight the payload.', { assistant: { ...assistant, sceneRunId: first.runId } });
+    assert.equal(focused.status, 200);
+    const reused = await focused.json() as { visual: ModelPlan['visual'] };
+    assert.deepEqual(reused.visual, { ...rocketScene(), focusId: 'payload' }, 'A compact focus reuses exact validated geometry');
+    assert.match(prompt, /FOLLOW-UP FAST PATH/); assert.doesNotMatch(prompt, /For a form workflow/);
+    assert.ok(schema.properties.visual.anyOf.some((choice: any) => choice.properties?.kind?.enum?.includes('scene3d-focus')));
+    for (const visual of [{ kind: 'scene3d-focus', sceneId: 'other', focusId: 'engine' }, { kind: 'scene3d-focus', sceneId: 'rocket', focusId: 'missing' }, { kind: 'scene3d-focus', sceneId: 'rocket', focusId: 'engine', script: 'alert(1)' }]) {
+      output = { ...output, visual };
+      assert.equal((await ask('Invalid focus patch', { assistant: { ...assistant, sceneRunId: first.runId } })).status, 502);
+    }
+    output = { ...output, visual: { kind: 'scene3d-focus', sceneId: 'rocket', focusId: 'engine' } };
+    assert.equal((await ask('No source scene for patch')).status, 502);
     const beforeInvalid = calls;
     assert.equal((await ask('Other session scene', { assistant: { ...assistant, sceneRunId: first.runId } }, await session())).status, 400);
     assert.equal((await ask('Missing selected part', { assistant: { ...assistant, sceneRunId: first.runId, selectedObjectId: 'missing' } })).status, 400);
