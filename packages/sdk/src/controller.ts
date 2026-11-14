@@ -272,6 +272,17 @@ export class Assistant implements GuideKitInstance {
     if (selection.selectedObjectId && previous.scene.objects.some(object => object.id === selection.selectedObjectId)) result.selectedObjectId = selection.selectedObjectId;
     return result;
   }
+  private invalidateVisualSession(nextToken?: string): void {
+    const previous = this.lastVisual;
+    if (!previous || previous.token === nextToken) return;
+    this.lastVisual = null; this.view.clearVisual();
+    if (!this.destroyed && this.sessionActive) {
+      const message = 'Your previous model belonged to an earlier assistant session and has been cleared. Ask for a new explanation before referring to its parts.';
+      this.view.message('assistant', message); this.view.status(message, true);
+      if (this.mode === 'explain' && !this.active && !this.voice.active) this.setPhase('error');
+      this.emit('visual-session-expired', { sceneId: previous.scene.id });
+    }
+  }
   private async requestPlan(payload: unknown, token: string, signal: AbortSignal): Promise<RunResult> {
     const previous = this.inferenceTail; let release!: () => void;
     const done = new Promise<void>(resolve => { release = resolve; }); this.inferenceTail = previous.catch(() => undefined).then(() => done);
@@ -285,7 +296,7 @@ export class Assistant implements GuideKitInstance {
     if (this.destroyed) return null;
     const text = message.trim(); if (!text || text.length > 3000) { this.view.status('Please enter a question of at most 3000 characters.', true); return null; }
     this.startSession();
-    const mode = this.mode, epoch = this.sessionEpoch, intent = ++this.intent;
+    const mode = this.mode, epoch = this.sessionEpoch, visualAtStart = this.lastVisual, intent = ++this.intent;
     await this.cancel(false, true);
     if (this.destroyed || intent !== this.intent || !this.sessionActive || epoch !== this.sessionEpoch) return null;
     const generation = ++this.generation, controller = new AbortController(); this.active = controller;
@@ -293,6 +304,10 @@ export class Assistant implements GuideKitInstance {
     this.view.open(); this.setPhase('reading', generation); this.view.message('user', text); this.view.status('Reading the current public page and company knowledge…');
     try {
       const session = await this.ensureSession(); controller.signal.throwIfAborted();
+      if (mode === 'explain' && visualAtStart && this.lastVisual !== visualAtStart) {
+        if (current()) { this.setPhase('error', generation); this.view.status('Your model’s assistant session changed. Ask for a new explanation before referring to its parts.', true); }
+        return null;
+      }
       const previous = this.lastVisual;
       const focus = mode === 'explain' && previous?.token === session.token && this.view.visualSelection()?.sceneId === previous.scene.id ? matchVisualFocus(text, previous.scene) : null;
       if (focus && current() && this.view.focusVisualObject(focus.id)) {
@@ -572,8 +587,10 @@ export class Assistant implements GuideKitInstance {
       if (!record(value) || typeof value.token !== 'string' || value.token.length < 10 || value.token.length > 4000 || !['string', 'number'].includes(typeof value.expiresAt)) throw new Error('The server returned an invalid assistant session.');
       const expiresAt = typeof value.expiresAt === 'number' ? value.expiresAt : Date.parse(value.expiresAt as string); if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) throw new Error('The assistant session has expired. Please try again.');
       const agent = parsePublicAgent(value.agent); if (agent.id !== this.options.agentId) throw new Error('The assistant session does not match this website.');
-      const session = { token: value.token, expiresAt, agent }, previousToken = this.session?.token; this.session = session;
-      if (previousToken && previousToken !== session.token) { this.lastVisual = null; this.view.clearVisual(); }
+      const session = { token: value.token, expiresAt, agent }; this.session = session;
+      // Compare the acknowledged scene itself: a prior 401 may already have
+      // removed this.session, without making its old scene safe to carry over.
+      this.invalidateVisualSession(session.token);
       if (this.configuredVersion !== agent.version && !this.destroyed) { this.view.configure(agent); this.configuredVersion = agent.version; this.emit('mounted', { agentId: agent.id, version: agent.version }); }
       return session;
     }).finally(() => { this.connecting = null; });
@@ -587,7 +604,7 @@ export class Assistant implements GuideKitInstance {
       const raw = await response.text(); if (raw.length > 1_000_000) throw new Error('The server returned too much data.');
       let value: unknown; try { value = JSON.parse(raw); } catch { throw new Error('The assistant server did not return JSON. Check the SDK endpoint.'); }
       if (!response.ok) {
-        if (response.status === 401 && token === this.session?.token) this.session = null;
+        if (response.status === 401 && token === this.session?.token) { this.session = null; this.invalidateVisualSession(); }
         throw new Error(record(value) && typeof value.error === 'string' ? value.error.slice(0, 700) : `The assistant request failed (${response.status}).`);
       }
       return value;
