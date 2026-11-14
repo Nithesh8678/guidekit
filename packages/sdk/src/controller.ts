@@ -298,7 +298,8 @@ export class Assistant implements GuideKitInstance {
       if (focus && current() && this.view.focusVisualObject(focus.id)) {
         const answer = focus.description || `Focused on ${focus.label}.`;
         this.view.message('assistant', answer); this.voice.speak(answer); this.setPhase('presenting', generation);
-        this.view.status(`Focused on ${focus.label}.`); this.emit('visual-focus', { sceneId: previous!.scene.id, objectId: focus.id, source: 'local' });
+        if (current()) this.view.status(`Focused on ${focus.label}. Ask a follow-up or select another part.`);
+        this.emit('visual-focus', { sceneId: previous!.scene.id, objectId: focus.id, source: 'local' });
         return null;
       }
       let snapshot = await this.readSnapshot(controller.signal); this.latestSnapshot = snapshot;
@@ -320,6 +321,7 @@ export class Assistant implements GuideKitInstance {
             this.lastVisual = { scene: result.visual, runId: result.runId, token: session.token };
           }
           this.voice.speak(result.answer); this.setPhase(this.lastVisual ? 'presenting' : 'observing', generation);
+          if (current()) this.view.status(this.lastVisual ? 'Your explanation is ready. Ask a follow-up or select a part of the model.' : 'Your explanation is ready. Ask a follow-up, or request an interactive model.');
         } else {
           const fresh = await this.readSnapshot(controller.signal); this.latestSnapshot = fresh;
           if (!current()) return null;
