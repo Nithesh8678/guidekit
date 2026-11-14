@@ -18,8 +18,8 @@ export async function buildSDK() {
   await cp(join(output, 'viewer3d.mjs'), join(output, viewerFilename));
   const viewerIntegrity = `sha384-${createHash('sha384').update(visual).digest('base64')}`;
   const define = { __GUIDEKIT_VIEWER_INTEGRITY__: JSON.stringify(viewerIntegrity), __GUIDEKIT_VIEWER_FILENAME__: JSON.stringify(viewerFilename) };
-  await build({ entryPoints: ['packages/sdk/src/index.ts'], outfile: join(output, 'guidekit.js'), bundle: true, format: 'iife', globalName: 'GuideKitSDK', target: 'es2022', minify: true, sourcemap: false, plugins: [viewer], define: { ...define, 'import.meta.url': 'undefined' } });
-  await build({ entryPoints: ['packages/sdk/src/index.ts'], outfile: join(output, 'guidekit.mjs'), bundle: true, format: 'esm', target: 'es2022', minify: true, sourcemap: false, plugins: [viewer], define });
+  await build({ entryPoints: ['packages/sdk/src/index.ts'], outfile: join(output, 'guidekit.js'), bundle: true, format: 'iife', globalName: 'GuideKitSDK', target: 'es2022', minify: true, sourcemap: false, plugins: [viewer], define: { ...define, __GUIDEKIT_CORE_FORMAT__: JSON.stringify('script'), 'import.meta.url': 'undefined' } });
+  await build({ entryPoints: ['packages/sdk/src/index.ts'], outfile: join(output, 'guidekit.mjs'), bundle: true, format: 'esm', target: 'es2022', minify: true, sourcemap: false, plugins: [viewer], define: { ...define, __GUIDEKIT_CORE_FORMAT__: JSON.stringify('module') } });
   const script = await readFile(join(output, 'guidekit.js')), module = await readFile(join(output, 'guidekit.mjs'));
   const release = createHash('sha256').update(script).update(module).update(visual).digest('hex').slice(0, 24), releaseDir = join(output, 'releases', release);
   await mkdir(releaseDir, { recursive: true });

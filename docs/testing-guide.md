@@ -77,3 +77,5 @@ Use a desktop Chrome/Edge browser at `http://127.0.0.1:4412/?agentId=YOUR_PUBLIS
 6. Use **Stop session** during thinking or presentation. A late response must not reopen a model or guide. Control+another key, Control-click, Escape, blur and hidden-page transitions must not submit unwanted recordings. After a long idle session expires, an old scene is cleared with an explicit recovery message.
 
 Automated speech fixtures cover lifecycle failures; the visitor separately confirmed physical Control recording/release on 2026-11-14. Narration quality, other devices, host custom controls and production service latency remain separate acceptance checks.
+
+The packaged-consumer browser case bundles the actual npm-distribution ESM with esbuild into a customer application chunk, mounts it on the separate host origin and verifies real geometry plus the trusted endpoint renderer request. This supplements script/standalone-module installation checks; a successful Node import alone does not establish browser asset resolution.
