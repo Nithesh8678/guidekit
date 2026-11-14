@@ -47,3 +47,9 @@ flowchart LR
 - Measure cold and prepared initial responses separately, with retrieval, startup, first delta, model completion, validation and first rendering. Target validated scene arrival to first geometry below 100 ms after the viewer is loaded. These are proposed targets, not an instant-inference or exact HeyClicky parity guarantee.
 
 References: [OpenAI app-server protocol](https://learn.chatgpt.com/docs/app-server), [Three.js OrbitControls](https://threejs.org/docs/pages/OrbitControls), [Three.js WebGLRenderer](https://threejs.org/docs/pages/WebGLRenderer). Existing source and timing evidence is in [guidance-latency.md](guidance-latency.md) and [guidance-motion.md](guidance-motion.md).
+
+## Implementation checkpoint — 2026-11-14
+
+The bounded active-session controller, Control-hold voice, explicit modes, typed scene protocol, lazy integrity-verified viewer, SVG fallback, exact-session follow-ups, compact provider focus responses, local focus fast path and explicit expired-scene recovery are implemented on `feat/active-guide-explain`. The existing curved cursor, grapheme reveal, scrolling and host-verified Guide workflow are preserved.
+
+Real subscription inference has been exercised through both the actual UI and a scoped two-request phase diagnostic. The physical microphone was confirmed by the visitor. See [current status](status.md) for final automated acceptance/release evidence and [latency measurements](guidance-latency.md#active-explain-measurements--2026-11-14) for the remaining initial-generation delay. The sub-100 ms local target is separate from model service time; no instant-inference or exact HeyClicky parity claim is made.

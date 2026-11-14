@@ -46,3 +46,24 @@ HeyClicky's [official changelog](https://www.heyclicky.com/changelog) describes 
 ## Verification
 
 Run `npm run check`, `npm run test:e2e`, `npm run test:dashboard`, and `npm run test:dashboard:integration`. The core browser command includes the nine latency/catalog/preparation cases in `tests/browser/latency.spec.ts`. Its dedicated config can run them independently. The separate Cutroom checkout has `tests/browser/guidekit-latency.config.ts` for the three host cases and retains its existing workflow suite. Fixtures use disposable databases/projects/media. Live subscription checks are explicit and separate from CI.
+
+## Active Explain measurements — 2026-11-14
+
+The controller now owns distinct listening/finalizing/reading/thinking/presenting phases while public DOM observation stays active locally. The local focus matcher accepts only a uniquely named object in the last acknowledged scene, and adds no inference request. A conceptual explanation still uses inference. The provider can return a compact focus-only response, rehydrated from exact server-validated geometry, instead of regenerating the entire scene. Explain prompts omit irrelevant Guide workflow rules. A new model prefers 4–8 essential objects. The viewer module preloads on Explain activation and stays separate from default Guide startup.
+
+Two real local subscription requests with PostgreSQL evidence produced this diagnostic:
+
+| Phase | New four-object rocket | Same-scene conceptual + focus follow-up |
+| --- | ---: | ---: |
+| HTTP completion |27,422 ms |7,250 ms |
+| Knowledge retrieval |530 ms |288 ms |
+| Runtime startup inside request |7,811 ms |0 ms |
+| First final-answer delta from inference start |11,134 ms |3,856 ms |
+| Full model inference |18,386 ms |5,619 ms |
+| Cleanup |28 ms |13 ms |
+
+The follow-up retained identical scene/object geometry and focused the existing engine. The requests were immediate diagnostics rather than a controlled cold/warm benchmark: preparation was requested, but the first worker was not ready, so its startup remained inside the initial request. Timings overlap (first delta is inside inference) and exclude no work by declaring a scene ready early. No partial output or private reasoning was rendered. These samples do not establish p95 or prove an optimization speedup against an equivalent baseline.
+
+Separate live UI verification generated a four-part rocket, exercised orbit/zoom and local Engine focus, then retained that same scene through a conceptual engine follow-up. The visitor confirmed the physical hold-Control microphone flow worked correctly. Browser speech still depends on device/browser support and voice quality is unchanged.
+
+Initial 3D generation is still too slow for a real-time claim. The measured pre-answer wait and output completion both matter; compressing a few default transforms would not address the full delay. Faster model selection, safe progressive scene delivery and a separately enabled hosted provider need measured evaluation before promising lower initial latency. Local established guidance and object focus remain independent of this service time. Private evidence: `.data/evidence/active-explain-final-timing.json` and `active-explain-final.png`.
