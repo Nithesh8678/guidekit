@@ -174,20 +174,22 @@ test('Explain preloads its pure verified module without a microphone, inference 
   await timingEvidence(page, testInfo, 'loaded-module-presentation-timing');
 });
 
-test('an npm ESM consumer bundled into a host application chunk loads its verified renderer from the configured endpoint', async ({ page }, testInfo) => {
+for (const format of ['esm', 'iife'] as const) test(`an npm consumer rebundled as ${format} loads its verified renderer from the configured endpoint`, async ({ page }, testInfo) => {
   const state = await openFixture(page);
   const assetRoot = process.env.GUIDEKIT_TEST_ASSET_ROOT ?? process.cwd();
   const packagedModule = resolve(assetRoot, 'dist/sdk-package/dist/guidekit.mjs');
   const output = await build({
-    stdin: { contents: `import { GuideKit } from ${JSON.stringify(packagedModule)}; const instance = GuideKit.mount({ agentId: ${JSON.stringify(state.agentId)}, endpoint: ${JSON.stringify(endpoint)}, journey: { enabled: false } }); await instance.ready; instance.open();`, resolveDir: assetRoot, sourcefile: 'package-consumer.js' },
-    bundle: true, write: false, format: 'esm', platform: 'browser', target: 'es2022',
+    stdin: { contents: `import { GuideKit } from ${JSON.stringify(packagedModule)}; const instance = GuideKit.mount({ agentId: ${JSON.stringify(state.agentId)}, endpoint: ${JSON.stringify(endpoint)}, journey: { enabled: false } }); instance.ready.then(() => instance.open());`, resolveDir: assetRoot, sourcefile: 'package-consumer.js' },
+    bundle: true, write: false, format, platform: 'browser', target: 'es2022',
   });
-  const hostChunk = `${website}/assets/application-chunk.mjs`;
+  // Deliberately retain the SDK-looking basename: build metadata, rather than
+  // guessing from a filename, must survive a customer's second bundling pass.
+  const hostChunk = `${website}/assets/guidekit.${format === 'esm' ? 'mjs' : 'js'}`;
   await page.route(hostChunk, route => route.fulfill({ contentType: 'text/javascript', body: output.outputFiles[0]!.text }));
   // Keep an actual loopback HTTP document so Chromium's local-network address
   // space policy is exercised normally; only the consumer chunk is routed.
   await page.goto(`${website}/?install=manual`);
-  await page.addScriptTag({ type: 'module', url: hostChunk });
+  await page.addScriptTag({ ...(format === 'esm' ? { type: 'module' } : {}), url: hostChunk });
   await expect(chat(page)).toBeVisible(); await explain(page);
   const run = await ask(page, 'Show a rocket in 3D');
   await testInfo.attach('packaged-renderer-module-requests', { body: JSON.stringify(state.chunks, null, 2), contentType: 'application/json' });
