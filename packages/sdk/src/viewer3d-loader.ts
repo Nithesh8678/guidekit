@@ -53,6 +53,7 @@ export class VisualViewerLoader {
   private generation = 0;
   private disposed = false;
   private loading: AbortController | null = null;
+  private presentation: AbortController | null = null;
   constructor(private readonly container: HTMLElement, private readonly load: (signal?: AbortSignal) => Promise<VisualViewerModule>, private readonly onHide: () => void) {}
   private ensureModule(): Promise<VisualViewerModule> {
     if (!this.module) {
@@ -66,18 +67,23 @@ export class VisualViewerLoader {
   async present(scene: VisualScene, runId: string): Promise<VisualPresentation> {
     if (this.disposed) throw cancelled();
     const generation = ++this.generation;
-    const module = await this.ensureModule();
-    if (this.disposed || generation !== this.generation) throw cancelled();
-    this.viewer ??= module.createViewer3D(this.container, { onHide: this.onHide });
-    const presentation = await this.viewer.present(scene, runId);
-    if (this.disposed || generation !== this.generation) throw cancelled();
-    return presentation;
+    this.presentation?.abort(); const operation = new AbortController(); this.presentation = operation;
+    let stop!: () => void;
+    const interrupted = new Promise<never>((_resolve, reject) => { stop = () => reject(cancelled()); operation.signal.addEventListener('abort', stop, { once: true }); });
+    try {
+      const module = await Promise.race([this.ensureModule(), interrupted]);
+      if (this.disposed || generation !== this.generation) throw cancelled();
+      this.viewer ??= module.createViewer3D(this.container, { onHide: this.onHide });
+      const presentation = await Promise.race([this.viewer.present(scene, runId), interrupted]);
+      if (this.disposed || generation !== this.generation) throw cancelled();
+      return presentation;
+    } finally { operation.signal.removeEventListener('abort', stop); if (this.presentation === operation) this.presentation = null; }
   }
   selection(): VisualSelection | null { return this.viewer?.selection() ?? null; }
   focusObject(id: string): boolean { return !this.disposed && /^[a-zA-Z0-9_-]{1,80}$/.test(id) ? this.viewer?.focusObject(id) ?? false : false; }
-  cancelPresentation(): void { ++this.generation; if (this.loading) { this.loading.abort(); this.loading = null; this.module = null; } this.viewer?.cancelPresentation(); }
-  hide(): void { ++this.generation; if (this.loading) { this.loading.abort(); this.loading = null; this.module = null; } this.viewer?.hide(); }
+  cancelPresentation(): void { ++this.generation; this.presentation?.abort(); this.presentation = null; this.viewer?.cancelPresentation(); }
+  hide(): void { this.cancelPresentation(); if (this.loading) { this.loading.abort(); this.loading = null; this.module = null; } this.viewer?.hide(); }
   show(): void { if (!this.disposed) this.viewer?.show(); }
-  clear(): void { ++this.generation; if (this.loading) { this.loading.abort(); this.loading = null; this.module = null; } this.viewer?.dispose(); this.viewer = null; }
+  clear(): void { this.cancelPresentation(); if (this.loading) { this.loading.abort(); this.loading = null; this.module = null; } this.viewer?.dispose(); this.viewer = null; }
   dispose(): void { this.disposed = true; this.clear(); }
 }

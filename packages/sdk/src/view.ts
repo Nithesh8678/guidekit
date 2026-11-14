@@ -236,14 +236,20 @@ export class View {
   }
   private updateSessionChrome(): void {
     const state = this.activeSession;
-    const labels = { inactive: 'Choose a mode to begin', observing: state.observing ? 'Observing this page' : 'Session active', starting: 'Starting microphone…', listening: 'Listening — release Control to send', finalizing: 'Finishing transcript…', reading: 'Reading this page…', thinking: 'Thinking…', presenting: 'Showing explanation…', paused: 'Session paused', error: 'Something needs attention' };
+    const labels = { inactive: 'Choose a mode to begin', observing: state.observing ? 'Observing this page' : 'Session active', starting: 'Starting microphone…', listening: 'Listening — release Control to send', finalizing: 'Finishing transcript…', reading: 'Reading this page…', thinking: 'Thinking…', presenting: state.mode === 'explain' ? 'Showing explanation…' : 'Guiding you on this page', paused: 'Session paused', error: 'Something needs attention' };
     const text = labels[state.phase]; if (this.sessionCopy.textContent !== text) this.sessionCopy.textContent = text; if (this.hudCopy.textContent !== text) this.hudCopy.textContent = text;
     this.sessionRow.hidden = !state.active || this.visualVisible; this.sessionRow.dataset.observing = String(state.observing);
     this.controlHint.hidden = state.phase !== 'observing' || this.mic.disabled;
     this.sessionHud.hidden = !state.active || this.opened && !this.visualVisible; this.sessionHud.dataset.phase = state.phase; this.sessionHud.dataset.observing = String(state.observing);
   }
   pauseGuidance(): void { this.guideSession?.setPaused(true); }
-  resumeGuidance(): void { this.guideSession?.setPaused(false); }
+  resumeGuidance(): void {
+    const session = this.guideSession; if (!session?.active) return;
+    if (this.guideChatOpen) { this.departDock(); this.guideChatOpen = false; this.resumeGuide.hidden = true; this.panel.hidden = true; this.launcher.hidden = true; }
+    session.setPaused(false);
+    if (this.guideSession === session && session.active) { this.guideVisibility?.(true); session.refresh(); }
+    this.updateSessionChrome();
+  }
   async presentVisual(scene: VisualScene, runId: string): Promise<VisualPresentation> {
     if (this.destroyed) throw new DOMException('The assistant was destroyed.', 'AbortError');
     const presentation = await this.visualLoader.present(scene, runId);

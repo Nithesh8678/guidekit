@@ -85,10 +85,10 @@ test('superseding a deferred import presents only the latest requested topic', a
 });
 
 test('hide and destroy reject a deliberately late first-frame acknowledgement', async () => {
-  const ack = deferred<VisualPresentation>(), viewer = fakeViewer(); viewer.present = () => ack.promise;
+  const ack = deferred<VisualPresentation>(), entered = deferred<void>(), viewer = fakeViewer(); viewer.present = () => { entered.resolve(); return ack.promise; };
   const loader = new VisualViewerLoader({} as HTMLElement, async () => ({ createViewer3D: () => viewer }), () => {});
   const presenting = loader.present(scene(), 'run_first'), rejected = assert.rejects(presenting, { name: 'AbortError' });
-  await Promise.resolve(); loader.hide(); loader.dispose(); ack.resolve({ sceneId: 'example', renderer: 'svg' });
+  await entered.promise; loader.hide(); loader.dispose(); ack.resolve({ sceneId: 'example', renderer: 'svg' });
   await rejected; assert.equal(viewer.disposes, 1); await assert.rejects(loader.present(scene(), 'run_late'), { name: 'AbortError' });
 });
 
@@ -101,10 +101,19 @@ test('a failed update preserves the existing viewer and can retry without reload
 });
 
 test('cancelling an unpainted update retains the current acknowledged scene and renderer', async () => {
-  const viewer = fakeViewer(), ack = deferred<VisualPresentation>(); let cancellations = 0;
+  const viewer = fakeViewer(), ack = deferred<VisualPresentation>(), entered = deferred<void>(); let cancellations = 0;
   const loader = new VisualViewerLoader({} as HTMLElement, async () => ({ createViewer3D: () => viewer }), () => {});
-  await loader.present(scene(), 'run_first'); viewer.present = () => ack.promise; viewer.cancelPresentation = () => { cancellations++; };
+  await loader.present(scene(), 'run_first'); viewer.present = () => { entered.resolve(); return ack.promise; }; viewer.cancelPresentation = () => { cancellations++; };
   const updating = loader.present(scene('new_topic'), 'run_next'), rejected = assert.rejects(updating, { name: 'AbortError' });
-  await Promise.resolve(); loader.cancelPresentation(); ack.resolve({ sceneId: 'new_topic', renderer: 'svg' }); await rejected;
+  await entered.promise; loader.cancelPresentation(); ack.resolve({ sceneId: 'new_topic', renderer: 'svg' }); await rejected;
   assert.equal(loader.selection()?.sceneId, 'example'); assert.equal(viewer.disposes, 0); assert.equal(viewer.hides, 0); assert.equal(cancellations, 1); loader.dispose();
+});
+
+test('a new turn cancels its presentation immediately while preserving an authorized Explain preload', async () => {
+  const module = deferred<VisualViewerModule>(); let loads = 0, signal: AbortSignal | undefined;
+  const loader = new VisualViewerLoader({} as HTMLElement, input => { loads++; signal = input; return module.promise; }, () => {});
+  loader.preload(); const first = loader.present(scene(), 'run_first'), rejected = assert.rejects(first, { name: 'AbortError' });
+  loader.cancelPresentation(); await rejected; assert.equal(signal?.aborted, false);
+  const next = loader.present(scene('new_topic'), 'run_next'); module.resolve({ createViewer3D: () => fakeViewer() });
+  assert.equal((await next).sceneId, 'new_topic'); assert.equal(loads, 1); loader.dispose();
 });
