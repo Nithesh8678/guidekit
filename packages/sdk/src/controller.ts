@@ -165,6 +165,7 @@ export class Assistant implements GuideKitInstance {
     document.removeEventListener('visibilitychange', this.visibility); window.removeEventListener('blur', this.blur);
     this.sceneObserver?.destroy(); this.sceneObserver = null; this.latestSnapshot = null;
     void this.cancel(false); this.lastVisual = null; this.view.clearVisual(); this.view.clearGuide(false); this.setPhase('inactive');
+    this.view.status('Session stopped. Ask a question or choose a mode to start again.');
   }
   private restoreVisual(): void {
     const previous = this.lastVisual; if (!previous || previous.token !== this.session?.token) return;
