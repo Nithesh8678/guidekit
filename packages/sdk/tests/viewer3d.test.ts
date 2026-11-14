@@ -21,6 +21,22 @@ test('verified viewer URLs use adjacent content-addressed modules across alias a
   assert.throws(() => verifiedViewerURL('file:///sdk/guidekit.mjs', filename, integrity)); assert.throws(() => verifiedViewerURL('https://example.test/sdk/guidekit.js', filename, ''));
 });
 
+test('bundled application modules load the verified renderer from their configured GuideKit endpoint', () => {
+  const filename = `viewer3d-${'a'.repeat(24)}.mjs`, integrity = `sha384-${Buffer.alloc(48).toString('base64')}`, endpoint = 'http://127.0.0.1:4510';
+  for (const base of ['http://127.0.0.1:4511/assets/index-123.js', 'http://127.0.0.1:4511/node_modules/.vite/deps/@guidekit_sdk.js?v=123', 'http://127.0.0.1:4511/assets/guidekit.js', 'http://127.0.0.1:4511/assets/guidekit.mjs', 'file:///app/assets/index.js', '']) {
+    const url = verifiedViewerURL(base, filename, integrity, endpoint); assert.equal(url.origin, endpoint); assert.equal(url.pathname, `/sdk/${filename}`); assert.equal(url.search, ''); assert.equal(url.hash, '');
+  }
+  for (const base of ['https://cdn.example.test/sdk/releases/version/guidekit.js', 'https://cdn.example.test/package/dist/guidekit.mjs']) {
+    assert.equal(verifiedViewerURL(base, filename, integrity, endpoint, true).href, new URL(filename, base).href, 'Direct script/CDN installations keep their adjacent hashed renderer.');
+    assert.equal(verifiedViewerURL(base, filename, integrity, endpoint).origin, endpoint, 'Module format consistently uses its trusted endpoint before or after rebundling.');
+  }
+  for (const endpoint of ['', '/api', 'file:///api', 'javascript:alert(1)', 'https://user:password@example.test', 'https://example.test/api', 'https://example.test/?query=1', 'https://example.test/#fragment']) {
+    for (const adjacent of [false, true]) assert.throws(() => verifiedViewerURL('https://cdn.example.test/guidekit.js', filename, integrity, endpoint, adjacent), 'Invalid endpoints fail even when an adjacent SDK module exists.');
+  }
+  assert.throws(() => verifiedViewerURL('https://app.example.test/assets/app.js', '../viewer3d-aaaaaaaaaaaaaaaaaaaaaaaa.mjs', integrity, endpoint));
+  assert.throws(() => verifiedViewerURL('https://app.example.test/assets/app.js', filename, '', endpoint));
+});
+
 test('viewer preparation renders provided primitive types and exact authored transforms', () => {
   const spec = scene(); spec.objects = [spec.objects[0]!];
   const visual = prepareVisual(spec);

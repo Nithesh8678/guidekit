@@ -86,7 +86,7 @@ export class Assistant implements GuideKitInstance {
     this.view = new View({ open: () => this.open(), close: () => this.close(), mode: (mode: AssistantMode) => this.setMode(mode), stopSession: () => this.stopSession(), submit: message => { void this.ask(message); }, cancel: () => { if (this.voice.active) this.voice.stopInput(); else void this.cancel(); }, mic: () => this.toggleVoice(false), speaker: () => this.voice.toggleOutput(), guideStep: (text, events) => this.voice.speak(text, events), guidePause: () => this.voice.stopSpeaking(), guideFinish: result => {
       const message = result.message || (result.verified ? 'The website confirmed this step. Your guide is complete.' : 'Guide finished. Check the website for confirmation of any changes.');
       this.view.message('assistant', message); this.voice.speak(message); this.setPhase('observing'); this.emit('guide-finished', { verified: result.verified });
-    } });
+    } }, { endpoint: this.endpoint });
     this.voice = new Voice(this.view, options.voice ?? {}, message => { void this.ask(message); }, { phase: (phase, ending) => this.voicePhase(phase, ending) });
     this.hold = new ControlHold({ enabled: () => this.sessionActive && !this.destroyed && !document.hidden && !this.voice.active && !this.view.mic.disabled && !this.privateFocus(document.activeElement), start: () => this.beginVoice(true, true, false), finish: () => this.voice.finishInput(), cancel: () => this.voice.stopInput() });
     const parts = (options.hotkey ?? 'mod+shift+k').toLowerCase().split('+'); const key = parts.at(-1);

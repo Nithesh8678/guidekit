@@ -1,5 +1,6 @@
 import type { VisualScene } from '../../contracts/src/visual';
 import type { VisualPresentation, VisualSelection } from './session-types';
+import { endpointOrigin } from './security';
 
 /** The lazy boundary deliberately contains no renderer or Three.js types. */
 export interface VisualViewer {
@@ -15,22 +16,31 @@ export interface VisualViewerModule { createViewer3D(container: HTMLElement, opt
 const cancelled = () => new DOMException('The explanation presentation was replaced or stopped.', 'AbortError');
 declare const __GUIDEKIT_VIEWER_INTEGRITY__: string;
 declare const __GUIDEKIT_VIEWER_FILENAME__: string;
+declare const __GUIDEKIT_CORE_FORMAT__: 'script' | 'module';
 const scriptBase = import.meta.url || (typeof document !== 'undefined' && document.currentScript instanceof HTMLScriptElement ? document.currentScript.src : '');
 
-export function verifiedViewerURL(base: string, filename: string, integrity: string): URL {
-  if (!base || !/^viewer3d-[a-f0-9]{24}\.mjs$/.test(filename) || !/^sha384-[A-Za-z0-9+/]+=*$/.test(integrity)) throw new Error('The verified explanation module is unavailable in this SDK build.');
-  const url = new URL(filename, base);
-  if (!['http:', 'https:'].includes(url.protocol)) throw new Error('The explanation module needs a trusted web origin.');
+export function verifiedViewerURL(base: string, filename: string, integrity: string, endpoint?: string, preferAdjacent = false): URL {
+  const origin = endpoint === undefined ? undefined : endpointOrigin(endpoint);
+  if (!/^viewer3d-[a-f0-9]{24}\.mjs$/.test(filename) || !/^sha384-[A-Za-z0-9+/]+=*$/.test(integrity)) throw new Error('The verified explanation module is unavailable in this SDK build.');
+  let source: URL | undefined; try { source = new URL(base); } catch { /* Bundlers may erase the original module URL. */ }
+  const usableSource = source && ['http:', 'https:'].includes(source.protocol) && !source.username && !source.password ? source : undefined;
+  // The core's compiled format survives customer rebundling. Module builds
+  // use their trusted endpoint even when an app chunk is named guidekit.js.
+  // Direct script installations retain their captured adjacent CDN assets.
+  const assetBase = origin && !preferAdjacent ? new URL('/sdk/', origin) : usableSource ?? (origin ? new URL('/sdk/', origin) : undefined);
+  if (!assetBase || !['http:', 'https:'].includes(assetBase.protocol) || assetBase.username || assetBase.password) throw new Error('The explanation module needs a trusted web origin.');
+  const url = new URL(filename, assetBase);
   return url;
 }
 
-/** Only the adjacent build-owned, SRI-verified module may cross this boundary. */
-export function loadVerifiedViewer(signal?: AbortSignal): Promise<VisualViewerModule> {
+/** Only a build-owned, SRI-verified module at a trusted asset base may load. */
+export function loadVerifiedViewer(signal?: AbortSignal, endpoint?: string): Promise<VisualViewerModule> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) { reject(cancelled()); return; }
     const integrity = typeof __GUIDEKIT_VIEWER_INTEGRITY__ === 'string' ? __GUIDEKIT_VIEWER_INTEGRITY__ : '';
     const filename = typeof __GUIDEKIT_VIEWER_FILENAME__ === 'string' ? __GUIDEKIT_VIEWER_FILENAME__ : '';
-    let url: URL; try { url = verifiedViewerURL(scriptBase, filename, integrity); } catch (error) { reject(error); return; }
+    const adjacent = typeof __GUIDEKIT_CORE_FORMAT__ === 'string' && __GUIDEKIT_CORE_FORMAT__ === 'script';
+    let url: URL; try { url = verifiedViewerURL(scriptBase, filename, integrity, endpoint, adjacent); } catch (error) { reject(error); return; }
     const script = document.createElement('script'); script.type = 'module'; script.src = url.href; script.integrity = integrity; script.crossOrigin = 'anonymous';
     let settled = false;
     const finish = (error?: unknown, module?: VisualViewerModule) => {

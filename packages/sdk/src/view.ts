@@ -149,7 +149,7 @@ export class View {
     this.voiceNote.textContent = state.message;
   }
 
-  constructor(private readonly handlers: { open(): void; close(): void; submit(message: string): void; cancel(): void; mic(): void; speaker(): void; mode?(mode: AssistantMode): void; stopSession?(): void; guideStep?(text: string, events: SpeechEvents): boolean; guidePause?(): void; guideFinish?(result: GuidanceResult): void; }) {
+  constructor(private readonly handlers: { open(): void; close(): void; submit(message: string): void; cancel(): void; mic(): void; speaker(): void; mode?(mode: AssistantMode): void; stopSession?(): void; guideStep?(text: string, events: SpeechEvents): boolean; guidePause?(): void; guideFinish?(result: GuidanceResult): void; }, options: { endpoint?: string } = {}) {
     this.host.dataset.guidekitRoot = ''; this.host.dataset.guidekitPrivate = '';
     // aria-hidden's hideOthers (used by Radix) preserves explicit live-region
     // roots. Keep this owned overlay available; only its authored child regions
@@ -157,7 +157,7 @@ export class View {
     this.host.setAttribute('aria-live', 'off');
     this.shadow = this.host.attachShadow({ mode: 'open' });
     const style = element('style'); style.textContent = styles; this.shadow.append(style);
-    this.visualLoader = new VisualViewerLoader(this.visualContainer, loadVerifiedViewer, () => { this.hideVisual(); this.open(); });
+    this.visualLoader = new VisualViewerLoader(this.visualContainer, signal => loadVerifiedViewer(signal, options.endpoint), () => { this.hideVisual(); this.open(); });
     const modes = element('div', 'assistant-modes'); modes.setAttribute('role', 'group'); modes.setAttribute('aria-label', 'Assistant mode');
     for (const [mode, label] of [['guide', 'Guide me'], ['explain', 'Explain']] as const) {
       const select = button(label, '', () => { if (mode === 'explain') this.visualLoader.preload(); this.handlers.mode?.(mode); }); select.setAttribute('aria-pressed', String(mode === 'guide')); modes.append(select); this.modeButtons.set(mode, select);
