@@ -13,8 +13,8 @@ const stage = (page: Page) => viewer(page).getByRole('group', { name: '3D model.
 const viewerChunk = /\/viewer3d(?:-[a-f0-9]{24})?\.mjs(?:\?|$)/;
 interface Ask { message: string; page: PageContext; assistant?: AssistantContext; }
 interface SessionInstance extends GuideKitInstance { startSession(mode?: 'guide' | 'explain'): void; setMode(mode: 'guide' | 'explain'): void; stopSession(): void; }
-interface SpeechProbe { started: number; stopped: number; aborted: number; autoStart: boolean; denied: boolean; finalText: string; result(text: string): void; end(): void; late(text: string): void; }
-interface ExplainProbe { instance: SessionInstance; collects: number; revision: number; speech: SpeechProbe; timings: { responseJsonToGeometryMs: number[]; localFocusToSelectionMs: number[] }; measureFocus: boolean; }
+interface SpeechProbe { started: number; stopped: number; aborted: number; autoStart: boolean; autoFinalize: boolean; denied: boolean; finalText: string; result(text: string): void; end(): void; late(text: string): void; }
+interface ExplainProbe { instance: SessionInstance; collects: number; revision: number; speech: SpeechProbe; timings: { responseJsonToGeometryMs: number[]; localFocusToSelectionMs: number[] }; measureFocus: boolean; wheelPrevented: boolean[]; }
 type ProbeWindow = Window & { __guidekitExplainProbe: ExplainProbe };
 interface Camera { position: number[]; target: number[]; }
 
@@ -32,9 +32,9 @@ async function installProbe(page: Page, fallback = false) {
     type ResultEvent = { resultIndex: number; results: { length: number; [key: number]: { isFinal: boolean; [key: number]: { transcript: string } } } };
     const result = (text: string): ResultEvent => ({ resultIndex: 0, results: { length: 1, 0: { isFinal: true, 0: { transcript: text } } } });
     let current: Recognition | null = null, lateStart: (() => void) | null = null, lateEnd: (() => void) | null = null, lateResult: ((event: ResultEvent) => void) | null = null;
-    const speech: SpeechProbe = { started: 0, stopped: 0, aborted: 0, autoStart: true, denied: false, finalText: 'Show a rocket in 3D', result: text => current?.onresult?.(result(text)), end: () => current?.onend?.(), late: text => { lateStart?.(); lateResult?.(result(text)); lateEnd?.(); } };
+    const speech: SpeechProbe = { started: 0, stopped: 0, aborted: 0, autoStart: true, autoFinalize: true, denied: false, finalText: 'Show a rocket in 3D', result: text => current?.onresult?.(result(text)), end: () => current?.onend?.(), late: text => { lateStart?.(); lateResult?.(result(text)); lateEnd?.(); } };
     // The public instance is assigned by the intercepted mount below.
-    const probe = { collects: 0, revision: 0, speech, timings: { responseJsonToGeometryMs: [], localFocusToSelectionMs: [] }, measureFocus: false } as unknown as ExplainProbe;
+    const probe = { collects: 0, revision: 0, speech, timings: { responseJsonToGeometryMs: [], localFocusToSelectionMs: [] }, measureFocus: false, wheelPrevented: [] } as unknown as ExplainProbe;
     (window as unknown as ProbeWindow).__guidekitExplainProbe = probe;
     let presentation: { at: number; runId: string } | null = null, focusAt: number | null = null;
     const json = Response.prototype.json;
@@ -46,12 +46,13 @@ async function installProbe(page: Page, fallback = false) {
     document.addEventListener('click', event => {
       if (probe.measureFocus && event.composedPath().some(node => node instanceof HTMLButtonElement && node.getAttribute('aria-label') === 'Send question')) { focusAt = performance.now(); probe.measureFocus = false; }
     }, true);
+    document.addEventListener('wheel', event => queueMicrotask(() => probe.wheelPrevented.push(event.defaultPrevented)), { passive: true });
     class Recognition {
       lang = ''; continuous = false; interimResults = false;
       onstart: (() => void) | null = null; onend: (() => void) | null = null;
       onresult: ((event: ResultEvent) => void) | null = null; onerror: ((event: { error: string }) => void) | null = null;
       start() { current = this; speech.started++; lateStart = this.onstart; lateEnd = this.onend; lateResult = this.onresult; queueMicrotask(() => { if (speech.denied) this.onerror?.({ error: 'not-allowed' }); else if (speech.autoStart) this.onstart?.(); }); }
-      stop() { speech.stopped++; queueMicrotask(() => { this.onresult?.(result(speech.finalText)); this.onend?.(); }); }
+      stop() { speech.stopped++; if (speech.autoFinalize) queueMicrotask(() => { this.onresult?.(result(speech.finalText)); this.onend?.(); }); }
       abort() { speech.aborted++; }
     }
     class Utterance { lang = ''; rate = 1; onstart: (() => void) | null = null; onend: (() => void) | null = null; onerror: (() => void) | null = null; constructor(readonly text: string) {} }
@@ -337,4 +338,24 @@ test('Control-click, Escape and simulated page hiding cancel a held recording wi
     await page.waitForTimeout(180); expect(state.asks, interruption).toHaveLength(0);
   }
   await expect(viewer(page)).toHaveCount(0);
+});
+
+test('Control-wheel preserves native wheel behavior and discards a hold, while a released transcript can still finalize', async ({ page }) => {
+  const state = await openFixture(page); await explain(page); await page.mouse.move(140, 200);
+  await page.keyboard.down('Control'); await page.mouse.wheel(0, 120);
+  await expect.poll(() => page.evaluate(() => (window as unknown as ProbeWindow).__guidekitExplainProbe.wheelPrevented.length)).toBe(1);
+  await page.keyboard.up('Control'); await page.waitForTimeout(180);
+  expect(await page.evaluate(() => (window as unknown as ProbeWindow).__guidekitExplainProbe.speech.started)).toBe(0); expect(state.asks).toHaveLength(0);
+  await page.keyboard.down('Control'); await expect(root(page)).toHaveAttribute('data-gk-session-phase', 'listening');
+  await page.mouse.wheel(0, 120);
+  await expect.poll(() => page.evaluate(() => (window as unknown as ProbeWindow).__guidekitExplainProbe.speech.aborted)).toBeGreaterThan(0);
+  await page.keyboard.up('Control'); expect(state.asks).toHaveLength(0);
+  await page.evaluate(() => { (window as unknown as ProbeWindow).__guidekitExplainProbe.speech.autoFinalize = false; });
+  await page.keyboard.down('Control'); await expect(root(page)).toHaveAttribute('data-gk-session-phase', 'listening');
+  await page.keyboard.up('Control'); await expect(root(page)).toHaveAttribute('data-gk-session-phase', 'finalizing');
+  await page.mouse.wheel(0, 120);
+  const response = page.waitForResponse(response => response.url().endsWith('/api/embed/session/ask'));
+  await page.evaluate(() => { const speech = (window as unknown as ProbeWindow).__guidekitExplainProbe.speech; speech.result('Show a rocket in 3D'); speech.end(); });
+  expect((await response).status()).toBe(200); await shown(page); expect(state.asks).toHaveLength(1);
+  expect(await page.evaluate(() => (window as unknown as ProbeWindow).__guidekitExplainProbe.wheelPrevented)).toEqual([false, false, false]);
 });
