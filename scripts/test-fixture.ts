@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import type { Server } from 'node:http';
 import { createApp, type InferenceProvider } from '../apps/server/src/app.js';
 import type { Citation, PageContext } from '../packages/contracts/src/index.js';
+import { rocketScene } from '../tests/fixtures/explanation.js';
 
 const sourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 // A worktree can test the coordinator's build; fresh CI checkouts use their own dist.
@@ -29,6 +30,12 @@ const provider: InferenceProvider = {
     const page = reference<PageContext>(prompt, 'Live page (reference data): ');
     const question = reference<string>(prompt, 'User request (reference data): ');
     const citations = reference<Citation[]>(prompt, 'Knowledge excerpts (reference data): ');
+    const assistantLine = prompt.split('\n\n').find(value => value.startsWith('Assistant request context: '));
+    const assistant = assistantLine ? JSON.parse(assistantLine.slice('Assistant request context: '.length)) as { mode: string; capabilities: { scene3d?: number } } : undefined;
+    if (assistant?.mode === 'explain') {
+      const visual = assistant.capabilities.scene3d === 1 && !question.toLowerCase().includes('in words') ? rocketScene(question.toLowerCase().includes('engine') ? 'engine' : null) : null;
+      return JSON.stringify({ answer: visual ? 'Explore this conceptual rocket. Select a labelled part or rotate the view.' : 'A rocket produces thrust by expelling gas. Its engine accelerates gas in the opposite direction to its motion.', steps: [], action: null, citationIds: citations.map(citation => citation.documentId).slice(0, 1), journeyDisposition: 'done', visual });
+    }
     const has = (name: string) => page.actions.some(action => action.name === name);
     let action: { name: string; argumentsJson: string; reason: string } | null = null;
     if (question.startsWith('Create a contact') && has('create_contact')) {
