@@ -4,22 +4,34 @@ import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile, cp, rm } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 
-const SDK_VERSION = '0.4.6-alpha.1';
+const SDK_VERSION = '0.5.0-alpha.1';
 export async function buildSDK() {
   const output = resolve('dist/sdk'), packageDir = resolve('dist/sdk-package');
   await mkdir(output, { recursive: true });
-  await build({ entryPoints: ['packages/sdk/src/index.ts'], outfile: join(output, 'guidekit.js'), bundle: true, format: 'iife', globalName: 'GuideKitSDK', target: 'es2022', minify: true, sourcemap: false });
-  await build({ entryPoints: ['packages/sdk/src/index.ts'], outfile: join(output, 'guidekit.mjs'), bundle: true, format: 'esm', target: 'es2022', minify: true, sourcemap: false });
+  // Keep Three.js off the normal guidance startup path. Both core formats load
+  // the same same-origin, immutable renderer only for a validated explanation.
+  const threeLicense = await readFile(resolve('node_modules/three/LICENSE'), 'utf8');
+  const viewer = { name: 'guidekit-lazy-viewer', setup(builder: import('esbuild').PluginBuild) { builder.onResolve({ filter: /^\.\/viewer3d$/ }, () => ({ path: './viewer3d.mjs', external: true })); } };
+  await build({ entryPoints: ['packages/sdk/src/viewer3d.ts'], outfile: join(output, 'viewer3d.mjs'), bundle: true, format: 'esm', target: 'es2022', minify: true, sourcemap: false, banner: { js: `/*! Bundled Three.js license:\n${threeLicense.replaceAll('*/', '* /')}\n*/` } });
+  const visual = await readFile(join(output, 'viewer3d.mjs'));
+  const viewerFilename = `viewer3d-${createHash('sha256').update(visual).digest('hex').slice(0, 24)}.mjs`;
+  await cp(join(output, 'viewer3d.mjs'), join(output, viewerFilename));
+  const viewerIntegrity = `sha384-${createHash('sha384').update(visual).digest('base64')}`;
+  const define = { __GUIDEKIT_VIEWER_INTEGRITY__: JSON.stringify(viewerIntegrity), __GUIDEKIT_VIEWER_FILENAME__: JSON.stringify(viewerFilename) };
+  await build({ entryPoints: ['packages/sdk/src/index.ts'], outfile: join(output, 'guidekit.js'), bundle: true, format: 'iife', globalName: 'GuideKitSDK', target: 'es2022', minify: true, sourcemap: false, plugins: [viewer], define: { ...define, 'import.meta.url': 'undefined' } });
+  await build({ entryPoints: ['packages/sdk/src/index.ts'], outfile: join(output, 'guidekit.mjs'), bundle: true, format: 'esm', target: 'es2022', minify: true, sourcemap: false, plugins: [viewer], define });
   const script = await readFile(join(output, 'guidekit.js')), module = await readFile(join(output, 'guidekit.mjs'));
-  const release = createHash('sha256').update(script).update(module).digest('hex').slice(0, 24), releaseDir = join(output, 'releases', release);
+  const release = createHash('sha256').update(script).update(module).update(visual).digest('hex').slice(0, 24), releaseDir = join(output, 'releases', release);
   await mkdir(releaseDir, { recursive: true });
-  for (const file of ['guidekit.js', 'guidekit.mjs']) await cp(join(output, file), join(releaseDir, file));
-  const manifest = { version: SDK_VERSION, release, capabilities: { apiVersion: 1, explicitTargets: true, adaptiveJourneys: true, hostWorkflowProgress: true, guideTargetCatalog: true }, script: { path: `/sdk/releases/${release}/guidekit.js`, integrity: `sha384-${createHash('sha384').update(script).digest('base64')}` }, module: { path: `/sdk/releases/${release}/guidekit.mjs`, integrity: `sha384-${createHash('sha384').update(module).digest('base64')}` } };
+  for (const file of ['guidekit.js', 'guidekit.mjs', viewerFilename]) await cp(join(output, file), join(releaseDir, file));
+  const manifest = { version: SDK_VERSION, release, capabilities: { apiVersion: 1, explicitTargets: true, adaptiveJourneys: true, hostWorkflowProgress: true, guideTargetCatalog: true, activeSessions: true, controlHoldVoice: true, scene3d: 1 }, script: { path: `/sdk/releases/${release}/guidekit.js`, integrity: `sha384-${createHash('sha384').update(script).digest('base64')}` }, module: { path: `/sdk/releases/${release}/guidekit.mjs`, integrity: `sha384-${createHash('sha384').update(module).digest('base64')}` }, assets: { viewer3d: { path: `/sdk/releases/${release}/${viewerFilename}`, integrity: viewerIntegrity } } };
   await writeFile(join(output, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
   await writeFile(join(releaseDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
   await rm(packageDir, { recursive: true, force: true }); await mkdir(join(packageDir, 'dist'), { recursive: true });
   await cp(join(output, 'guidekit.mjs'), join(packageDir, 'dist', 'guidekit.mjs'));
   await cp(join(output, 'guidekit.js'), join(packageDir, 'dist', 'guidekit.js'));
+  await cp(join(output, viewerFilename), join(packageDir, 'dist', viewerFilename));
+  await writeFile(join(packageDir, 'dist', 'THIRD_PARTY_NOTICES.txt'), `Three.js (bundled in viewer3d.mjs)\n\n${threeLicense}`);
   const program = ts.createProgram(['packages/sdk/src/index.ts'], { declaration: true, emitDeclarationOnly: true, outDir: join(packageDir, 'dist/types'), rootDir: resolve('packages'), module: ts.ModuleKind.ESNext, moduleResolution: ts.ModuleResolutionKind.Bundler, target: ts.ScriptTarget.ES2023, lib: ['lib.es2023.d.ts', 'lib.dom.d.ts', 'lib.dom.iterable.d.ts'], strict: true, skipLibCheck: true, esModuleInterop: true });
   const diagnostics = [...ts.getPreEmitDiagnostics(program), ...program.emit().diagnostics];
   if (diagnostics.length) throw new Error(ts.formatDiagnosticsWithColorAndContext(diagnostics, { getCanonicalFileName: value => value, getCurrentDirectory: () => process.cwd(), getNewLine: () => '\n' }));
