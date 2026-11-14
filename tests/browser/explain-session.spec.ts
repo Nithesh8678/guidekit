@@ -1,4 +1,5 @@
-import { test as base, expect, type Page, type Route } from '@playwright/test';
+import { test as base, expect, type Page, type Route, type TestInfo } from '@playwright/test';
+import { writeFile } from 'node:fs/promises';
 import type { AssistantContext, PageContext, RunResult } from '../../packages/contracts/src/index.js';
 import type { GuideKitInstance } from '../../packages/sdk/src/types.js';
 
@@ -13,7 +14,7 @@ const viewerChunk = /\/viewer3d(?:-[a-f0-9]{24})?\.mjs(?:\?|$)/;
 interface Ask { message: string; page: PageContext; assistant?: AssistantContext; }
 interface SessionInstance extends GuideKitInstance { startSession(mode?: 'guide' | 'explain'): void; setMode(mode: 'guide' | 'explain'): void; stopSession(): void; }
 interface SpeechProbe { started: number; stopped: number; aborted: number; autoStart: boolean; denied: boolean; finalText: string; result(text: string): void; end(): void; late(text: string): void; }
-interface ExplainProbe { instance: SessionInstance; collects: number; revision: number; speech: SpeechProbe; }
+interface ExplainProbe { instance: SessionInstance; collects: number; revision: number; speech: SpeechProbe; timings: { responseJsonToGeometryMs: number[]; localFocusToSelectionMs: number[] }; measureFocus: boolean; }
 type ProbeWindow = Window & { __guidekitExplainProbe: ExplainProbe };
 interface Camera { position: number[]; target: number[]; }
 
@@ -32,8 +33,19 @@ async function installProbe(page: Page, fallback = false) {
     const result = (text: string): ResultEvent => ({ resultIndex: 0, results: { length: 1, 0: { isFinal: true, 0: { transcript: text } } } });
     let current: Recognition | null = null, lateStart: (() => void) | null = null, lateEnd: (() => void) | null = null, lateResult: ((event: ResultEvent) => void) | null = null;
     const speech: SpeechProbe = { started: 0, stopped: 0, aborted: 0, autoStart: true, denied: false, finalText: 'Show a rocket in 3D', result: text => current?.onresult?.(result(text)), end: () => current?.onend?.(), late: text => { lateStart?.(); lateResult?.(result(text)); lateEnd?.(); } };
-    const probe = { collects: 0, revision: 0, speech } as ExplainProbe;
+    // The public instance is assigned by the intercepted mount below.
+    const probe = { collects: 0, revision: 0, speech, timings: { responseJsonToGeometryMs: [], localFocusToSelectionMs: [] }, measureFocus: false } as unknown as ExplainProbe;
     (window as unknown as ProbeWindow).__guidekitExplainProbe = probe;
+    let presentation: { at: number; runId: string } | null = null, focusAt: number | null = null;
+    const json = Response.prototype.json;
+    Response.prototype.json = async function () {
+      const value = await Reflect.apply(json, this, []);
+      if (this.url.endsWith('/api/embed/session/ask') && this.ok && value?.visual?.kind === 'scene3d' && typeof value.runId === 'string') presentation = { at: performance.now(), runId: value.runId };
+      return value;
+    };
+    document.addEventListener('click', event => {
+      if (probe.measureFocus && event.composedPath().some(node => node instanceof HTMLButtonElement && node.getAttribute('aria-label') === 'Send question')) { focusAt = performance.now(); probe.measureFocus = false; }
+    }, true);
     class Recognition {
       lang = ''; continuous = false; interimResults = false;
       onstart: (() => void) | null = null; onend: (() => void) | null = null;
@@ -55,7 +67,18 @@ async function installProbe(page: Page, fallback = false) {
       const api = (event as CustomEvent).detail.api as Window['GuideKit'], mount = api.mount;
       api.mount = options => {
         const instance = mount({ ...options, journey: { enabled: false }, getContext: () => { probe.collects++; return { publicRevision: probe.revision }; } });
-        probe.instance = instance as SessionInstance; return instance;
+        probe.instance = instance as SessionInstance;
+        const shadow = document.querySelector('[data-guidekit-root]')?.shadowRoot;
+        if (shadow) {
+          const timing = new MutationObserver(() => {
+            const model = shadow.querySelector<HTMLElement>('[data-gk-viewer]');
+            if (presentation && model?.dataset.gkSceneRun === presentation.runId && Number(model.dataset.gkRenderedFrames) > 0) { probe.timings.responseJsonToGeometryMs.push(performance.now() - presentation.at); presentation = null; }
+            if (focusAt !== null && model?.querySelector('[data-gk-object-id="body"][aria-pressed="true"]')) { probe.timings.localFocusToSelectionMs.push(performance.now() - focusAt); focusAt = null; }
+          });
+          timing.observe(shadow, { subtree: true, childList: true, attributes: true, attributeFilter: ['data-gk-scene-run', 'data-gk-rendered-frames', 'aria-pressed'] });
+          window.addEventListener('pagehide', () => timing.disconnect(), { once: true });
+        }
+        return instance;
       };
     }, { once: true });
   }, { fallback });
@@ -102,6 +125,15 @@ async function shown(page: Page) {
 }
 async function camera(page: Page): Promise<Camera> { return JSON.parse((await viewer(page).getAttribute('data-gk-camera'))!); }
 function cameraDifference(a: Camera, b: Camera) { return Math.max(...a.position.map((value, index) => Math.abs(value - b.position[index]!)), ...a.target.map((value, index) => Math.abs(value - b.target[index]!))); }
+async function timingEvidence(page: Page, info: TestInfo, name: string) {
+  const path = info.outputPath(`${name}.json`);
+  const evidence = { renderer: await viewer(page).getAttribute('data-gk-renderer'), samples: await page.evaluate(() => (window as unknown as ProbeWindow).__guidekitExplainProbe.timings), methodology: {
+    responseJsonToGeometryMs: 'Completed response.json, immediately before SDK validation, to a committed matching scene-run and rendered-frame DOM update. Includes validation, rendering and mutation-observer delivery; no model or network time.',
+    localFocusToSelectionMs: 'Trusted Send click capture to the requested existing object selection DOM update. No model request or camera-paint latency is included.',
+  } };
+  await writeFile(path, JSON.stringify(evidence, null, 2));
+  await info.attach(name, { path, contentType: 'application/json' });
+}
 async function stop(page: Page) {
   await page.getByRole('button', { name: 'Stop session', exact: true }).click();
   await expect(root(page)).toHaveAttribute('data-gk-session-active', 'false'); await expect(root(page)).toHaveAttribute('data-gk-observing', 'false');
@@ -118,6 +150,7 @@ test('Explain preloads its pure verified module without a microphone, inference 
   const state = await openFixture(page); expect(state.chunks).toHaveLength(0); await explain(page);
   expect(state.asks).toHaveLength(0); await expect(viewer(page)).toHaveCount(0);
   await expect.poll(() => state.chunks.length).toBe(1);
+  await expect(page.locator('script[type="module"][src*="viewer3d"]')).toHaveCount(0);
   expect(await page.evaluate(() => (window as unknown as ProbeWindow).__guidekitExplainProbe.speech.started)).toBe(0);
   await expect(root(page)).toHaveAttribute('data-gk-observing', 'true');
   await ask(page, 'Explain how a rocket works in words'); await expect(viewer(page)).toHaveCount(0); expect(state.chunks).toHaveLength(1);
@@ -129,9 +162,10 @@ test('Explain preloads its pure verified module without a microphone, inference 
   expect(state.chunks, 'Preloading and rendering reuse one verified module fetch').toHaveLength(1);
   expect(state.asks.every(request => request.assistant?.mode === 'explain' && request.assistant.capabilities.scene3d === 1)).toBe(true);
   await testInfo.attach('generated-rocket-viewer', { body: await viewer(page).screenshot(), contentType: 'image/png' });
+  await timingEvidence(page, testInfo, 'loaded-module-presentation-timing');
 });
 
-test('a follow-up preserves the same interactive viewer, camera and selected object reference, while explicit focus changes it', async ({ page }) => {
+test('a follow-up preserves the same interactive viewer, camera and selected object reference, while explicit focus changes it', async ({ page }, testInfo) => {
   const state = await openFixture(page); await explain(page); const first = await ask(page, 'Show a rocket in 3D'); await shown(page);
   const original = await viewer(page).elementHandle(); if (!original) throw new Error('Expected an actual rendered viewer.');
   const before = await camera(page); await stage(page).focus(); await stage(page).press('ArrowRight');
@@ -146,11 +180,13 @@ test('a follow-up preserves the same interactive viewer, camera and selected obj
   await ask(page, 'Explain how the engine produces thrust and highlight it'); await shown(page);
   await expect.poll(async () => cameraDifference(await camera(page), orbited)).toBeGreaterThan(.01);
   const focused = await camera(page);
-  await (await composer(page)).fill('Focus the Fuel tanks'); await chat(page).getByRole('button', { name: 'Send question', exact: true }).click();
+  await (await composer(page)).fill('Focus the Fuel tanks'); await page.evaluate(() => { (window as unknown as ProbeWindow).__guidekitExplainProbe.measureFocus = true; });
+  await chat(page).getByRole('button', { name: 'Send question', exact: true }).click();
   await shown(page); await expect(viewer(page).getByRole('button', { name: 'Select Fuel tanks', exact: true })).toHaveAttribute('aria-pressed', 'true');
   await expect.poll(async () => cameraDifference(await camera(page), focused)).toBeGreaterThan(.01);
   expect(await viewer(page).evaluate((node, retained) => node === retained, original)).toBe(true);
   await original.dispose(); expect(state.asks, 'A unique existing-object focus uses the actual current scene without another inference').toHaveLength(3);
+  await timingEvidence(page, testInfo, 'scene-update-and-local-focus-timing');
 });
 
 test('small screens retain keyboard orbit, zoom, reset and accessible object selection without horizontal overflow', async ({ page }) => {
@@ -292,7 +328,7 @@ test('Control-click, Escape and simulated page hiding cancel a held recording wi
   for (const interruption of ['control-click', 'Escape', 'hidden'] as const) {
     await page.evaluate(() => { const instance = (window as unknown as ProbeWindow).__guidekitExplainProbe.instance; instance.startSession('explain'); instance.open(); });
     await page.keyboard.down('Control'); await expect(root(page)).toHaveAttribute('data-gk-session-phase', 'listening');
-    if (interruption === 'control-click') { await page.locator('input[name="email"]').click(); await page.keyboard.press('Escape'); }
+    if (interruption === 'control-click') { await page.locator('#contact-search').click(); await page.keyboard.press('Escape'); }
     else if (interruption === 'Escape') await page.keyboard.press('Escape');
     else await page.evaluate(() => { Object.defineProperty(document, 'hidden', { configurable: true, value: true }); Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' }); document.dispatchEvent(new Event('visibilitychange')); });
     await page.keyboard.up('Control');
