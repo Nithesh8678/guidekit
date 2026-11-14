@@ -27,6 +27,10 @@ export class ControlHold {
     const started = this.started; this.started = false;
     if (started) this.callbacks.finish();
   }
+  /** Control+wheel is a native zoom gesture, not a voice commitment. */
+  wheel(event: { isTrusted: boolean }): void {
+    if (!this.destroyed && event.isTrusted && this.pressed) this.cancel();
+  }
   cancel(): void {
     this.clearTimer(); this.pressed = false;
     const started = this.started; this.started = false;

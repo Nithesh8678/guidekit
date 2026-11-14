@@ -71,6 +71,7 @@ export class Assistant implements GuideKitInstance {
   private inferenceTail: Promise<void> = Promise.resolve();
   private readonly holdKeydown = (event: KeyboardEvent) => { if (!this.privateFocus(event.target)) this.hold.keydown(event); else this.hold.cancel(); };
   private readonly holdKeyup = (event: KeyboardEvent) => this.hold.keyup(event);
+  private readonly holdWheel = (event: WheelEvent) => this.hold.wheel(event);
   private readonly interruptHold = () => this.hold.cancel();
   private readonly blur = () => { this.hold.cancel(); if (this.voice.active) this.voice.stopInput(); };
   private readonly visibility = () => { if (document.hidden) this.blur(); this.publishSessionState(); };
@@ -140,6 +141,7 @@ export class Assistant implements GuideKitInstance {
     if (this.sessionActive) { if (mode !== this.mode) this.setMode(mode); return; }
     this.mode = mode; this.sessionActive = true; this.sessionEpoch++; this.sessionLifetime = new AbortController();
     document.addEventListener('keydown', this.holdKeydown, true); document.addEventListener('keyup', this.holdKeyup, true);
+    document.addEventListener('wheel', this.holdWheel, { capture: true, passive: true });
     document.addEventListener('pointerdown', this.interruptHold, true); document.addEventListener('compositionstart', this.interruptHold, true);
     document.addEventListener('visibilitychange', this.visibility); window.addEventListener('blur', this.blur);
     this.watchActiveSession(); this.setPhase('observing'); this.prepareRuntime();
@@ -158,6 +160,7 @@ export class Assistant implements GuideKitInstance {
     if (this.destroyed) return;
     this.sessionActive = false; this.sessionEpoch++; this.sessionLifetime?.abort(); this.sessionLifetime = null; this.voiceOwner = null; this.hold.cancel();
     document.removeEventListener('keydown', this.holdKeydown, true); document.removeEventListener('keyup', this.holdKeyup, true);
+    document.removeEventListener('wheel', this.holdWheel, true);
     document.removeEventListener('pointerdown', this.interruptHold, true); document.removeEventListener('compositionstart', this.interruptHold, true);
     document.removeEventListener('visibilitychange', this.visibility); window.removeEventListener('blur', this.blur);
     this.sceneObserver?.destroy(); this.sceneObserver = null; this.latestSnapshot = null;
