@@ -1,5 +1,7 @@
 import { test as base, expect, type Page, type Route, type TestInfo } from '@playwright/test';
 import { writeFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
+import { build } from 'esbuild';
 import type { AssistantContext, PageContext, RunResult } from '../../packages/contracts/src/index.js';
 import type { GuideKitInstance } from '../../packages/sdk/src/types.js';
 
@@ -106,7 +108,7 @@ async function openFixture(page: Page, fallback = false) {
   await page.goto(`${website}/?agentId=${encodeURIComponent(agent.id)}`);
   await page.getByRole('button', { name: 'Open Explanation guide', exact: true }).click();
   await expect(chat(page)).toBeVisible();
-  return { asks, chunks };
+  return { asks, chunks, agentId: agent.id };
 }
 
 async function explain(page: Page) {
@@ -170,6 +172,30 @@ test('Explain preloads its pure verified module without a microphone, inference 
   expect(state.asks.every(request => request.assistant?.mode === 'explain' && request.assistant.capabilities.scene3d === 1)).toBe(true);
   await testInfo.attach('generated-rocket-viewer', { body: await viewer(page).screenshot(), contentType: 'image/png' });
   await timingEvidence(page, testInfo, 'loaded-module-presentation-timing');
+});
+
+test('an npm ESM consumer bundled into a host application chunk loads its verified renderer from the configured endpoint', async ({ page }, testInfo) => {
+  const state = await openFixture(page);
+  const assetRoot = process.env.GUIDEKIT_TEST_ASSET_ROOT ?? process.cwd();
+  const packagedModule = resolve(assetRoot, 'dist/sdk-package/dist/guidekit.mjs');
+  const output = await build({
+    stdin: { contents: `import { GuideKit } from ${JSON.stringify(packagedModule)}; const instance = GuideKit.mount({ agentId: ${JSON.stringify(state.agentId)}, endpoint: ${JSON.stringify(endpoint)}, journey: { enabled: false } }); await instance.ready; instance.open();`, resolveDir: assetRoot, sourcefile: 'package-consumer.js' },
+    bundle: true, write: false, format: 'esm', platform: 'browser', target: 'es2022',
+  });
+  const hostChunk = `${website}/assets/application-chunk.mjs`;
+  await page.route(hostChunk, route => route.fulfill({ contentType: 'text/javascript', body: output.outputFiles[0]!.text }));
+  // Keep an actual loopback HTTP document so Chromium's local-network address
+  // space policy is exercised normally; only the consumer chunk is routed.
+  await page.goto(`${website}/?install=manual`);
+  await page.addScriptTag({ type: 'module', url: hostChunk });
+  await expect(chat(page)).toBeVisible(); await explain(page);
+  const run = await ask(page, 'Show a rocket in 3D');
+  await testInfo.attach('packaged-renderer-module-requests', { body: JSON.stringify(state.chunks, null, 2), contentType: 'application/json' });
+  await shown(page);
+  expect(run.visual?.objects.map(object => object.id)).toEqual(['body', 'payload', 'engine']);
+  await expect(viewer(page)).toHaveAttribute('data-gk-mesh-count', /^[1-9]\d*$/);
+  expect(state.chunks.length).toBeGreaterThan(0);
+  expect(state.chunks.every(url => new URL(url).origin === endpoint), 'Bundling does not relocate the verified renderer into the host application assets').toBe(true);
 });
 
 test('a follow-up preserves the same interactive viewer, camera and selected object reference, while explicit focus changes it', async ({ page }, testInfo) => {
