@@ -9,7 +9,7 @@ const root = (page: Page) => page.locator('[data-guidekit-root]');
 const chat = (page: Page) => page.getByRole('dialog', { name: 'Website assistant', includeHidden: true });
 const viewer = (page: Page) => page.getByRole('region', { name: 'Interactive 3D explanation', includeHidden: true });
 const stage = (page: Page) => viewer(page).getByRole('group', { name: '3D model. Arrow keys rotate, plus and minus zoom, Home resets.', exact: true });
-const viewerChunk = /\/viewer3d(?:[.-][a-zA-Z0-9_-]+)?\.mjs(?:\?|$)/;
+const viewerChunk = /\/viewer3d(?:-[a-f0-9]{24})?\.mjs(?:\?|$)/;
 interface Ask { message: string; page: PageContext; assistant?: AssistantContext; }
 interface SessionInstance extends GuideKitInstance { startSession(mode?: 'guide' | 'explain'): void; setMode(mode: 'guide' | 'explain'): void; stopSession(): void; }
 interface SpeechProbe { started: number; stopped: number; aborted: number; autoStart: boolean; denied: boolean; finalText: string; result(text: string): void; end(): void; late(text: string): void; }
@@ -114,18 +114,19 @@ async function holdResponse(page: Page) {
   return { ready: arrived, release, dispose: async () => { release(); await page.unroute('**/api/embed/session/ask', handler); } };
 }
 
-test('mode activation starts observation without a microphone, inference or viewer chunk; only a generated scene loads 3D', async ({ page }, testInfo) => {
-  const state = await openFixture(page); await explain(page);
-  expect(state.asks).toHaveLength(0); expect(state.chunks).toHaveLength(0);
+test('Explain preloads its pure verified module without a microphone, inference or geometry, then renders a generated scene', async ({ page }, testInfo) => {
+  const state = await openFixture(page); expect(state.chunks).toHaveLength(0); await explain(page);
+  expect(state.asks).toHaveLength(0); await expect(viewer(page)).toHaveCount(0);
+  await expect.poll(() => state.chunks.length).toBe(1);
   expect(await page.evaluate(() => (window as unknown as ProbeWindow).__guidekitExplainProbe.speech.started)).toBe(0);
   await expect(root(page)).toHaveAttribute('data-gk-observing', 'true');
-  await ask(page, 'Explain how a rocket works in words'); await expect(viewer(page)).toHaveCount(0); expect(state.chunks).toHaveLength(0);
+  await ask(page, 'Explain how a rocket works in words'); await expect(viewer(page)).toHaveCount(0); expect(state.chunks).toHaveLength(1);
   const run = await ask(page, 'Show that rocket in 3D'); await shown(page);
   expect(run.visual?.objects.map(object => object.id)).toEqual(['body', 'payload', 'engine']);
   await expect(viewer(page).getByRole('button', { name: 'Select Fuel tanks', exact: true })).toBeVisible();
   await expect(viewer(page).getByRole('button', { name: 'Select Payload fairing', exact: true })).toBeVisible();
   await expect(viewer(page).getByRole('button', { name: 'Select Rocket engine', exact: true })).toBeVisible();
-  expect(state.chunks.length).toBeGreaterThan(0);
+  expect(state.chunks, 'Preloading and rendering reuse one verified module fetch').toHaveLength(1);
   expect(state.asks.every(request => request.assistant?.mode === 'explain' && request.assistant.capabilities.scene3d === 1)).toBe(true);
   await testInfo.attach('generated-rocket-viewer', { body: await viewer(page).screenshot(), contentType: 'image/png' });
 });
@@ -217,12 +218,15 @@ for (const terminal of ['stop', 'destroy'] as const) test(`${terminal} rejects a
 });
 
 test('a viewer chunk completing after Stop cannot mount a scene or restart a frame loop', async ({ page }) => {
-  const state = await openFixture(page); await explain(page);
+  const state = await openFixture(page);
   let release!: () => void, arrived!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; }), ready = new Promise<void>(resolve => { arrived = resolve; });
   await page.route(viewerChunk, async route => { const response = await route.fetch(); arrived(); await gate; await route.fulfill({ response }).catch(() => {}); });
   try {
-    await (await composer(page)).fill('Show a rocket in 3D'); await chat(page).getByRole('button', { name: 'Send question', exact: true }).click(); await ready;
+    await explain(page); await ready;
+    await (await composer(page)).fill('Show a rocket in 3D');
+    const response = page.waitForResponse(response => response.url().endsWith('/api/embed/session/ask'));
+    await chat(page).getByRole('button', { name: 'Send question', exact: true }).click(); expect((await response).status()).toBe(200);
     await stop(page); release(); await page.waitForTimeout(400); await expect(viewer(page)).toHaveCount(0);
     expect(state.asks).toHaveLength(1); await expect(root(page)).toHaveAttribute('data-gk-session-active', 'false');
   } finally { release(); await page.unrouteAll({ behavior: 'wait' }); }
