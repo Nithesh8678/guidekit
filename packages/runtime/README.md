@@ -35,13 +35,24 @@ An explicit `model` option must be present in that account's advertised catalog.
 `outputSchema` constrains the final JSON; the application must still validate
 and authorize every target, citation, and proposed action before use.
 
+The shared planner instructions describe both Guide and Explain. When the
+application declares a supported procedural 3D renderer, the model can describe
+a bounded scene in the supplied schema. This is data for the browser to validate
+and render, not a model tool or image-generation capability. Undeclared rendering
+capabilities are not assumed. The server supplies the active mode, allowed shapes,
+current validated scene and selected object; scene proposals never prove that
+presentation succeeded. Concise scenes are preferred, normally 6–14 meaningful
+objects unless the subject requires more within the schema's hard bounds. This
+does not change tool restrictions, model/account selection or hosted opt-in.
+
 `status()` reports login separately from a completed inference in this process.
 Only `infer()` success records live verification. A 90-second timeout and caller
 AbortSignal terminate inference. Codex stderr and account metadata are never
 forwarded to the UI or logs.
 
 `infer({ onTiming })` can report duration-only phase diagnostics: `startup`,
-`restrictions`, `authentication`, `catalog`, `thread`, `inference`, and `cleanup`.
+`restrictions`, `authentication`, `catalog`, `thread`, `first_delta`, `inference`,
+and `cleanup`.
 Each event contains only `phase`, `durationMs`, and `elapsedMs`; it contains no
 prompt, model output, account identity, paths, or credentials. Startup includes
 private-directory preparation, process launch, and initialization on the cold
@@ -50,11 +61,25 @@ zero if ready, or measures the remaining preparation wait. Background preparatio
 time is deliberately excluded from request latency and is not eliminated work.
 Claim-time restrictions and authentication checks are still measured. The inference
 phase ends at completed model output, separately from subprocess/state cleanup.
+`first_delta` is optional: it records the time from `turn/start` dispatch to the
+first nonempty `item/agentMessage/delta` belonging to the exact active thread.
+It is emitted once and contains only numeric durations. Reasoning deltas, other
+threads, unscoped or empty events, and deltas after completion are ignored. Its
+`elapsedMs` uses the same request-relative origin as the other phases. It is not
+a completed answer or rendering acknowledgment. An interrupted or invalid turn
+can have a first-delta timing and still fail. No model prefix or private reasoning
+is streamed to the application; only completed final JSON can be returned.
 Completed, failed, and cancelled phases are measured, and observer exceptions do
 not change inference or enforcement. The separately enabled hosted provider
 reports its `inference` phase only. These measurements describe runtime phases;
 website collection, retrieval, rendering, and host outcomes require separate
 measurement.
+
+Inference still waits for subprocess termination and temporary-state cleanup.
+This preserves the existing one-shot isolation and shutdown guarantees. No live
+latency improvement is claimed by adding diagnostics; first-delta, full-answer,
+cleanup and browser presentation times must be benchmarked separately with the
+same model, prompt set and cold/prepared conditions.
 
 This is a local single-owner demo integration. It must not be exposed as a
 shared hosted service using the owner's subscription.

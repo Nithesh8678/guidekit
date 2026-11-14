@@ -6,8 +6,11 @@ import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { createCodexProvider, type InferenceTiming } from './index.js';
+import { visualSceneOutputSchema, visualSceneSchema } from '../../contracts/src/index.js';
 
 const schema = { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'], additionalProperties: false };
+const visual = { kind: 'scene3d', id: 'test_scene', title: 'A labelled cylinder', summary: 'A procedural explanation fixture.', focusId: 'body', objects: [{ id: 'body', label: 'Body', description: 'Synthetic cylinder.', shape: 'cylinder', position: [0, 0, 0], rotation: [0, 0, 0], size: [1, 2, 1], color: '#f2b544' }] };
+const visualSchema = { ...schema, properties: { ...schema.properties, visual: visualSceneOutputSchema }, required: ['answer', 'visual'] };
 
 // A local protocol fixture, never a replacement provider in the application.
 async function fixture(mode: string, callback: (bin: string, directory: string) => Promise<void>) {
@@ -36,19 +39,30 @@ lines.on('line',line=>{
  if(m.method==='initialize'){if(mode==='prepare-wait')return;return reply(m,{});}
  if(m.method==='config/read'){configReads++;return reply(m,{config:{features:{...features,...(mode==='claim-capability'&&configReads>1?{shell_tool:true}:{})},mcp_servers:{},web_search:'disabled'}});}
  if(m.method==='account/read'){accountReads++;return reply(m,{account:{type:mode==='apikey'||mode==='claim-apikey'&&accountReads>1?'apiKey':'chatgpt',email:mode==='claim-account'&&accountReads>1?'changed@example.invalid':'fixture@example.invalid'}});}
- if(m.method==='model/list'){reply(m,{data:[{model:'fixture-default',isDefault:true,hidden:false,supportedReasoningEfforts:[],defaultReasoningEffort:'low'}]});setTimeout(()=>record('catalog-settled'),20);return;}
+ if(m.method==='model/list'){reply(m,{data:[{model:'fixture-default',isDefault:true,hidden:false,supportedReasoningEfforts:mode==='effort-low'?[{reasoningEffort:'low'}]:mode==='effort-fallback'?[{reasoningEffort:'medium'}]:[],defaultReasoningEffort:mode==='effort-low'?'high':mode==='effort-fallback'?'medium':'low'}]});setTimeout(()=>record('catalog-settled'),20);return;}
  if(m.method==='thread/start'){
   if(m.params.sandbox!=='read-only'||m.params.approvalPolicy!=='never'||m.params.ephemeral!==true)process.exit(2);
+  if(mode==='visual'&&(!m.params.baseInstructions.includes('procedural 3D')||!m.params.baseInstructions.includes('You have no tools')||!m.params.developerInstructions.includes('no code')))process.exit(4);
   return reply(m,{thread:{id:'fixture-thread'},model:m.params.model});
  }
  if(m.method==='turn/start'){
   if(!m.params.outputSchema||m.params.input[0].text!=='fixture prompt')process.exit(3);
+  if(mode==='effort-low'&&m.params.effort!=='low'||mode==='effort-fallback'&&m.params.effort!=='medium')process.exit(5);
+  if(mode==='visual'&&!m.params.outputSchema.properties.visual)process.exit(6);
   reply(m,{turn:{id:'fixture-turn',status:'inProgress'}});
   if(mode==='wait')return;
   if(mode==='tool'){send({method:'item/started',params:{item:{type:'commandExecution'}}});return;}
   if(mode==='server-request'){send({id:500,method:'item/tool/call',params:{}});return;}
-  send({method:'item/completed',params:{threadId:'fixture-thread',item:{type:'agentMessage',text:mode==='invalid'?'not json':'{"answer":"verified"}'}}});
+  const delta=(threadId,value)=>send({method:'item/agentMessage/delta',params:{...(threadId?{threadId}:{}),delta:value}});
+  if(mode.startsWith('delta')){
+   delta('another-thread','synthetic-private-other-thread');delta(null,'synthetic-private-unscoped');delta('fixture-thread','');delta('fixture-thread',99);
+   send({method:'item/reasoning/textDelta',params:{threadId:'fixture-thread',delta:'synthetic-private-reasoning'}});
+   if(['delta','delta-wait','delta-invalid'].includes(mode)){delta('fixture-thread','synthetic-private-first-prefix');delta('fixture-thread','synthetic-private-second-prefix');}
+   if(mode==='delta-wait')return;
+  }
+  send({method:'item/completed',params:{threadId:'fixture-thread',item:{type:'agentMessage',text:mode==='invalid'||mode==='delta-invalid'?'not json':mode==='visual'?${JSON.stringify(JSON.stringify({ answer: 'verified', visual }))}:'{"answer":"verified"}'}}});
   send({method:'turn/completed',params:{threadId:'fixture-thread',turn:{status:'completed'}}});
+  if(mode==='delta-late')delta('fixture-thread','synthetic-private-late-prefix');
  }
 });
 `, { mode: 0o700 });
@@ -150,6 +164,68 @@ test('rejects invalid model JSON', async () => {
     const provider = createCodexProvider({ bin, cwd });
     try { await assert.rejects(provider.infer({ prompt: 'fixture prompt', schema }), /invalid JSON/); }
     finally { await provider.close(); }
+  });
+});
+
+test('declared procedural scenes pass through strict inference without enabling rendering or action tools', async () => {
+  await fixture('visual', async (bin, cwd) => {
+    const provider = createCodexProvider({ bin, cwd });
+    try {
+      const result = JSON.parse(await provider.infer({ prompt: 'fixture prompt', schema: visualSchema }));
+      assert.equal(result.answer, 'verified'); assert.deepEqual(visualSceneSchema.parse(result.visual), visual);
+      await assertNoRuntimeDirectories(cwd);
+    } finally { await provider.close(); }
+  });
+});
+
+for (const mode of ['effort-low', 'effort-fallback']) test(`reasoning effort respects the advertised catalog for ${mode}`, async () => {
+  await fixture(mode, async (bin, cwd) => {
+    const provider = createCodexProvider({ bin, cwd });
+    try { assert.deepEqual(JSON.parse(await provider.infer({ prompt: 'fixture prompt', schema })), { answer: 'verified' }); }
+    finally { await provider.close(); }
+  });
+});
+
+test('first delta is a once-only numeric checkpoint, never reasoning, another thread or an output prefix', async () => {
+  await fixture('delta', async (bin, cwd) => {
+    const provider = createCodexProvider({ bin, cwd }), timings: InferenceTiming[] = [];
+    try {
+      const result = await provider.infer({ prompt: 'fixture prompt', schema, onTiming: event => { timings.push(event); if (event.phase === 'first_delta') throw new Error('private observer error'); } });
+      assert.deepEqual(JSON.parse(result), { answer: 'verified' });
+      assert.deepEqual(timings.map(event => event.phase), ['startup', 'restrictions', 'authentication', 'catalog', 'thread', 'first_delta', 'inference', 'cleanup']);
+      const first = timings.find(event => event.phase === 'first_delta')!, inference = timings.find(event => event.phase === 'inference')!;
+      assert.deepEqual(Object.keys(first).sort(), ['durationMs', 'elapsedMs', 'phase']);
+      assert.ok(Number.isInteger(first.durationMs) && first.durationMs >= 0 && first.durationMs <= inference.durationMs);
+      assert.ok(Number.isInteger(first.elapsedMs) && first.elapsedMs >= first.durationMs);
+      assert.ok(timings.every((event, index) => !index || event.elapsedMs >= timings[index - 1]!.elapsedMs));
+      assert.doesNotMatch(JSON.stringify(timings), /private|fixture|answer|prefix/); assert.equal(JSON.stringify(timings).includes(cwd), false);
+      await assertNoRuntimeDirectories(cwd);
+    } finally { await provider.close(); }
+  });
+});
+
+for (const mode of ['delta-noise', 'delta-late']) test(`${mode} does not invent a first-delta observation`, async () => {
+  await fixture(mode, async (bin, cwd) => {
+    const provider = createCodexProvider({ bin, cwd }), timings: InferenceTiming[] = [];
+    try {
+      assert.deepEqual(JSON.parse(await provider.infer({ prompt: 'fixture prompt', schema, onTiming: event => timings.push(event) })), { answer: 'verified' });
+      assert.equal(timings.some(event => event.phase === 'first_delta'), false);
+    } finally { await provider.close(); }
+  });
+});
+
+test('a first delta cannot turn malformed final JSON or cancellation into verified success', async () => {
+  for (const mode of ['delta-invalid', 'delta-wait']) await fixture(mode, async (bin, cwd) => {
+    const provider = createCodexProvider({ bin, cwd }), timings: InferenceTiming[] = [], controller = new AbortController();
+    try {
+      await assert.rejects(provider.infer({ prompt: 'fixture prompt', schema, signal: controller.signal, onTiming: event => {
+        timings.push(event); if (mode === 'delta-wait' && event.phase === 'first_delta') controller.abort('private cancellation');
+      } }), mode === 'delta-wait' ? { name: 'AbortError' } : /invalid JSON/);
+      assert.equal(timings.filter(event => event.phase === 'first_delta').length, 1);
+      assert.equal(timings.at(-1)!.phase, 'cleanup');
+      assert.match((await provider.status()).message, /not yet been verified/);
+      assert.doesNotMatch(JSON.stringify(timings), /private|prefix/); await assertNoRuntimeDirectories(cwd);
+    } finally { await provider.close(); }
   });
 });
 
