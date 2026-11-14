@@ -274,6 +274,7 @@ export class View {
     this.messages.append(message); this.scroll(); return message;
   }
   knowledgeEvidence(container: HTMLElement, knowledge: RunResult['knowledge'], citations: Citation[]): void {
+    if (!citations.length) return;
     if (knowledge?.source === 'postgres') {
       container.append(element('div', 'sources', 'Grounded in published company knowledge')); this.scroll(); return;
     }
