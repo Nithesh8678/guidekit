@@ -91,7 +91,7 @@ export class Assistant implements GuideKitInstance {
     this.hold = new ControlHold({ enabled: () => this.sessionActive && !this.destroyed && !document.hidden && !this.voice.active && !this.view.mic.disabled && !this.privateFocus(document.activeElement), start: () => this.beginVoice(true, true, false), finish: () => this.voice.finishInput(), cancel: () => this.voice.stopInput() });
     const parts = (options.hotkey ?? 'mod+shift+k').toLowerCase().split('+'); const key = parts.at(-1);
     this.keyboard = event => {
-      if (event.key === 'Escape' && this.voice.active) { event.preventDefault(); this.hold.cancel(); this.voice.stopInput(); return; }
+      if (event.key === 'Escape' && this.voice.active) { event.preventDefault(); this.escapeVoice(); return; }
       if (event.key === 'Escape' && this.view.guiding) { event.preventDefault(); this.view.stopGuide(); this.voice.stopSpeaking(); return; }
       if (event.key === 'Escape' && (this.view.opened || this.voice.active)) { event.preventDefault(); this.close(); return; }
       if (!event.isTrusted || event.isComposing) return;
@@ -195,6 +195,13 @@ export class Assistant implements GuideKitInstance {
       this.setPhase('presenting', owner);
     } else this.setPhase(ending === 'error' ? 'error' : this.journey?.active ? 'paused' : this.lastVisual && this.mode === 'explain' ? 'presenting' : 'observing', owner);
     this.resumeAfterVoice = false;
+  }
+  private escapeVoice(): void {
+    // Paused/hidden guide sessions are still real goals. Decide before voice
+    // cleanup can resume that guide or finish a deferred host result.
+    const preserveGuide = this.view.guiding || Boolean(this.journey?.active);
+    this.hold.cancel(); this.voice.stopInput();
+    if (!preserveGuide) this.close();
   }
   private beginVoice(voiceFlow: boolean, hold = false, openChat = true): boolean {
     if (this.destroyed || this.voice.active) return false;
