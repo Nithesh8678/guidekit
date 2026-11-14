@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { VisualScene } from '../../contracts/src/visual';
 import { prepareVisual, visualCameraIntent, visualFitDistance } from '../src/viewer3d-model';
-import { VisualViewerLoader, type VisualViewer, type VisualViewerModule } from '../src/viewer3d-loader';
+import { verifiedViewerURL, VisualViewerLoader, type VisualViewer, type VisualViewerModule } from '../src/viewer3d-loader';
 import type { VisualPresentation } from '../src/session-types';
 
 const scene = (id = 'example'): VisualScene => ({ kind: 'scene3d', id, title: 'A procedural explanation', summary: 'Two real objects described by the scene.', focusId: null, objects: [
@@ -10,6 +10,16 @@ const scene = (id = 'example'): VisualScene => ({ kind: 'scene3d', id, title: 'A
   { id: 'joint', shape: 'sphere', label: 'Joint', description: 'A spherical joint.', color: '#e9ae36', position: [-2, 0, 0], rotation: [0, 0, 0], size: [1, 1, 1] }
 ] });
 const deferred = <T>() => { let resolve!: (value: T) => void, reject!: (reason: unknown) => void; const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
+
+test('verified viewer URLs use adjacent content-addressed modules across alias and immutable SDK installs', () => {
+  const filename = `viewer3d-${'a'.repeat(24)}.mjs`, next = `viewer3d-${'b'.repeat(24)}.mjs`, integrity = `sha384-${Buffer.alloc(48).toString('base64')}`;
+  for (const base of ['http://127.0.0.1:4410/sdk/guidekit.js', 'https://example.test/sdk/releases/current/guidekit.mjs']) {
+    const url = verifiedViewerURL(base, filename, integrity), newer = verifiedViewerURL(base, next, integrity);
+    assert.equal(url.origin, new URL(base).origin); assert.equal(url.pathname, new URL(`./${filename}`, base).pathname); assert.notEqual(url.href, newer.href);
+  }
+  for (const filename of ['viewer3d.mjs', '../viewer3d-aaaaaaaaaaaaaaaaaaaaaaaa.mjs', 'https://elsewhere.test/viewer3d-aaaaaaaaaaaaaaaaaaaaaaaa.mjs', 'viewer3d-not-a-hash.mjs']) assert.throws(() => verifiedViewerURL('https://example.test/sdk/guidekit.js', filename, integrity));
+  assert.throws(() => verifiedViewerURL('file:///sdk/guidekit.mjs', filename, integrity)); assert.throws(() => verifiedViewerURL('https://example.test/sdk/guidekit.js', filename, ''));
+});
 
 test('viewer preparation renders provided primitive types and exact authored transforms', () => {
   const spec = scene(); spec.objects = [spec.objects[0]!];

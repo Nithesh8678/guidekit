@@ -14,16 +14,23 @@ export interface VisualViewer {
 export interface VisualViewerModule { createViewer3D(container: HTMLElement, options: { onHide(): void }): VisualViewer; }
 const cancelled = () => new DOMException('The explanation presentation was replaced or stopped.', 'AbortError');
 declare const __GUIDEKIT_VIEWER_INTEGRITY__: string;
+declare const __GUIDEKIT_VIEWER_FILENAME__: string;
 const scriptBase = import.meta.url || (typeof document !== 'undefined' && document.currentScript instanceof HTMLScriptElement ? document.currentScript.src : '');
+
+export function verifiedViewerURL(base: string, filename: string, integrity: string): URL {
+  if (!base || !/^viewer3d-[a-f0-9]{24}\.mjs$/.test(filename) || !/^sha384-[A-Za-z0-9+/]+=*$/.test(integrity)) throw new Error('The verified explanation module is unavailable in this SDK build.');
+  const url = new URL(filename, base);
+  if (!['http:', 'https:'].includes(url.protocol)) throw new Error('The explanation module needs a trusted web origin.');
+  return url;
+}
 
 /** Only the adjacent build-owned, SRI-verified module may cross this boundary. */
 export function loadVerifiedViewer(signal?: AbortSignal): Promise<VisualViewerModule> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) { reject(cancelled()); return; }
     const integrity = typeof __GUIDEKIT_VIEWER_INTEGRITY__ === 'string' ? __GUIDEKIT_VIEWER_INTEGRITY__ : '';
-    if (!scriptBase || !/^sha384-[A-Za-z0-9+/]+=*$/.test(integrity)) { reject(new Error('The verified explanation module is unavailable in this SDK build.')); return; }
-    const url = new URL('./viewer3d.mjs', scriptBase);
-    if (!['http:', 'https:'].includes(url.protocol)) { reject(new Error('The explanation module needs a trusted web origin.')); return; }
+    const filename = typeof __GUIDEKIT_VIEWER_FILENAME__ === 'string' ? __GUIDEKIT_VIEWER_FILENAME__ : '';
+    let url: URL; try { url = verifiedViewerURL(scriptBase, filename, integrity); } catch (error) { reject(error); return; }
     const script = document.createElement('script'); script.type = 'module'; script.src = url.href; script.integrity = integrity; script.crossOrigin = 'anonymous';
     let settled = false;
     const finish = (error?: unknown, module?: VisualViewerModule) => {
