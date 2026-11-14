@@ -64,3 +64,16 @@ Run the browser commands sequentially. Journey fixtures use loopback ports 4610�
 - Cutroom has an opt-in connection in Provider and privacy settings. Follow the selected checkout's `docs/guidekit-integration.md` and its workflow tests; run fixtures with a separate workspace and generated media. Its isolated browser fixture can use port 5373 without opening your existing projects. A released SDK bundle, synthetic host acceptance and a live real-model workflow are separate checks.
 
 Automated checks: `npm run check`, `npm run test:e2e`, `npm run test:dashboard`, and `npm run test:dashboard:integration`. Run browser suites sequentially because some share fixture ports. The optional `npm run test:live` uses the local subscription; `npm run test:graph` checks the configured real graph with synthetic scopes. Physical speech quality, real input methods and packaged-device behavior remain separate human/device checks.
+
+## Active Guide and Explain acceptance
+
+Use a desktop Chrome/Edge browser at `http://127.0.0.1:4412/?agentId=YOUR_PUBLISHED_AGENT_ID` (the local dashboard's agent page supplies the current demo link).
+
+1. Open GuideKit and choose **Explain**. The page-observation status should activate, with no microphone permission request and no generated answer yet.
+2. Hold **Control**, speak, then release. Check that the listening indicator follows the actual recording and the question submits once. Text and the existing Cmd/Ctrl+Shift+K shortcut remain alternatives.
+3. Ask “Explain how a rocket works in words,” then “Show that as an interactive 3D rocket.” Wait for validated completion; new geometry can take tens of seconds on the local subscription runtime.
+4. Drag/zoom the model, use keyboard arrows/+/-/Home, select a labelled part, then ask “Focus the engine.” The existing object should focus without a model wait. Ask “Why does that engine create thrust?” to check a real conceptual follow-up retains the scene.
+5. Select **Guide me** and ask how to send a support request. Chat should tuck away, the curved cursor should settle before typing each instruction, and normal public-field progress should advance locally. Sending a request creates a real browser-persisted demo record; stopping before submit leaves it unchanged.
+6. Use **Stop session** during thinking or presentation. A late response must not reopen a model or guide. Control+another key, Control-click, Escape, blur and hidden-page transitions must not submit unwanted recordings. After a long idle session expires, an old scene is cleared with an explicit recovery message.
+
+Automated speech fixtures cover lifecycle failures; the visitor separately confirmed physical Control recording/release on 2026-11-14. Narration quality, other devices, host custom controls and production service latency remain separate acceptance checks.
