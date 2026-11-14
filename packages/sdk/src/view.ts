@@ -1,4 +1,4 @@
-import type { Citation, ModelPlan, PublicAgent, RunResult } from '../../contracts/src/index';
+import type { AssistantMode, Citation, ModelPlan, PublicAgent, RunResult, VisualScene } from '../../contracts/src/index';
 import { GuidanceSession, type GuidanceResult, type GuidanceState } from './guidance';
 import type { GuideStepResult } from './types';
 import { BeatScheduler, type SpeechEvents } from './beats';
@@ -8,8 +8,11 @@ import { GuidedReveal, revealedBounds, targetRevealed } from './scroll';
 import { isSafeTarget } from './context';
 import { placeGuidanceControls, placeGuidanceLabel, type PlacementBox } from './placement';
 import { INSTRUCTION_LAYOUT_MS, InstructionCadence, instructionGraphemes } from './instruction';
+import type { AssistantSessionState, VisualPresentation, VisualSelection } from './session-types';
+import { loadVerifiedViewer, VisualViewerLoader } from './viewer3d-loader';
 
 const styles = `
+.assistant-mode-row{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 18px 8px;flex-shrink:0}.assistant-modes{display:flex;gap:3px;padding:3px;border-radius:9px;background:#f1f4f9}.assistant-modes button{padding:5px 10px;background:transparent;color:#718099;font-size:11px;font-weight:600;border-radius:6px}.assistant-modes button[aria-pressed=true]{background:#fff;color:#31486e;box-shadow:0 1px 4px #17213b0b}.assistant-show-model{padding:5px 7px;background:transparent;color:#6d7890;font-size:10px;border-radius:6px}.assistant-session-row{display:flex;align-items:center;gap:7px;padding:0 18px 9px;flex-shrink:0;color:#7b879b;font-size:10px;line-height:1.5}.assistant-session-copy{flex:1;min-width:0;overflow-wrap:anywhere}.assistant-session-dot{width:5px;height:5px;flex-shrink:0;border-radius:50%;background:#b8c3d4}.assistant-session-row[data-observing=true] .assistant-session-dot,.assistant-session-hud[data-observing=true] .assistant-session-dot{background:#77a48c}.assistant-session-stop{padding:4px 7px;border-radius:6px;background:transparent;color:#8c6859;font-size:10px}.assistant-session-stop:hover{background:#fcf1eb}.assistant-session-hud{pointer-events:auto;position:fixed;top:10px;left:50%;transform:translateX(-50%);max-width:calc(100vw - 24px);display:flex;align-items:center;gap:8px;padding:5px 8px 5px 11px;border:1px solid #e2e7ef;border-radius:24px;background:#fffffff5;box-shadow:0 3px 12px #17213b0b;color:#65738a;font-size:11px;z-index:5}.assistant-session-hud .assistant-session-copy{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.assistant-session-hud[data-phase=listening]{border-color:#a8b9df;color:#365484}.assistant-session-hud[data-phase=error]{border-color:#e7c4b3;color:#925638}.assistant-visual-portal{display:contents}
 :host{all:initial;position:fixed;inset:0;z-index:2147483000;pointer-events:none;font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#17213b;font-size:14px;line-height:1.5;color-scheme:light;--gk-accent:#365cf5}
 *{box-sizing:border-box}button,textarea,select{font:inherit}button{cursor:pointer}button:disabled{cursor:not-allowed;opacity:.5}button:focus-visible,textarea:focus-visible,select:focus-visible,summary:focus-visible{outline:3px solid #a7b8ff;outline-offset:3px}button{border:0}svg{width:18px;height:18px;flex-shrink:0} [hidden]{display:none!important}
 .launcher{pointer-events:auto;position:fixed;right:24px;bottom:24px;display:flex;align-items:center;gap:10px;background:var(--gk-accent);color:#fff;border-radius:40px;padding:15px 19px;font-weight:650;box-shadow:0 5px 20px #23386838;transition:transform .18s,box-shadow .18s}.launcher:hover{transform:translateY(-2px);box-shadow:0 8px 24px #23386845}
@@ -109,6 +112,18 @@ export class View {
   private readonly voicePreview: HTMLButtonElement;
   private voiceHandlers: VoiceSettingsHandlers | null = null;
   private voiceChoices = '';
+  private readonly modeRow = element('div', 'assistant-mode-row');
+  private readonly sessionRow = element('div', 'assistant-session-row');
+  private readonly sessionCopy = element('span', 'assistant-session-copy');
+  private readonly controlHint = element('span', 'hint', 'Hold Control to talk');
+  private readonly sessionHud = element('div', 'assistant-session-hud');
+  private readonly hudCopy = element('span', 'assistant-session-copy');
+  private readonly visualContainer = element('div', 'assistant-visual-portal');
+  private readonly visualLoader: VisualViewerLoader;
+  private readonly showModel: HTMLButtonElement;
+  private readonly modeButtons = new Map<AssistantMode, HTMLButtonElement>();
+  private activeSession: AssistantSessionState = { active: false, mode: 'guide', phase: 'inactive', observing: false };
+  private visualVisible = false;
   get opened(): boolean { return this.isOpen && !this.panel.hidden; }
   get guiding(): boolean { return (this.guideSession?.active ?? false) || this.transitionStop !== null; }
   voiceProvider(provider: 'browser' | 'disabled'): void {
@@ -134,7 +149,7 @@ export class View {
     this.voiceNote.textContent = state.message;
   }
 
-  constructor(private readonly handlers: { open(): void; close(): void; submit(message: string): void; cancel(): void; mic(): void; speaker(): void; guideStep?(text: string, events: SpeechEvents): boolean; guidePause?(): void; guideFinish?(result: GuidanceResult): void; }) {
+  constructor(private readonly handlers: { open(): void; close(): void; submit(message: string): void; cancel(): void; mic(): void; speaker(): void; mode?(mode: AssistantMode): void; stopSession?(): void; guideStep?(text: string, events: SpeechEvents): boolean; guidePause?(): void; guideFinish?(result: GuidanceResult): void; }) {
     this.host.dataset.guidekitRoot = ''; this.host.dataset.guidekitPrivate = '';
     // aria-hidden's hideOthers (used by Radix) preserves explicit live-region
     // roots. Keep this owned overlay available; only its authored child regions
@@ -142,6 +157,20 @@ export class View {
     this.host.setAttribute('aria-live', 'off');
     this.shadow = this.host.attachShadow({ mode: 'open' });
     const style = element('style'); style.textContent = styles; this.shadow.append(style);
+    this.visualLoader = new VisualViewerLoader(this.visualContainer, loadVerifiedViewer, () => { this.hideVisual(); this.open(); });
+    const modes = element('div', 'assistant-modes'); modes.setAttribute('role', 'group'); modes.setAttribute('aria-label', 'Assistant mode');
+    for (const [mode, label] of [['guide', 'Guide me'], ['explain', 'Explain']] as const) {
+      const select = button(label, '', () => { if (mode === 'explain') this.visualLoader.preload(); this.handlers.mode?.(mode); }); select.setAttribute('aria-pressed', String(mode === 'guide')); modes.append(select); this.modeButtons.set(mode, select);
+    }
+    this.showModel = button('Show model', 'assistant-show-model', () => { this.visualLoader.show(); this.visualVisible = true; this.updateSessionChrome(); }); this.showModel.setAttribute('aria-label', 'Reopen 3D explanation'); this.showModel.hidden = true;
+    this.modeRow.append(modes, this.showModel); this.modeRow.hidden = !handlers.mode;
+    const stopSession = () => this.handlers.stopSession?.();
+    const sessionStop = button('Stop session', 'assistant-session-stop', stopSession), hudStop = button('Stop session', 'assistant-session-stop', stopSession);
+    this.controlHint.style.fontSize = '9px'; this.controlHint.style.flex = '0 0 auto';
+    this.sessionRow.append(element('span', 'assistant-session-dot'), this.sessionCopy, this.controlHint, sessionStop); this.sessionRow.hidden = true;
+    this.sessionCopy.setAttribute('role', 'status'); this.sessionCopy.setAttribute('aria-live', 'polite'); this.sessionCopy.setAttribute('aria-atomic', 'true');
+    this.hudCopy.setAttribute('role', 'status'); this.hudCopy.setAttribute('aria-live', 'polite'); this.hudCopy.setAttribute('aria-atomic', 'true');
+    this.sessionHud.append(element('span', 'assistant-session-dot'), this.hudCopy, hudStop); this.sessionHud.hidden = true;
     this.launcher = button('', 'launcher', handlers.open); this.launcher.append(icon('spark'), element('span', '', 'Ask your assistant')); this.launcher.setAttribute('aria-label', 'Open website assistant');
     this.panel.setAttribute('role', 'dialog'); this.panel.setAttribute('aria-label', 'Website assistant'); this.panel.hidden = true;
     const header = element('header', 'header'); this.cursorDock.dataset.gkCursorDock = ''; this.cursorDock.setAttribute('aria-hidden', 'true');
@@ -176,7 +205,7 @@ export class View {
       session.setPaused(false);
       if (this.guideSession === session && session.active) { this.guideVisibility?.(true); session.refresh(); this.guideFocus?.(); }
     }); this.resumeGuide.hidden = true;
-    this.panel.append(header, this.voicePreferences, this.messages, this.statusNode, this.resumeGuide, form, this.voiceLabel, footer); this.shadow.append(this.launcher, this.panel);
+    this.panel.append(header, this.modeRow, this.sessionRow, this.voicePreferences, this.messages, this.statusNode, this.resumeGuide, form, this.voiceLabel, footer); this.shadow.append(this.launcher, this.panel, this.visualContainer, this.sessionHud);
     document.body.append(this.host);
     this.motion = new MotionDirector(this.shadow); this.motion.setVisible(false);
     this.dockResize = new ResizeObserver(this.dockLayout); this.dockResize.observe(this.panel);
@@ -195,8 +224,37 @@ export class View {
       this.guideChatOpen = true; this.guideSession?.setPaused(true); this.guideVisibility?.(false); this.handlers.guidePause?.(); this.resumeGuide.hidden = false;
     }
     this.isOpen = true; this.panel.hidden = false; this.launcher.hidden = true; this.input.focus({ preventScroll: true }); this.dockCursor(returning);
+    this.updateSessionChrome();
   }
-  close(): void { this.clearGuide(false); this.isOpen = false; this.panel.hidden = true; this.launcher.hidden = false; this.departDock(); this.motion.erase({ animate: false }); this.motion.setVisible(false); if (this.previousFocus?.isConnected) this.previousFocus.focus({ preventScroll: true }); }
+  close(): void { this.hideVisual(); this.clearGuide(false); this.isOpen = false; this.panel.hidden = true; this.launcher.hidden = false; this.departDock(); this.motion.erase({ animate: false }); this.motion.setVisible(false); this.updateSessionChrome(); if (this.previousFocus?.isConnected) this.previousFocus.focus({ preventScroll: true }); }
+  sessionState(state: AssistantSessionState): void {
+    if (this.destroyed) return;
+    this.activeSession = { ...state }; this.host.dataset.gkAssistantMode = state.mode; this.host.dataset.gkSessionPhase = state.phase; this.host.dataset.gkSessionActive = String(state.active); this.host.dataset.gkObserving = String(state.observing);
+    for (const [mode, button] of this.modeButtons) button.setAttribute('aria-pressed', String(mode === state.mode));
+    if (state.active && state.mode === 'explain') this.visualLoader.preload();
+    this.updateSessionChrome();
+  }
+  private updateSessionChrome(): void {
+    const state = this.activeSession;
+    const labels = { inactive: 'Choose a mode to begin', observing: state.observing ? 'Observing this page' : 'Session active', starting: 'Starting microphone…', listening: 'Listening — release Control to send', finalizing: 'Finishing transcript…', reading: 'Reading this page…', thinking: 'Thinking…', presenting: 'Showing explanation…', paused: 'Session paused', error: 'Something needs attention' };
+    const text = labels[state.phase]; if (this.sessionCopy.textContent !== text) this.sessionCopy.textContent = text; if (this.hudCopy.textContent !== text) this.hudCopy.textContent = text;
+    this.sessionRow.hidden = !state.active || this.visualVisible; this.sessionRow.dataset.observing = String(state.observing);
+    this.controlHint.hidden = state.phase !== 'observing' || this.mic.disabled;
+    this.sessionHud.hidden = !state.active || this.opened && !this.visualVisible; this.sessionHud.dataset.phase = state.phase; this.sessionHud.dataset.observing = String(state.observing);
+  }
+  pauseGuidance(): void { this.guideSession?.setPaused(true); }
+  resumeGuidance(): void { this.guideSession?.setPaused(false); }
+  async presentVisual(scene: VisualScene, runId: string): Promise<VisualPresentation> {
+    if (this.destroyed) throw new DOMException('The assistant was destroyed.', 'AbortError');
+    const presentation = await this.visualLoader.present(scene, runId);
+    if (this.destroyed) throw new DOMException('The assistant was destroyed.', 'AbortError');
+    this.visualVisible = true; this.showModel.hidden = false; this.updateSessionChrome(); return presentation;
+  }
+  visualSelection(): VisualSelection | null { return this.visualLoader.selection(); }
+  focusVisualObject(id: string): boolean { return this.visualVisible && this.visualLoader.focusObject(id); }
+  cancelVisualPresentation(): void { this.visualLoader.cancelPresentation(); }
+  hideVisual(): void { this.visualLoader.hide(); this.visualVisible = false; this.updateSessionChrome(); }
+  clearVisual(): void { this.visualLoader.clear(); this.visualVisible = false; this.showModel.hidden = true; this.updateSessionChrome(); }
   status(message: string, error = false): void { this.statusNode.textContent = message; this.statusNode.dataset.error = String(error); }
   busy(value: boolean): void { this.isBusy = value; this.cursorActivity(); this.send.disabled = value; this.stop.hidden = !value; this.input.setAttribute('aria-busy', String(value)); }
   message(role: 'user' | 'assistant' | 'error', text: string, citations: Citation[] = []): HTMLElement {
@@ -244,6 +302,7 @@ export class View {
     const card = element('section', 'guide'); card.setAttribute('aria-label', 'Continuing your task'); card.style.right = '16px'; card.style.bottom = '16px';
     card.append(element('div', 'guide-label', 'Continuing your task'), element('p', '', 'Reading the next part of this page…'), button('Open chat', 'secondary', this.handlers.open), button('Stop guidance', 'secondary', stop));
     this.shadow.append(card); this.transitionStop = stop; this.transitionCleanup = () => card.remove();
+    this.updateSessionChrome();
   }
   offerJourneyResume(goal: string, resume: () => void, dismiss: () => void): void {
     const card = this.message('assistant', `Continue your previous task? ${goal}`), controls = element('div', 'action-foot');
@@ -588,7 +647,7 @@ export class View {
     for (const event of ['transitionrun', 'transitionend', 'transitioncancel', 'animationstart', 'animationend', 'animationcancel']) document.addEventListener(event, hostMotion, true);
     document.addEventListener('visibilitychange', visibility);
     motionPreference.addEventListener('change', preferenceChanged);
-    session.start();
+    session.start(); this.updateSessionChrome();
   }
   clearGuide(restoreChat = true): void {
     const hadGuide = !!this.guideSession || !!this.transitionCleanup; this.guideSession = null;
@@ -597,11 +656,11 @@ export class View {
     if (hadGuide && restoreChat) this.restoreChat();
   }
   destroy(): void {
-    this.destroyed = true; this.clearGuide(false); this.departDock(); this.motion.destroy(); this.dockResize.disconnect();
+    this.destroyed = true; this.clearVisual(); this.visualLoader.dispose(); this.clearGuide(false); this.departDock(); this.motion.destroy(); this.dockResize.disconnect();
     window.removeEventListener('resize', this.dockLayout); window.visualViewport?.removeEventListener('resize', this.dockLayout); window.visualViewport?.removeEventListener('scroll', this.dockLayout); document.removeEventListener('visibilitychange', this.dockLayout); this.host.remove();
   }
   private cursorActivity(): void { if (this.cursorDocked && !this.destroyed) this.motion.setActivity(this.recording || this.speaking ? 'speaking' : this.isBusy ? 'waiting' : 'pointing'); }
-  private restoreChat(): void { this.isOpen = true; this.panel.hidden = false; this.launcher.hidden = true; this.scroll(); this.dockCursor(true); }
+  private restoreChat(): void { this.isOpen = true; this.panel.hidden = false; this.launcher.hidden = true; this.scroll(); this.dockCursor(true); this.updateSessionChrome(); }
   private departDock(): void { this.cursorDocked = false; this.lastDock = null; cancelAnimationFrame(this.dockFrame); this.dockFrame = 0; }
   private dockCursor(animate: boolean): void {
     if (this.destroyed || !this.opened) return;
